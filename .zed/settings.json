@@ -1,0 +1,6 @@
+{
+  "prettier": {
+    "allowed": false
+  },
+  "enable_language_server": true
+}
