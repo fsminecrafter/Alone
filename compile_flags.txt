@@ -1,0 +1,3 @@
+-I/opt/devkitpro/devkitARM/arm-none-eabi/include
+-I/opt/devkitpro/libnds/include
+-DARM9
