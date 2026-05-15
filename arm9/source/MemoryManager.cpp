@@ -81,7 +81,9 @@ bool MemoryManager::openSwap()
 {
     if (swapFd) return true;
     swapFd = fopen(SWAP_PATH, "r+b");
-    return swapFd != nullptr;
+    if (!swapFd) return false;
+    setvbuf(swapFd, nullptr, _IONBF, 0);
+    return true;
 }
 
 void MemoryManager::closeSwap()
@@ -132,7 +134,7 @@ void* MemoryManager::allocPage()
     for (u32 i = 0; i < totalPages; i++) {
         if (table[i].used) continue;
 
-        void* buf = memalign(SWAP_PAGE_SIZE, SWAP_PAGE_SIZE);
+        void* buf = malloc(SWAP_PAGE_SIZE);
         if (!buf) return nullptr;
 
         memset(buf, 0, SWAP_PAGE_SIZE);

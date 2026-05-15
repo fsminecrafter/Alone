@@ -28,6 +28,7 @@ bool ChunkLibrary::loadWorld(const char* path)
 {
     worldFd = fopen(path, "rb");
     if (!worldFd) return false;
+    setvbuf(worldFd, nullptr, _IONBF, 0);
 
     WorldHeader hdr;
     if (fread(&hdr, sizeof(hdr), 1, worldFd) != 1)    return false;
@@ -96,17 +97,20 @@ void ChunkLibrary::uploadTexture(u16 idx)
     glGenTextures(1, &t.glTexId);
     glBindTexture(0, t.glTexId);
 
-    // widthLog2 3=8px, so subtract 3 to get GL_TEXTURE_SIZE_ENUM offset
+    // widthLog2 3=8px, subtract 3 to get GL_TEXTURE_SIZE_ENUM offset
     GL_TEXTURE_SIZE_ENUM w = (GL_TEXTURE_SIZE_ENUM)(t.widthLog2  - 3);
     GL_TEXTURE_SIZE_ENUM h = (GL_TEXTURE_SIZE_ENUM)(t.heightLog2 - 3);
 
     glTexImage2D(0, 0, (GL_TEXTURE_TYPE_ENUM)t.format,
                  w, h, 0, TEXGEN_TEXCOORD, t.data);
+
+    // Data is now in VRAM — free the heap copy immediately.
+    free(t.data);
+    t.data = nullptr;
 }
 
 // ---------------------------------------------------------------------------
-// Index chunks — read all ChunkEntry headers, record file offsets,
-// skip vertex data so we land at the next entry.
+// Index chunks
 // ---------------------------------------------------------------------------
 bool ChunkLibrary::indexChunks()
 {
@@ -178,15 +182,16 @@ void ChunkLibrary::render()
 
 void ChunkLibrary::renderChunk(Chunk* c)
 {
-    // Chunk world origin in f32 fixed-point
-    s32 originX = floattof32((float)(c->gridX * CHUNK_WORLD_UNIT));
-    s32 originZ = floattof32((float)(c->gridZ * CHUNK_WORLD_UNIT));
+    // Chunk world origin in float world units
+    float originX = (float)(c->gridX * CHUNK_WORLD_UNIT);
+    float originZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
 
     u8 lastTexId = 0xFE; // force bind on first vertex
 
-    // No lighting for now — vertex colour only, cull nothing (top-down safe)
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
-
+    // POLY_ID(1)          — must differ from clear poly ID (63).
+    // POLY_FORMAT_LIGHT0  — opt this polygon into hardware light 0.
+    //                       Without this flag lighting is ignored entirely.
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1) | POLY_FORMAT_LIGHT0);
     glBegin(GL_TRIANGLES);
 
     for (u16 vi = 0; vi < c->vertCount; vi++) {
@@ -195,25 +200,30 @@ void ChunkLibrary::renderChunk(Chunk* c)
         if (v.texId != lastTexId) {
             glEnd();
             bindTexture(v.texId);
-            glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
+            glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1) | POLY_FORMAT_LIGHT0);
             glBegin(GL_TRIANGLES);
             lastTexId = v.texId;
         }
 
+        // glColor3b in libnds takes uint8 (0-255) and shifts >>3 internally
+        // to produce a 5-bit BGR15 channel.  Pass raw u8 — do NOT pre-shift.
         glColor3b(v.r, v.g, v.b);
 
         if (v.texId != 0xFF)
             glTexCoord2t16(v.u, v.v);
 
+        // Normal MUST come before glVertex — NDS latches it per-vertex.
+        // Fall back to straight-up if the vertex has no normal baked in.
         if (v.nx || v.ny || v.nz)
             glNormal3f(f32tofloat(v.nx), f32tofloat(v.ny), f32tofloat(v.nz));
+        else
+            glNormal3f(0.0f, 1.0f, 0.0f);
 
-        // Add chunk origin to local vertex position (both in f32)
-        glVertex3v16(
-            (s16)((v.x + originX) >> 12),
-            (s16)(v.y >> 12),
-            (s16)((v.z + originZ) >> 12)
-        );
+        // v.x/y/z are stored as NDS f32 fixed-point (float * 4096).
+        // f32tofloat() converts back; add the chunk's world origin.
+        glVertex3f(f32tofloat(v.x) + originX,
+                   f32tofloat(v.y),
+                   f32tofloat(v.z) + originZ);
     }
 
     glEnd();
@@ -262,37 +272,37 @@ bool ChunkLibrary::loadChunk(ChunkDesc* desc, Chunk* slot)
 {
     u32 byteSize = sizeof(ChunkVertex) * desc->vertCount;
 
-    // Allocate via MemoryManager if available, else plain malloc
-    ChunkVertex* buf;
-    if (memMgr)
-        buf = (ChunkVertex*)memMgr->allocPage();
-    else
-        buf = (ChunkVertex*)malloc(byteSize);
-
+    // Always use plain malloc sized to the actual data.
+    // allocPage() always requests SWAP_PAGE_SIZE (4096) bytes regardless of
+    // how small the chunk is — a 6-vertex chunk only needs 120 bytes, but
+    // allocPage would demand 4096, which fails when heap is nearly full.
+    ChunkVertex* buf = (ChunkVertex*)malloc(byteSize);
     if (!buf) return false;
 
     fseek(worldFd, (long)(desc->fileOffset + sizeof(ChunkEntry)), SEEK_SET);
     if (fread(buf, sizeof(ChunkVertex), desc->vertCount, worldFd) != desc->vertCount) {
-        if (memMgr) memMgr->freePage(buf); else free(buf);
+        free(buf);
         return false;
     }
 
-    slot->verts     = buf;
-    slot->gridX     = desc->gridX;
-    slot->gridZ     = desc->gridZ;
-    slot->vertCount = desc->vertCount;
-    slot->polyCount = desc->polyCount;
+    slot->verts      = buf;
+    slot->gridX      = desc->gridX;
+    slot->gridZ      = desc->gridZ;
+    slot->vertCount  = desc->vertCount;
+    slot->polyCount  = desc->polyCount;
+    slot->usedMemMgr = false;   // always plain malloc now
     return true;
 }
 
 void ChunkLibrary::unloadChunk(Chunk* slot)
 {
     if (!slot->verts) return;
-    if (memMgr) memMgr->freePage(slot->verts);
-    else        free(slot->verts);
-    slot->verts     = nullptr;
-    slot->vertCount = 0;
-    slot->polyCount = 0;
+    if (slot->usedMemMgr) memMgr->freePage(slot->verts);
+    else                  free(slot->verts);
+    slot->verts      = nullptr;
+    slot->vertCount  = 0;
+    slot->polyCount  = 0;
+    slot->usedMemMgr = false;
 }
 
 u32 ChunkLibrary::loadedChunkCount() const

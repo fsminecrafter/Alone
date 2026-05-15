@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 class MemoryManager;  // forward — include MemoryManager.h before this header
 
@@ -12,7 +13,7 @@ class MemoryManager;  // forward — include MemoryManager.h before this header
 // Limits
 // ---------------------------------------------------------------------------
 #define CHUNK_MAX_TEXTURES  8
-#define CHUNK_GRID_RADIUS   1
+#define CHUNK_GRID_RADIUS   2
 #define CHUNK_GRID_SIZE     ((CHUNK_GRID_RADIUS*2+1)*(CHUNK_GRID_RADIUS*2+1))
 #define CHUNK_WORLD_UNIT    16      // world-space units per chunk side
 
@@ -42,13 +43,19 @@ struct TextureEntry {
     // followed by dataBytes of raw texel data
 };
 
-// Vertex baked by editor — bottom faces already stripped
+// Vertex baked by the editor.
+// x, y, z  — local position in NDS f32 fixed-point (float * 4096), stored as
+//             s16.  Range: ±8.0 world units fits in ±32768 fp units, exactly
+//             at the s16 limit.  The editor clamps values before writing.
+// nx,ny,nz — surface normal in f32, zero = unused.
+// texId    — 0xFF = no texture.
+// u, v     — NDS t16 texture coordinates (texel * 16).
 struct ChunkVertex {
-    s16   x, y, z;      // local position in f32 fixed-point (floattof32)
-    s16   nx, ny, nz;   // normal in f32, zero = unused
-    u8    r, g, b;      // vertex colour 0-255
-    u8    texId;         // 0xFF = no texture
-    t16   u, v;          // texture coords (t16 = NDS texcoord fixed-point)
+    s16   x, y, z;
+    s16   nx, ny, nz;
+    u8    r, g, b;
+    u8    texId;
+    t16   u, v;
 };
 
 struct ChunkEntry {
@@ -77,6 +84,7 @@ struct Chunk {
     u16           vertCount;
     u16           polyCount;
     ChunkVertex*  verts;        // nullptr = slot free
+    bool          usedMemMgr;   // true = free via MemoryManager, false = free()
 };
 
 // ---------------------------------------------------------------------------
@@ -99,6 +107,19 @@ public:
     u32  loadedChunkCount() const;
     u32  totalChunkCount()  const { return worldChunkCount; }
     u32  lastFramePolys()   const { return framePolyCount; }
+
+    // World-space centre of the first chunk in the file — use to start camera.
+    void getChunk0WorldPos(float& outX, float& outZ) const {
+        if (worldChunkCount == 0) { outX = 0.0f; outZ = 0.0f; return; }
+        outX = chunkDesc[0].gridX * (float)CHUNK_WORLD_UNIT;
+        outZ = chunkDesc[0].gridZ * (float)CHUNK_WORLD_UNIT;
+    }
+
+    // Debug: read back a chunk descriptor by index
+    void getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const {
+        if (idx < worldChunkCount) { gx=chunkDesc[idx].gridX; gz=chunkDesc[idx].gridZ; vc=chunkDesc[idx].vertCount; }
+        else { gx=gz=0; vc=0; }
+    }
 
 private:
     MemoryManager* memMgr;
@@ -135,5 +156,10 @@ private:
     void  renderChunk(Chunk* c);
     void  bindTexture(u8 texId);
 
-    static s16 toGrid(float w) { return (s16)(w / CHUNK_WORLD_UNIT); }
+    // FIX: use floorf so negative coords round toward -inf, not zero.
+    // Without this, toGrid(-0.1) returns 0 instead of -1, so the camera
+    // sits in the wrong grid cell and nearby chunks are never requested.
+    static s16 toGrid(float w) {
+        return (s16)floorf(w / (float)CHUNK_WORLD_UNIT);
+    }
 };
