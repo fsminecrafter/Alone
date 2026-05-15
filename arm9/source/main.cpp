@@ -3,22 +3,9 @@
 #include <stdio.h>
 #include "MemoryManager.h"
 #include "ChunkLibrary.h"
+#include "lighting.h"
 
-// ---------------------------------------------------------------------------
-// Lighting parameters — edit these to change how the scene looks.
-// ---------------------------------------------------------------------------
-// Direction the light comes FROM (need not be normalised — code normalises it).
-// (0, 1, 0) = directly overhead. Tilt X/Z for side-lit shadows on walls.
-#define LIGHT_DIR_X   ( 0.4f)
-#define LIGHT_DIR_Y   ( 1.0f)
-#define LIGHT_DIR_Z   (-0.3f)
-
-// Ambient: minimum brightness of any surface (0.0 = black shadows, 1.0 = flat lit).
-#define LIGHT_AMBIENT  0.30f
-
-// Diffuse: extra brightness added on fully-lit faces.
-// Ambient + Diffuse should be <= 1.0 or lit faces will saturate/clamp.
-#define LIGHT_DIFFUSE  0.70f
+float g_lightX, g_lightY, g_lightZ;
 
 // ---------------------------------------------------------------------------
 // Screens + VRAM
@@ -74,47 +61,6 @@ static void applyCamera(float px, float pz)
         0.0f,  1.0f, 0.0f
     );
 }
-
-// ---------------------------------------------------------------------------
-// Software lighting helper
-// ---------------------------------------------------------------------------
-// Normalised light direction (world space, toward the light).
-// Computed once at startup from the #define'd constants.
-static float s_lightX, s_lightY, s_lightZ;
-
-static void initLight()
-{
-    float mag = sqrtf(LIGHT_DIR_X*LIGHT_DIR_X +
-                      LIGHT_DIR_Y*LIGHT_DIR_Y +
-                      LIGHT_DIR_Z*LIGHT_DIR_Z);
-    if (mag < 0.0001f) mag = 1.0f;
-    s_lightX = LIGHT_DIR_X / mag;
-    s_lightY = LIGHT_DIR_Y / mag;
-    s_lightZ = LIGHT_DIR_Z / mag;
-}
-
-// Compute a lighting scale [0..1] for a surface normal (nx,ny,nz).
-// Returns ambient + diffuse * max(0, dot(N, L)).
-static inline float lightScale(float nx, float ny, float nz)
-{
-    float dot = nx*s_lightX + ny*s_lightY + nz*s_lightZ;
-    if (dot < 0.0f) dot = 0.0f;
-    float scale = LIGHT_AMBIENT + LIGHT_DIFFUSE * dot;
-    if (scale > 1.0f) scale = 1.0f;
-    return scale;
-}
-
-// Apply lighting scale to a u8 RGB and submit via glColor3b.
-// glColor3b in libnds takes uint8 (0-255) and shifts >>3 internally.
-static inline void glColorLit(u8 r, u8 g, u8 b, float scale)
-{
-    glColor3b(
-        (u8)(r * scale),
-        (u8)(g * scale),
-        (u8)(b * scale)
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Test floor — shown when no world.world found
 // ---------------------------------------------------------------------------

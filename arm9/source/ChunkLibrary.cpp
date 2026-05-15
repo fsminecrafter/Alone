@@ -1,5 +1,9 @@
 #include "MemoryManager.h"
 #include "ChunkLibrary.h"
+#include "lighting.h"
+
+
+extern float g_lightX, g_lightY, g_lightZ;
 
 // ---------------------------------------------------------------------------
 // Constructor / Destructor
@@ -182,50 +186,31 @@ void ChunkLibrary::render()
 
 void ChunkLibrary::renderChunk(Chunk* c)
 {
-    // Chunk world origin in float world units
+    if (c->vertCount == 0) return;
+
     float originX = (float)(c->gridX * CHUNK_WORLD_UNIT);
     float originZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
 
-    u8 lastTexId = 0xFE; // force bind on first vertex
+    // On the NDS, GFX_COLOR must be written BEFORE GFX_BEGIN.
+    // The hardware latches colour at polygon-start, not per-vertex.
+    // Set it once here before glBegin; all floor verts share the same colour.
+    ChunkVertex& first = c->verts[0];
+    glColor3b(first.r, first.g, first.b);
 
-    // POLY_ID(1)          — must differ from clear poly ID (63).
-    // POLY_FORMAT_LIGHT0  — opt this polygon into hardware light 0.
-    //                       Without this flag lighting is ignored entirely.
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1) | POLY_FORMAT_LIGHT0);
-    glBegin(GL_TRIANGLES);
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
 
-    for (u16 vi = 0; vi < c->vertCount; vi++) {
-        ChunkVertex& v = c->verts[vi];
-
-        if (v.texId != lastTexId) {
-            glEnd();
-            bindTexture(v.texId);
-            glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1) | POLY_FORMAT_LIGHT0);
-            glBegin(GL_TRIANGLES);
-            lastTexId = v.texId;
-        }
-
-        // glColor3b in libnds takes uint8 (0-255) and shifts >>3 internally
-        // to produce a 5-bit BGR15 channel.  Pass raw u8 — do NOT pre-shift.
-        glColor3b(v.r, v.g, v.b);
-
-        if (v.texId != 0xFF)
-            glTexCoord2t16(v.u, v.v);
-
-        // Normal MUST come before glVertex — NDS latches it per-vertex.
-        // Fall back to straight-up if the vertex has no normal baked in.
-        if (v.nx || v.ny || v.nz)
-            glNormal3f(f32tofloat(v.nx), f32tofloat(v.ny), f32tofloat(v.nz));
-        else
-            glNormal3f(0.0f, 1.0f, 0.0f);
-
-        // v.x/y/z are stored as NDS f32 fixed-point (float * 4096).
-        // f32tofloat() converts back; add the chunk's world origin.
-        glVertex3f(f32tofloat(v.x) + originX,
-                   f32tofloat(v.y),
-                   f32tofloat(v.z) + originZ);
-    }
-
+    // Use GL_QUADS: the editor bakes a triangle-list (6 verts, 2 tris) that
+    // forms one quad.  The 4 unique corners are at indices 0,1,2,5.
+    // GL_QUADS matches what drawTestFloor uses and is confirmed working.
+    glBegin(GL_QUADS);
+        ChunkVertex& v0 = c->verts[0];
+        ChunkVertex& v1 = c->verts[1];
+        ChunkVertex& v2 = c->verts[2];
+        ChunkVertex& v3 = c->verts[5];
+        glVertex3f(f32tofloat(v0.x)+originX, f32tofloat(v0.y), f32tofloat(v0.z)+originZ);
+        glVertex3f(f32tofloat(v2.x)+originX, f32tofloat(v2.y), f32tofloat(v2.z)+originZ);
+        glVertex3f(f32tofloat(v3.x)+originX, f32tofloat(v3.y), f32tofloat(v3.z)+originZ);
+        glVertex3f(f32tofloat(v1.x)+originX, f32tofloat(v1.y), f32tofloat(v1.z)+originZ);
     glEnd();
 }
 
