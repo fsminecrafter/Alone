@@ -80,7 +80,7 @@ LIBNDS_FORMATS = {
     "RGB8 (A5)":      GL_RGB8_A5,
 }
 
-DS_MAX_TEX_SIZE  = 256
+DS_MAX_TEX_SIZE  = 64
 DS_MAX_POLYS     = 2048
 DS_VRAM_BYTES    = 512 * 1024
 
@@ -187,6 +187,7 @@ class DSTexture:
         self.name     = name
         self.pil_img  = None        # PIL Image (always RGBA in editor)
         self.gl_tex   = None        # OpenGL handle (editor side)
+        self._rgba_cache = None     # numpy RGBA for viewport CPU sampling
 
     def width_log2(self):  return int(math.log2(self.width))
     def height_log2(self): return int(math.log2(self.height))
@@ -209,6 +210,18 @@ class DSTexture:
                 if len(arr) >= expected:
                     arr = arr[:expected].reshape(self.height, self.width, 4)
                     self.pil_img = Image.fromarray(arr, "RGBA")
+                    return self.pil_img
+                # DS-ified 16-bit packed data (2 bytes per pixel)
+                expected16 = self.width * self.height * 2
+                if len(arr) >= expected16:
+                    packed = np.frombuffer(self.data[:expected16], dtype=np.uint16)
+                    packed = packed.reshape(self.height, self.width)
+                    r = ((packed & 0x1F) << 3).astype(np.uint8)
+                    g = (((packed >> 5) & 0x1F) << 3).astype(np.uint8)
+                    b = (((packed >> 10) & 0x1F) << 3).astype(np.uint8)
+                    a = np.where(packed & 0x8000, 255, 0).astype(np.uint8)
+                    rgba = np.dstack([r, g, b, a])
+                    self.pil_img = Image.fromarray(rgba, "RGBA")
                     return self.pil_img
             except Exception:
                 pass
@@ -330,13 +343,13 @@ class DSChunk:
         return verts
 
     # Legacy alias — rebuilds just the 6-vert floor quad at vertices[0:6]
-    def bake_floor_to_vertices(self):
-        """Replace self.vertices floor section (first 6 verts) with baked floor quad."""
-        floor_verts = self.bake_to_vertices(world=None)[:6]
+    def bake_floor_to_vertices(self, world: "WorldFile | None" = None):
+        """Replace or prepend the 6-vert floor quad at vertices[0:6]."""
+        floor_verts = self.bake_to_vertices(world=world)[:6]
         if len(self.vertices) >= 6:
             self.vertices[:6] = floor_verts
         else:
-            self.vertices = floor_verts
+            self.vertices = floor_verts + self.vertices
 
     def pack(self):
         hdr = struct.pack("<2h2H",
@@ -492,7 +505,7 @@ class WorldFile:
                         t.g = td2.get("g", 180)
                         t.b = td2.get("b", 180)
                 # Rebuild floor verts so viewport can draw them (6 verts = 1 quad)
-                chunk.bake_floor_to_vertices()
+                chunk.bake_floor_to_vertices(w)
                 for vd in cd.get("object_verts", []):
                     chunk.vertices.append(DSVertex(
                         x=vd["x"], y=vd["y"], z=vd["z"],
@@ -544,8 +557,11 @@ class WorldFile:
         return 0
 
     def texture_by_id(self, tid) -> DSTexture | None:
+        if tid is None or int(tid) == NO_TEX:
+            return None
+        tid = int(tid)
         for t in self.textures:
-            if t.tex_id == tid:
+            if int(t.tex_id) == tid:
                 return t
         return None
 
@@ -573,6 +589,44 @@ def next_power_of_two(n):
     while p < n:
         p <<= 1
     return p
+
+
+def _texture_rgba_array(tex: "DSTexture") -> np.ndarray | None:
+    """Cached RGBA uint8 array (H, W, 4) for fast sampling."""
+    if getattr(tex, "_rgba_cache", None) is not None:
+        return tex._rgba_cache
+    img = tex.get_pil()
+    if img is None:
+        return None
+    tex._rgba_cache = np.array(img.convert("RGBA"), dtype=np.uint8)
+    return tex._rgba_cache
+
+
+def sample_ds_texture(tex: "DSTexture", u_t16: int, v_t16: int) -> tuple[int, int, int]:
+    """Sample an editor texture at NDS t16 coords (texel * 16). Returns RGB 0..255."""
+    arr = _texture_rgba_array(tex)
+    if arr is None:
+        return 255, 255, 255
+    h, w = arr.shape[:2]
+    tx = (int(u_t16) // 16) % w
+    ty = h - 1 - ((int(v_t16) // 16) % h)
+    r, g, b = arr[ty, tx, :3]
+    return int(r), int(g), int(b)
+
+
+def sample_ds_texture_uv(tex: "DSTexture", u: float, v: float,
+                          *, flip_v: bool = False) -> tuple[int, int, int]:
+    """Sample at normalized UV (0..1 per tile repeat), nearest texel."""
+    arr = _texture_rgba_array(tex)
+    if arr is None:
+        return 255, 255, 255
+    h, w = arr.shape[:2]
+    tx = int(u * w) % w
+    ty = int(v * h) % h
+    if flip_v:
+        ty = h - 1 - ty
+    r, g, b = arr[ty, tx, :3]
+    return int(r), int(g), int(b)
 
 
 def dsify_image(pil_img, max_size=DS_MAX_TEX_SIZE, fmt=GL_RGBA):
@@ -696,6 +750,7 @@ def import_model_as_chunk(filepath, tex_id=NO_TEX, grid_x=0, grid_z=0,
                 r=200, g=200, b=200, tex_id=tex_id,
                 u=u, v=v,
             ))
+    chunk.bake_floor_to_vertices(world=world)
     return chunk
 
 
@@ -722,6 +777,13 @@ class Viewport(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self._gl_textures: dict[int, int] = {}
+        self._vp_w = 1
+        self._vp_h = 1
+        # Default projection — overwritten by resizeGL before first paint
+        self._proj = self._perspective_matrix(45.0, 1.0, 0.5, 2000.0)
+        # Shader program handles — set in initializeGL
+        self._prog_chunk = 0
+        self._prog_flat  = 0
 
     def set_world(self, world):
         self.world = world
@@ -733,18 +795,101 @@ class Viewport(QOpenGLWidget):
         self.selected_chunk  = indices[0] if len(indices) == 1 else -1
         self.update()
 
+    # ------------------------------------------------------------------
+    # Shader sources
+    # ------------------------------------------------------------------
+    _VERT_SRC = """
+#version 120
+uniform mat4 u_mvp;
+attribute vec3 a_pos;
+attribute vec3 a_color;
+attribute vec2 a_uv;
+varying vec3 v_color;
+varying vec2 v_uv;
+void main() {
+    gl_Position = u_mvp * vec4(a_pos, 1.0);
+    v_color = a_color;
+    v_uv    = a_uv;
+}
+"""
+    _FRAG_TEXTURED_SRC = """
+#version 120
+uniform sampler2D u_tex;
+uniform int       u_has_tex;
+varying vec3 v_color;
+varying vec2 v_uv;
+void main() {
+    vec4 t    = texture2D(u_tex, v_uv);
+    vec3 tint = v_color * t.rgb;
+    // mix(v_color, tint, ...) avoids branching on the uniform
+    // u_has_tex == 1 → textured, 0 → vertex colour only
+    float use = float(u_has_tex);
+    gl_FragColor = vec4(mix(v_color, tint, use), 1.0);
+}
+"""
+    _FRAG_FLAT_SRC = """
+#version 120
+varying vec3 v_color;
+void main() {
+    gl_FragColor = vec4(v_color, 1.0);
+}
+"""
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _compile_shader(src, kind):
+        sh = glCreateShader(kind)
+        glShaderSource(sh, src)
+        glCompileShader(sh)
+        if not glGetShaderiv(sh, GL_COMPILE_STATUS):
+            raise RuntimeError(f"Shader compile error:\n{glGetShaderInfoLog(sh).decode()}")
+        return sh
+
+    @staticmethod
+    def _link_program(vert_src, frag_src):
+        vs = Viewport._compile_shader(vert_src, GL_VERTEX_SHADER)
+        fs = Viewport._compile_shader(frag_src, GL_FRAGMENT_SHADER)
+        prog = glCreateProgram()
+        glAttachShader(prog, vs)
+        glAttachShader(prog, fs)
+        # Bind attribute locations before linking so we can reference them by index
+        glBindAttribLocation(prog, 0, "a_pos")
+        glBindAttribLocation(prog, 1, "a_color")
+        glBindAttribLocation(prog, 2, "a_uv")
+        glLinkProgram(prog)
+        if not glGetProgramiv(prog, GL_LINK_STATUS):
+            raise RuntimeError(f"Program link error:\n{glGetProgramInfoLog(prog).decode()}")
+        glDeleteShader(vs)
+        glDeleteShader(fs)
+        return prog
+
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_CULL_FACE)
         glCullFace(GL_BACK)
-        glEnable(GL_LIGHTING)
-        glEnable(GL_LIGHT0)
-        glLightfv(GL_LIGHT0, GL_POSITION, [10.0, 20.0, 10.0, 1.0])
-        glLightfv(GL_LIGHT0, GL_DIFFUSE,  [0.9,  0.9,  0.85, 1.0])
-        glLightfv(GL_LIGHT0, GL_AMBIENT,  [0.3,  0.3,  0.35, 1.0])
-        glEnable(GL_COLOR_MATERIAL)
-        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        glFrontFace(GL_CCW)
         glClearColor(0.10, 0.11, 0.13, 1.0)
+
+        # Shader: chunks (textured or vertex-colour)
+        self._prog_chunk = self._link_program(self._VERT_SRC, self._FRAG_TEXTURED_SRC)
+        self._uloc_mvp_chunk  = glGetUniformLocation(self._prog_chunk, "u_mvp")
+        self._uloc_tex_chunk  = glGetUniformLocation(self._prog_chunk, "u_tex")
+        self._uloc_has_tex    = glGetUniformLocation(self._prog_chunk, "u_has_tex")
+
+        # Shader: flat lines (grid, selection outlines)
+        self._prog_flat  = self._link_program(self._VERT_SRC, self._FRAG_FLAT_SRC)
+        self._uloc_mvp_flat = glGetUniformLocation(self._prog_flat, "u_mvp")
+
+        # 1×1 opaque-white fallback texture — always bound when no real texture is
+        # needed so the sampler uniform is never pointing at an unbound unit
+        self._tex_white = int(glGenTextures(1))
+        glBindTexture(GL_TEXTURE_2D, self._tex_white)
+        white = np.array([255, 255, 255, 255], dtype=np.uint8)
+        # Use 0x1908 (GL_RGBA) as integer to avoid PyOpenGL constant lookup issues
+        glTexImage2D(GL_TEXTURE_2D, 0, 0x1908, 1, 1, 0, 0x1908, GL_UNSIGNED_BYTE, white)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glBindTexture(GL_TEXTURE_2D, 0)
 
     @staticmethod
     def _perspective_matrix(fovy_deg, aspect, near, far):
@@ -772,51 +917,97 @@ class Viewport(QOpenGLWidget):
         return m
 
     def resizeGL(self, w, h):
+        self._vp_w, self._vp_h = max(w, 1), max(h, 1)
         glViewport(0, 0, w, h)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        proj = self._perspective_matrix(45.0, w / max(h, 1), 0.5, 2000.0)
-        glLoadMatrixf(proj.T)
-        glMatrixMode(GL_MODELVIEW)
+        self._proj = self._perspective_matrix(45.0, w / max(h, 1), 0.5, 2000.0)
 
-    def paintGL(self):
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glLoadIdentity()
-        self._apply_camera()
-        if self.grid_visible:
-            self._draw_grid()
-        if self.world:
-            for i, chunk in enumerate(self.world.chunks):
-                self._draw_chunk(chunk, selected=(i in self.selected_chunks))
-
-    def _apply_camera(self):
+    def _build_mvp(self):
+        """Return proj * view as a column-major float32 array for glUniformMatrix4fv."""
         yaw   = math.radians(self.cam_yaw)
         pitch = math.radians(self.cam_pitch)
         cx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
         cy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
         cz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
-        mv = self._lookat_matrix([cx,cy,cz], self.cam_target, [0,1,0])
-        glLoadMatrixf(mv.T)
+        mv = self._lookat_matrix([cx, cy, cz], self.cam_target, [0, 1, 0])
+        mvp = self._proj @ mv
+        return np.ascontiguousarray(mvp.T, dtype=np.float32)
 
-    def _draw_grid(self):
-        glDisable(GL_LIGHTING)
+    def _build_mvp_translated(self, tx, ty, tz):
+        """MVp with an additional translation (for chunk origins)."""
+        T = np.eye(4, dtype=np.float32)
+        T[0, 3] = tx; T[1, 3] = ty; T[2, 3] = tz
+        yaw   = math.radians(self.cam_yaw)
+        pitch = math.radians(self.cam_pitch)
+        cx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
+        cy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
+        cz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
+        mv = self._lookat_matrix([cx, cy, cz], self.cam_target, [0, 1, 0])
+        mvp = self._proj @ mv @ T
+        return np.ascontiguousarray(mvp.T, dtype=np.float32)
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        self._pick_viewport = (0, 0, self._vp_w, self._vp_h)
+
+        mvp = self._build_mvp()
+
+        if self.grid_visible:
+            self._draw_grid(mvp)
+        if self.world:
+            for i, chunk in enumerate(self.world.chunks):
+                self._draw_chunk(chunk, selected=(i in self.selected_chunks), base_mvp=mvp)
+
+        glUseProgram(0)
+
+    # _apply_camera kept for ray-picking which reads cam_yaw/pitch/dist directly
+    def _apply_camera(self):
+        pass
+
+    # ------------------------------------------------------------------
+    # Helper: draw a flat-shaded line list with the flat shader
+    # pts_colors: list of (x,y,z, r,g,b) floats
+    # ------------------------------------------------------------------
+    def _draw_lines(self, mvp, pts_colors, line_width=1.0):
+        if pts_colors is None or (hasattr(pts_colors, '__len__') and len(pts_colors) == 0):
+            return
+        arr = np.array(pts_colors, dtype=np.float32)  # N x 6
+        n   = len(arr)
+        pos = np.ascontiguousarray(arr[:, :3])
+        col = np.ascontiguousarray(arr[:, 3:])
+        uv  = np.zeros((n, 2), dtype=np.float32)
+
+        glUseProgram(self._prog_flat)
+        glUniformMatrix4fv(self._uloc_mvp_flat, 1, GL_FALSE, mvp)
+
+        glEnableVertexAttribArray(0)
+        glEnableVertexAttribArray(1)
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, pos)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, col)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, uv)
+
+        glLineWidth(line_width)
+        glDrawArrays(GL_LINES, 0, n)
         glLineWidth(1.0)
-        glColor3f(0.22, 0.24, 0.27)
+
+        glDisableVertexAttribArray(0)
+        glDisableVertexAttribArray(1)
+        glDisableVertexAttribArray(2)
+
+    def _draw_grid(self, mvp):
         size = 10 * CHUNK_WORLD_UNIT
         step = CHUNK_WORLD_UNIT
-        glBegin(GL_LINES)
+        gc = (0.22, 0.24, 0.27)
+        pts = []
         for i in range(-size, size + step, step):
-            glVertex3f(i, 0, -size); glVertex3f(i, 0,  size)
-            glVertex3f(-size, 0, i); glVertex3f( size, 0, i)
-        glEnd()
-        glLineWidth(2.0)
-        glBegin(GL_LINES)
-        glColor3f(0.8,0.2,0.2); glVertex3f(0,0,0); glVertex3f(8,0,0)
-        glColor3f(0.2,0.8,0.2); glVertex3f(0,0,0); glVertex3f(0,8,0)
-        glColor3f(0.2,0.4,0.9); glVertex3f(0,0,0); glVertex3f(0,0,8)
-        glEnd()
-        glLineWidth(1.0)
-        glEnable(GL_LIGHTING)
+            pts += [i, 0, -size, *gc,  i, 0,  size, *gc]
+            pts += [-size, 0, i, *gc,   size, 0, i, *gc]
+        # axis lines
+        pts += [0,0,0, 0.8,0.2,0.2,  8,0,0, 0.8,0.2,0.2]
+        pts += [0,0,0, 0.2,0.8,0.2,  0,8,0, 0.2,0.8,0.2]
+        pts += [0,0,0, 0.2,0.4,0.9,  0,0,8, 0.2,0.4,0.9]
+        arr = np.array(pts, dtype=np.float32).reshape(-1, 6)
+        self._draw_lines(mvp, arr, line_width=1.0)
 
     def _get_or_upload_texture(self, tex: DSTexture) -> int | None:
         if tex.tex_id in self._gl_textures:
@@ -828,13 +1019,14 @@ class Viewport(QOpenGLWidget):
         glBindTexture(GL_TEXTURE_2D, handle)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
         try:
             img = img.convert("RGBA")
             if img.size != (tex.width, tex.height):
                 img = img.resize((tex.width, tex.height), Image.NEAREST)
-            arr = np.array(img, dtype=np.uint8)
-            # Flip vertically: PIL is top-left origin, OpenGL is bottom-left.
-            arr = np.flipud(arr)
+            arr = np.ascontiguousarray(np.flipud(np.array(img, dtype=np.uint8)))
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                          tex.width, tex.height, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, arr)
@@ -846,141 +1038,233 @@ class Viewport(QOpenGLWidget):
 
     def invalidate_texture(self, tex_id: int):
         """Force re-upload next frame (call after texture data changes)."""
+        if self.world:
+            tex = self.world.texture_by_id(tex_id)
+            if tex:
+                tex._rgba_cache = None
+                tex.pil_img = None
         if tex_id in self._gl_textures:
             self.makeCurrent()
             glDeleteTextures(1, [self._gl_textures.pop(tex_id)])
 
-    def _draw_chunk(self, chunk: DSChunk, selected=False):
-        ox = chunk.grid_x * CHUNK_WORLD_UNIT
-        oz = chunk.grid_z * CHUNK_WORLD_UNIT
+    # ------------------------------------------------------------------
+    # Core triangle-batch draw — shader-based, no legacy state machine
+    # verts_data: list of (x,y,z, r,g,b, u,v)  floats
+    # tex_handle: GL texture handle or None
+    # ------------------------------------------------------------------
+    def _draw_tris(self, mvp, verts_data, tex_handle=None):
+        if verts_data is None or len(verts_data) == 0:
+            return
+        n   = len(verts_data)
+        arr = np.array(verts_data, dtype=np.float32)   # N x 8
+        pos = np.ascontiguousarray(arr[:, 0:3])
+        col = np.ascontiguousarray(arr[:, 3:6])
+        uv  = np.ascontiguousarray(arr[:, 6:8])
 
-        if self.wireframe:
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
-            glDisable(GL_LIGHTING)
-        else:
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-            glEnable(GL_LIGHTING)
+        glUseProgram(self._prog_chunk)
+        glUniformMatrix4fv(self._uloc_mvp_chunk, 1, GL_FALSE, mvp)
+        glUniform1i(self._uloc_tex_chunk, 0)
+
+        has_tex = tex_handle is not None
+        glUniform1i(self._uloc_has_tex, 1 if has_tex else 0)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tex_handle if has_tex else self._tex_white)
+
+        glEnableVertexAttribArray(0)
+        glEnableVertexAttribArray(1)
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, pos)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, col)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, uv)
+
+        glDrawArrays(GL_TRIANGLES, 0, n)
+
+        glDisableVertexAttribArray(0)
+        glDisableVertexAttribArray(1)
+        glDisableVertexAttribArray(2)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+    def _draw_chunk(self, chunk: DSChunk, selected=False, base_mvp=None):
+        ox = float(chunk.grid_x * CHUNK_WORLD_UNIT)
+        oz = float(chunk.grid_z * CHUNK_WORLD_UNIT)
+        mvp = self._build_mvp_translated(ox, 0.0, oz)
 
         if selected:
-            glDisable(GL_LIGHTING)
-            glLineWidth(2.5)
-            glColor3f(1.0, 0.75, 0.1)
-            s = CHUNK_WORLD_UNIT / 2
-            glBegin(GL_LINE_LOOP)
-            glVertex3f(ox-s, 0.15, oz-s); glVertex3f(ox+s, 0.15, oz-s)
-            glVertex3f(ox+s, 0.15, oz+s); glVertex3f(ox-s, 0.15, oz+s)
-            glEnd()
-            glLineWidth(1.0)
-            glEnable(GL_LIGHTING)
+            s  = CHUNK_WORLD_UNIT / 2.0
+            sc = (1.0, 0.75, 0.1)
+            sel_pts = [
+                -s, 0.15, -s, *sc,   s, 0.15, -s, *sc,
+                 s, 0.15, -s, *sc,   s, 0.15,  s, *sc,
+                 s, 0.15,  s, *sc,  -s, 0.15,  s, *sc,
+                -s, 0.15,  s, *sc,  -s, 0.15, -s, *sc,
+            ]
+            arr = np.array(sel_pts, dtype=np.float32).reshape(-1, 6)
+            self._draw_lines(mvp, arr, line_width=2.5)
 
-        # Draw the floor tiles directly from the floor grid
-        self._draw_floor(chunk, ox, oz)
+        mode = GL_LINE if self.wireframe else GL_FILL
+        glPolygonMode(GL_FRONT_AND_BACK, mode)
 
-        # Draw any additional (imported model) geometry on top of the floor
-        extra_verts = chunk.vertices[6:]   # skip the 6-vert floor quad
+        self._draw_floor(chunk, mvp)
+
+        extra_verts = chunk.vertices[6:]
         if extra_verts:
-            self._draw_vertex_list(extra_verts, ox, oz)
+            self._draw_vertex_list(extra_verts, mvp)
 
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
-    def _draw_floor(self, chunk: DSChunk, ox: float, oz: float):
-        """Draw the chunk floor as a single quad using the representative tile."""
+    def _draw_floor(self, chunk: DSChunk, mvp):
+        """Shader-based floor quad. Texture modulates the vertex colour."""
         half = CHUNK_WORLD_UNIT / 2.0
-        tile = chunk.floor[0][0]   # representative tile
-        r, g, b = tile.r, tile.g, tile.b
-        tiling_u = getattr(chunk, 'floor_tile_u', 1.0)
-        tiling_v = getattr(chunk, 'floor_tile_v', 1.0)
+        tile = chunk.floor[0][0]
+        rc, gc, bc = tile.r / 255.0, tile.g / 255.0, tile.b / 255.0
+        tiling_u = getattr(chunk, "floor_tile_u", 1.0)
+        tiling_v = getattr(chunk, "floor_tile_v", 1.0)
 
-        glNormal3f(0, 1, 0)
-        glDisable(GL_TEXTURE_2D)
+        x0, x1 = -half, half
+        z0, z1 = -half, half
 
-        has_tex = False
+        # 6 verts, 2 triangles — CCW winding seen from above
+        verts = [
+            x0, 0, z0,  rc, gc, bc,  0,          0,
+            x0, 0, z1,  rc, gc, bc,  0,          tiling_v,
+            x1, 0, z0,  rc, gc, bc,  tiling_u,   0,
+            x0, 0, z1,  rc, gc, bc,  0,          tiling_v,
+            x1, 0, z1,  rc, gc, bc,  tiling_u,   tiling_v,
+            x1, 0, z0,  rc, gc, bc,  tiling_u,   0,
+        ]
+
+        tex_h = None
         if tile.tex_id != NO_TEX and self.world:
             dtex = self.world.texture_by_id(tile.tex_id)
             if dtex:
-                h = self._get_or_upload_texture(dtex)
-                if h is not None:
-                    glBindTexture(GL_TEXTURE_2D, h)
-                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
-                    glEnable(GL_TEXTURE_2D)
-                    has_tex = True
+                tex_h = self._get_or_upload_texture(dtex)
 
-        # With GL_MODULATE: texture color × vertex color.
-        # Set vertex color to the tint (white = no tint).
-        glColor3ub(r, g, b)
+        verts_data = np.array(verts, dtype=np.float32).reshape(-1, 8)
+        self._draw_tris(mvp, verts_data, tex_handle=tex_h)
 
-        x0, x1 = ox - half, ox + half
-        z0, z1 = oz - half, oz + half
-
-        glBegin(GL_TRIANGLES)
-        glTexCoord2f(0,        0       ); glVertex3f(x0, 0, z0)
-        glTexCoord2f(0,        tiling_v); glVertex3f(x0, 0, z1)
-        glTexCoord2f(tiling_u, 0       ); glVertex3f(x1, 0, z0)
-
-        glTexCoord2f(tiling_u, 0       ); glVertex3f(x1, 0, z0)
-        glTexCoord2f(0,        tiling_v); glVertex3f(x0, 0, z1)
-        glTexCoord2f(tiling_u, tiling_v); glVertex3f(x1, 0, z1)
-        glEnd()
-
-        glDisable(GL_TEXTURE_2D)
-
-    def _draw_vertex_list(self, verts, ox, oz):
-        cur_tex = None
-        glDisable(GL_TEXTURE_2D)
-        glBegin(GL_TRIANGLES)
+    def _draw_vertex_list(self, verts, mvp):
+        """Shader-based object vertex list; batched per texture."""
+        if verts is None or len(verts) == 0:
+            return
+        # Group consecutive verts by tex_id
+        batches: dict[int, list] = {}
         for v in verts:
-            if v.tex_id != cur_tex:
-                glEnd()
-                glDisable(GL_TEXTURE_2D)
-                if v.tex_id != NO_TEX and self.world:
-                    dtex = self.world.texture_by_id(v.tex_id)
-                    if dtex:
-                        h = self._get_or_upload_texture(dtex)
-                        if h is not None:
-                            glBindTexture(GL_TEXTURE_2D, h)
-                            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
-                            glEnable(GL_TEXTURE_2D)
-                cur_tex = v.tex_id
-                glBegin(GL_TRIANGLES)
-            glColor3ub(v.r, v.g, v.b)
-            if v.nx or v.ny or v.nz:
-                glNormal3f(v.nx/FP, v.ny/FP, v.nz/FP)
-            glTexCoord2f(v.u/16.0, v.v/16.0)
-            glVertex3f(ox + v.x/FP, v.y/FP, oz + v.z/FP)
-        glEnd()
-        glDisable(GL_TEXTURE_2D)
+            tid = int(v.tex_id)
+            if tid not in batches:
+                batches[tid] = []
+            # Convert NDS fixed-point to floats; UV: NDS t16 = texel*16
+            rc, gc, bc = v.r / 255.0, v.g / 255.0, v.b / 255.0
+            vx = v.x / FP;  vy = v.y / FP;  vz = v.z / FP
+            if tid != NO_TEX and self.world:
+                dtex = self.world.texture_by_id(tid)
+                if dtex:
+                    tu = v.u / (max(dtex.width,  1) * 16.0)
+                    tv = v.v / (max(dtex.height, 1) * 16.0)
+                else:
+                    tu = tv = 0.0
+            else:
+                tu = tv = 0.0
+            batches[tid].append((vx, vy, vz, rc, gc, bc, tu, tv))
+
+        for tid, vdata in batches.items():
+            tex_h = None
+            if tid != NO_TEX and self.world:
+                dtex = self.world.texture_by_id(tid)
+                if dtex:
+                    tex_h = self._get_or_upload_texture(dtex)
+            arr = np.array(vdata, dtype=np.float32)
+            self._draw_tris(mvp, arr, tex_handle=tex_h)
+
+    @staticmethod
+    def _ray_triangle(orig, direction, v0, v1, v2):
+        """Möller–Trumbore; return distance t along ray or None."""
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        pvec = np.cross(direction, edge2)
+        det = float(np.dot(edge1, pvec))
+        if abs(det) < 1e-8:
+            return None
+        inv_det = 1.0 / det
+        tvec = orig - v0
+        u = float(np.dot(tvec, pvec)) * inv_det
+        if u < 0.0 or u > 1.0:
+            return None
+        qvec = np.cross(tvec, edge1)
+        v = float(np.dot(direction, qvec)) * inv_det
+        if v < 0.0 or u + v > 1.0:
+            return None
+        t = float(np.dot(edge2, qvec)) * inv_det
+        return t if t > 1e-6 else None
+
+    def _screen_ray(self, sx: float, sy: float):
+        """World-space ray for a widget-local pixel (logical coords)."""
+        dpr = self.devicePixelRatioF()
+        vx = sx * dpr
+        vy = sy * dpr
+        vp = getattr(self, "_pick_viewport", None)
+        if vp is not None and vp[2] > 0 and vp[3] > 0:
+            w, h = float(vp[2]), float(vp[3])
+        else:
+            w, h = float(self._vp_w), float(self._vp_h)
+        ndc_x = 2.0 * vx / w - 1.0
+        ndc_y = 1.0 - 2.0 * vy / h
+        aspect = w / h
+        tan_f = math.tan(math.radians(22.5))  # half of 45° FOV
+
+        yaw = math.radians(self.cam_yaw)
+        pitch = math.radians(self.cam_pitch)
+        cx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
+        cy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
+        cz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
+        eye = np.array([cx, cy, cz], dtype=np.float64)
+        target = np.array(self.cam_target, dtype=np.float64)
+        forward = target - eye
+        forward /= np.linalg.norm(forward)
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        right = np.cross(forward, world_up)
+        rn = np.linalg.norm(right)
+        if rn < 1e-8:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            right /= rn
+        up = np.cross(right, forward)
+        up /= np.linalg.norm(up)
+        direction = forward + right * (ndc_x * tan_f * aspect) + up * (ndc_y * tan_f)
+        direction /= np.linalg.norm(direction)
+        return eye, direction
 
     def _pick_chunk_at(self, sx: float, sy: float) -> int:
-        """Return chunk index at screen position (floor plane), or -1."""
+        """Return chunk index under cursor (mesh triangles + floor fallback)."""
         if not self.world or not self.world.chunks:
             return -1
-        self.makeCurrent()
-        viewport = glGetIntegerv(GL_VIEWPORT)
-        model = glGetDoublev(GL_MODELVIEW_MATRIX)
-        proj = glGetDoublev(GL_PROJECTION_MATRIX)
-        wy = viewport[3] - sy
-        try:
-            near = gluUnProject(sx, wy, 0.0, model, proj, viewport)
-            far = gluUnProject(sx, wy, 1.0, model, proj, viewport)
-        except Exception:
-            return -1
-        dy = far[1] - near[1]
-        if abs(dy) < 1e-8:
-            return -1
-        t = -near[1] / dy
-        if t < 0:
-            return -1
-        wx = near[0] + t * (far[0] - near[0])
-        wz = near[2] + t * (far[2] - near[2])
+        orig, direction = self._screen_ray(sx, sy)
+        best_i, best_t = -1, float("inf")
         half = CHUNK_WORLD_UNIT / 2.0
-        best_i, best_dist = -1, float("inf")
         for i, chunk in enumerate(self.world.chunks):
             ox = chunk.grid_x * CHUNK_WORLD_UNIT
             oz = chunk.grid_z * CHUNK_WORLD_UNIT
-            if ox - half <= wx <= ox + half and oz - half <= wz <= oz + half:
-                dist = (wx - ox) ** 2 + (wz - oz) ** 2
-                if dist < best_dist:
-                    best_dist, best_i = dist, i
+            hit = False
+            for ti in range(len(chunk.vertices) // 3):
+                a, b, c = (chunk.vertices[ti * 3 + k] for k in range(3))
+                v0 = np.array([ox + a.x / FP, a.y / FP, oz + a.z / FP])
+                v1 = np.array([ox + b.x / FP, b.y / FP, oz + b.z / FP])
+                v2 = np.array([ox + c.x / FP, c.y / FP, oz + c.z / FP])
+                t = self._ray_triangle(orig, direction, v0, v1, v2)
+                if t is not None and t < best_t:
+                    best_t, best_i = t, i
+                    hit = True
+            if hit:
+                continue
+            # Empty chunk: test ground quad
+            y0 = 0.0
+            if abs(direction[1]) > 1e-8:
+                t = (y0 - orig[1]) / direction[1]
+                if t > 1e-6:
+                    wx = orig[0] + direction[0] * t
+                    wz = orig[2] + direction[2] * t
+                    if ox - half <= wx <= ox + half and oz - half <= wz <= oz + half:
+                        if t < best_t:
+                            best_t, best_i = t, i
         return best_i
 
     # ---- Mouse ----
@@ -1573,7 +1857,7 @@ class InspectorPanel(QWidget):
         self.dsify_maxsize = QComboBox()
         for s in [8,16,32,64,128,256]:
             self.dsify_maxsize.addItem(f"{s}×{s}", s)
-        self.dsify_maxsize.setCurrentIndex(5)
+        self.dsify_maxsize.setCurrentIndex(3)
         size_row.addWidget(QLabel("Max px:"))
         size_row.addWidget(self.dsify_maxsize)
         il.addLayout(size_row)
@@ -1723,7 +2007,7 @@ class InspectorPanel(QWidget):
         for c in targets:
             c.floor_tile_u = u
             c.floor_tile_v = v
-            c.bake_floor_to_vertices()
+            c.bake_floor_to_vertices(self._world)
         if self._viewport: self._viewport.update()
         self.changed.emit()
 
@@ -1733,10 +2017,9 @@ class InspectorPanel(QWidget):
     def _on_tile_painted(self):
         targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
         for c in targets:
-            c.bake_floor_to_vertices()
+            c.bake_floor_to_vertices(self._world)
         if self._viewport:
             self._viewport.update()
-        self.changed.emit()
 
     def _update_brush_btn(self):
         c = self._brush_color
@@ -1767,11 +2050,10 @@ class InspectorPanel(QWidget):
                         t.r = self.floor_painter.active_r
                         t.g = self.floor_painter.active_g
                         t.b = self.floor_painter.active_b
-            chunk.bake_floor_to_vertices()
+            chunk.bake_floor_to_vertices(self._world)
         self.floor_painter.update()
         if self._viewport:
             self._viewport.update()
-        self.changed.emit()
 
     def _clear_floor(self):
         targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
@@ -1780,7 +2062,7 @@ class InspectorPanel(QWidget):
             for tz in range(FLOOR_TILES):
                 for tx in range(FLOOR_TILES):
                     chunk.floor[tz][tx] = FloorTile()
-            chunk.bake_floor_to_vertices()
+            chunk.bake_floor_to_vertices(self._world)
         self.floor_painter.update()
         if self._viewport: self._viewport.update()
 
@@ -1891,6 +2173,7 @@ class InspectorPanel(QWidget):
         tex.fmt     = fmt
         tex.data    = raw
         tex.pil_img = dsimg
+        tex._rgba_cache = None
         if self._viewport:
             self._viewport.invalidate_texture(tex.tex_id)
         self.palette.refresh()
@@ -1933,7 +2216,7 @@ class DSifyDialog(QDialog):
         self.max_size = QComboBox()
         for s in [8,16,32,64,128,256]:
             self.max_size.addItem(f"{s}×{s}", s)
-        self.max_size.setCurrentIndex(5)
+        self.max_size.setCurrentIndex(3)
         tf.addRow("Max dimension:", self.max_size)
         self.tex_fmt = QComboBox()
         for name in LIBNDS_FORMATS:
@@ -2045,14 +2328,22 @@ class ObjectSelector(QWidget):
         self.world = world
         self.refresh()
 
-    def refresh(self):
-        self.chunk_list.clear(); self.tex_list.clear()
-        if not self.world: return
+    def refresh(self, keep_selection: bool = True):
+        selected: set[int] = set()
+        if keep_selection:
+            for item in self.chunk_list.selectedItems():
+                selected.add(item.data(Qt.ItemDataRole.UserRole))
+        self.chunk_list.clear()
+        self.tex_list.clear()
+        if not self.world:
+            return
         for i, c in enumerate(self.world.chunks):
             item = QListWidgetItem(
                 f"[{c.grid_x},{c.grid_z}] {c.name}  ({c.poly_count()} polys)")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.chunk_list.addItem(item)
+            if i in selected:
+                item.setSelected(True)
         for t in self.world.textures:
             self.tex_list.addItem(f"[{t.tex_id}] {t.name} ({t.width}×{t.height})")
 
@@ -2408,7 +2699,6 @@ class MainWindow(QMainWindow):
         self.viewport.set_selected_chunks(valid)
         if len(chunks) == 1:
             c = chunks[0]
-            self.viewport.focus_on_chunk(c)
             self.status.showMessage(
                 f"Chunk [{c.grid_x},{c.grid_z}]  "
                 f"{len(c.vertices)} verts / {c.poly_count()} polys")
@@ -2425,7 +2715,7 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def _on_inspector_changed(self):
-        self.obj_selector.refresh()
+        self.obj_selector.refresh(keep_selection=True)
         self.viewport.update()
 
 

@@ -2,7 +2,6 @@
 #include "ChunkLibrary.h"
 #include "lighting.h"
 
-
 extern float g_lightX, g_lightY, g_lightZ;
 
 // ---------------------------------------------------------------------------
@@ -101,14 +100,12 @@ void ChunkLibrary::uploadTexture(u16 idx)
     glGenTextures(1, &t.glTexId);
     glBindTexture(0, t.glTexId);
 
-    // widthLog2 3=8px, subtract 3 to get GL_TEXTURE_SIZE_ENUM offset
-    GL_TEXTURE_SIZE_ENUM w = (GL_TEXTURE_SIZE_ENUM)(t.widthLog2  - 3);
+    GL_TEXTURE_SIZE_ENUM w = (GL_TEXTURE_SIZE_ENUM)(t.widthLog2 - 3);
     GL_TEXTURE_SIZE_ENUM h = (GL_TEXTURE_SIZE_ENUM)(t.heightLog2 - 3);
 
     glTexImage2D(0, 0, (GL_TEXTURE_TYPE_ENUM)t.format,
                  w, h, 0, TEXGEN_TEXCOORD, t.data);
 
-    // Data is now in VRAM — free the heap copy immediately.
     free(t.data);
     t.data = nullptr;
 }
@@ -129,7 +126,6 @@ bool ChunkLibrary::indexChunks()
         chunkDesc[i].vertCount = ce.vertCount;
         chunkDesc[i].polyCount = ce.polyCount;
 
-        // Skip vertex payload — loaded on demand
         fseek(worldFd, (long)(sizeof(ChunkVertex) * ce.vertCount), SEEK_CUR);
     }
     return true;
@@ -164,7 +160,7 @@ void ChunkLibrary::update(float camX, float camZ)
             if (!desc) continue;
             Chunk* slot = findFreeSlot();
             if (!slot) return;
-            if (loadChunk(desc, slot)) return; // one per frame
+            if (loadChunk(desc, slot)) return;
         }
     }
 }
@@ -177,41 +173,63 @@ void ChunkLibrary::render()
     framePolyCount = 0;
 
     for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
-        if (!activeChunks[i].verts) continue;
-        if (framePolyCount + activeChunks[i].polyCount > 2000) continue;
-        renderChunk(&activeChunks[i]);
-        framePolyCount += activeChunks[i].polyCount;
+        Chunk* c = &activeChunks[i];
+        if (!c->verts) continue;
+        renderChunk(c, i);
+        framePolyCount += c->polyCount;
     }
 }
 
-void ChunkLibrary::renderChunk(Chunk* c)
+void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/)
 {
-    if (c->vertCount == 0) return;
-
-    float originX = (float)(c->gridX * CHUNK_WORLD_UNIT);
-    float originZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
-
-    // On the NDS, GFX_COLOR must be written BEFORE GFX_BEGIN.
-    // The hardware latches colour at polygon-start, not per-vertex.
-    // Set it once here before glBegin; all floor verts share the same colour.
-    ChunkVertex& first = c->verts[0];
-    glColor3b(first.r, first.g, first.b);
+    // KEY FIX: The NDS GPU vertex coordinate range is +-7.999 world units
+    // (4-bit integer part in 4.12 fixed point). Adding the chunk world origin
+    // to each vertex in float and passing via glVertex3f does NOT work for
+    // chunks beyond grid (0,0) because the hardware clamps/wraps the value.
+    //
+    // Solution: push the modelview matrix, translate by the chunk origin,
+    // then submit vertices in local [-8, 8] space which always fits in range.
+    glPushMatrix();
+    glTranslatef(
+        (float)(c->gridX * CHUNK_WORLD_UNIT),
+        0.0f,
+        (float)(c->gridZ * CHUNK_WORLD_UNIT)
+    );
 
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
 
-    // Use GL_QUADS: the editor bakes a triangle-list (6 verts, 2 tris) that
-    // forms one quad.  The 4 unique corners are at indices 0,1,2,5.
-    // GL_QUADS matches what drawTestFloor uses and is confirmed working.
-    glBegin(GL_QUADS);
-        ChunkVertex& v0 = c->verts[0];
-        ChunkVertex& v1 = c->verts[1];
-        ChunkVertex& v2 = c->verts[2];
-        ChunkVertex& v3 = c->verts[5];
-        glVertex3f(f32tofloat(v0.x)+originX, f32tofloat(v0.y), f32tofloat(v0.z)+originZ);
-        glVertex3f(f32tofloat(v2.x)+originX, f32tofloat(v2.y), f32tofloat(v2.z)+originZ);
-        glVertex3f(f32tofloat(v3.x)+originX, f32tofloat(v3.y), f32tofloat(v3.z)+originZ);
-        glVertex3f(f32tofloat(v1.x)+originX, f32tofloat(v1.y), f32tofloat(v1.z)+originZ);
+    u8 lastTexId = 0xFE;
+
+    glBegin(GL_TRIANGLES);
+
+    for (u16 vi = 0; vi < c->vertCount; vi++) {
+        ChunkVertex& v = c->verts[vi];
+
+        if (v.texId != lastTexId) {
+            glEnd();
+            bindTexture(v.texId);
+            glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(1));
+            glBegin(GL_TRIANGLES);
+            lastTexId = v.texId;
+        }
+
+        if (v.nx || v.ny || v.nz) {
+            float scale = lightScale(f32tofloat(v.nx), f32tofloat(v.ny), f32tofloat(v.nz));
+            glColorLit(v.r, v.g, v.b, scale);
+        } else {
+            glColor3b(v.r, v.g, v.b);
+        }
+
+        if (v.texId != 0xFF)
+            glTexCoord2t16(v.u, v.v);
+
+        // Vertices are in local chunk space [-8, 8] — safe for NDS hardware.
+        // The glTranslate above positions them correctly in the world.
+        glVertex3f(f32tofloat(v.x), f32tofloat(v.y), f32tofloat(v.z));
+    }
+
     glEnd();
+    glPopMatrix(1);
 }
 
 void ChunkLibrary::bindTexture(u8 texId)
@@ -257,15 +275,12 @@ bool ChunkLibrary::loadChunk(ChunkDesc* desc, Chunk* slot)
 {
     u32 byteSize = sizeof(ChunkVertex) * desc->vertCount;
 
-    // Always use plain malloc sized to the actual data.
-    // allocPage() always requests SWAP_PAGE_SIZE (4096) bytes regardless of
-    // how small the chunk is — a 6-vertex chunk only needs 120 bytes, but
-    // allocPage would demand 4096, which fails when heap is nearly full.
     ChunkVertex* buf = (ChunkVertex*)malloc(byteSize);
     if (!buf) return false;
 
     fseek(worldFd, (long)(desc->fileOffset + sizeof(ChunkEntry)), SEEK_SET);
-    if (fread(buf, sizeof(ChunkVertex), desc->vertCount, worldFd) != desc->vertCount) {
+    size_t got = fread(buf, sizeof(ChunkVertex), desc->vertCount, worldFd);
+    if (got != desc->vertCount) {
         free(buf);
         return false;
     }
@@ -275,7 +290,7 @@ bool ChunkLibrary::loadChunk(ChunkDesc* desc, Chunk* slot)
     slot->gridZ      = desc->gridZ;
     slot->vertCount  = desc->vertCount;
     slot->polyCount  = desc->polyCount;
-    slot->usedMemMgr = false;   // always plain malloc now
+    slot->usedMemMgr = false;
     return true;
 }
 

@@ -36,17 +36,17 @@ struct WorldHeader {
 
 struct TextureEntry {
     u8    id;
-    u8    widthLog2;     // 3=8px … 8=256px
+    u8    widthLog2;     // 3=8px ... 8=256px
     u8    heightLog2;
-    u8    format;        // GL_RGBA, GL_RGB, GL_RGB4 … cast to GL_TEXTURE_TYPE_ENUM
+    u8    format;        // GL_RGBA, GL_RGB, GL_RGB4 ... cast to GL_TEXTURE_TYPE_ENUM
     u32   dataBytes;
     // followed by dataBytes of raw texel data
 };
 
 // Vertex baked by the editor.
 // x, y, z  — local position in NDS f32 fixed-point (float * 4096), stored as
-//             s16.  Range: ±8.0 world units fits in ±32768 fp units, exactly
-//             at the s16 limit.  The editor clamps values before writing.
+//             s16. Range: +/-8.0 world units fits in +/-32768 fp units, exactly
+//             at the s16 limit. The editor clamps values before writing.
 // nx,ny,nz — surface normal in f32, zero = unused.
 // texId    — 0xFF = no texture.
 // u, v     — NDS t16 texture coordinates (texel * 16).
@@ -98,7 +98,7 @@ public:
     bool loadWorld(const char* path);
     void unloadWorld();
 
-    // Call once per frame — streams one chunk in or out as player moves
+    // Call once per frame — streams chunks in or out as the player moves
     void update(float camX, float camZ);
 
     // Call once per frame after update — submits geometry to NDS GL
@@ -108,17 +108,34 @@ public:
     u32  totalChunkCount()  const { return worldChunkCount; }
     u32  lastFramePolys()   const { return framePolyCount; }
 
-    // World-space centre of the first chunk in the file — use to start camera.
+    // World-space centre of chunk 0 — use as a starting camera position.
     void getChunk0WorldPos(float& outX, float& outZ) const {
         if (worldChunkCount == 0) { outX = 0.0f; outZ = 0.0f; return; }
         outX = chunkDesc[0].gridX * (float)CHUNK_WORLD_UNIT;
         outZ = chunkDesc[0].gridZ * (float)CHUNK_WORLD_UNIT;
     }
 
+    // World-space centroid of all chunks — better starting camera position.
+    void getWorldCenter(float& outX, float& outZ) const {
+        if (worldChunkCount == 0) { outX = 0.0f; outZ = 0.0f; return; }
+        float sumX = 0.0f, sumZ = 0.0f;
+        for (u32 i = 0; i < worldChunkCount; i++) {
+            sumX += chunkDesc[i].gridX;
+            sumZ += chunkDesc[i].gridZ;
+        }
+        outX = (sumX / (float)worldChunkCount) * (float)CHUNK_WORLD_UNIT;
+        outZ = (sumZ / (float)worldChunkCount) * (float)CHUNK_WORLD_UNIT;
+    }
+
     // Debug: read back a chunk descriptor by index
     void getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const {
-        if (idx < worldChunkCount) { gx=chunkDesc[idx].gridX; gz=chunkDesc[idx].gridZ; vc=chunkDesc[idx].vertCount; }
-        else { gx=gz=0; vc=0; }
+        if (idx < worldChunkCount) {
+            gx = chunkDesc[idx].gridX;
+            gz = chunkDesc[idx].gridZ;
+            vc = chunkDesc[idx].vertCount;
+        } else {
+            gx = gz = 0; vc = 0;
+        }
     }
 
 private:
@@ -153,12 +170,11 @@ private:
     bool       loadChunk(ChunkDesc* desc, Chunk* slot);
     void       unloadChunk(Chunk* slot);
 
-    void  renderChunk(Chunk* c);
+    void  renderChunk(Chunk* c, int debugIdx);
     void  bindTexture(u8 texId);
 
-    // FIX: use floorf so negative coords round toward -inf, not zero.
-    // Without this, toGrid(-0.1) returns 0 instead of -1, so the camera
-    // sits in the wrong grid cell and nearby chunks are never requested.
+    // floorf ensures negative coords round toward -inf, not zero.
+    // Without this, toGrid(-0.1) returns 0 instead of -1.
     static s16 toGrid(float w) {
         return (s16)floorf(w / (float)CHUNK_WORLD_UNIT);
     }
