@@ -237,6 +237,9 @@ class DSChunk:
         self.world_z  = 0.0
         self.vertices: list[DSVertex] = []
         self.name     = f"chunk_{grid_x}_{grid_z}"
+        # Floor texture tiling (how many times the texture repeats across the chunk)
+        self.floor_tile_u: float = 1.0
+        self.floor_tile_v: float = 1.0
         # Floor tile grid  (FLOOR_TILES × FLOOR_TILES)
         self.floor: list[list[FloorTile]] = [
             [FloorTile() for _ in range(FLOOR_TILES)]
@@ -279,9 +282,11 @@ class DSChunk:
                 tex_w = dtex.width
                 tex_h = dtex.height
 
-        # UV spans the full texture across the whole chunk
-        u0, u1 = 0, tex_w * 16
-        v0, v1 = 0, tex_h * 16
+        # UV spans the texture across the chunk, scaled by tiling factor
+        tu = getattr(self, 'floor_tile_u', 1.0)
+        tv = getattr(self, 'floor_tile_v', 1.0)
+        u0, u1 = 0, int(tex_w * 16 * tu)
+        v0, v1 = 0, int(tex_h * 16 * tv)
         ny = clamp_s16(to_fp(1.0))
 
         def fv(lx, lz, u, v):
@@ -391,6 +396,8 @@ class WorldFile:
                 "world_x": chunk.world_x,
                 "world_y": chunk.world_y,
                 "world_z": chunk.world_z,
+                "floor_tile_u": getattr(chunk, 'floor_tile_u', 1.0),
+                "floor_tile_v": getattr(chunk, 'floor_tile_v', 1.0),
                 "floor": floor_rows,
                 "object_verts": verts_data,
             })
@@ -475,6 +482,8 @@ class WorldFile:
                 chunk.world_x = cd.get("world_x", 0.0)
                 chunk.world_y = cd.get("world_y", 0.0)
                 chunk.world_z = cd.get("world_z", 0.0)
+                chunk.floor_tile_u = cd.get("floor_tile_u", 1.0)
+                chunk.floor_tile_v = cd.get("floor_tile_v", 1.0)
                 for tz, row in enumerate(cd.get("floor", [])):
                     for tx, td2 in enumerate(row):
                         t = chunk.floor[tz][tx]
@@ -699,7 +708,8 @@ class Viewport(QOpenGLWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.world: WorldFile | None = None
-        self.selected_chunk = -1
+        self.selected_chunk  = -1
+        self.selected_chunks: set = set()
         self.cam_yaw   = 30.0
         self.cam_pitch = -45.0
         self.cam_dist  = 80.0
@@ -716,6 +726,11 @@ class Viewport(QOpenGLWidget):
     def set_world(self, world):
         self.world = world
         self._gl_textures.clear()
+        self.update()
+
+    def set_selected_chunks(self, indices: list):
+        self.selected_chunks = set(indices)
+        self.selected_chunk  = indices[0] if len(indices) == 1 else -1
         self.update()
 
     def initializeGL(self):
@@ -772,7 +787,7 @@ class Viewport(QOpenGLWidget):
             self._draw_grid()
         if self.world:
             for i, chunk in enumerate(self.world.chunks):
-                self._draw_chunk(chunk, selected=(i == self.selected_chunk))
+                self._draw_chunk(chunk, selected=(i in self.selected_chunks))
 
     def _apply_camera(self):
         yaw   = math.radians(self.cam_yaw)
@@ -803,25 +818,29 @@ class Viewport(QOpenGLWidget):
         glLineWidth(1.0)
         glEnable(GL_LIGHTING)
 
-    def _get_or_upload_texture(self, tex: DSTexture) -> int:
+    def _get_or_upload_texture(self, tex: DSTexture) -> int | None:
         if tex.tex_id in self._gl_textures:
             return self._gl_textures[tex.tex_id]
+        img = tex.get_pil()
+        if img is None:
+            return None
         handle = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, handle)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         try:
-            arr = np.frombuffer(tex.data, dtype=np.uint8)
-            expected = tex.width * tex.height * 4
-            if len(arr) >= expected:
-                arr = arr[:expected].reshape(tex.height, tex.width, 4)
-                # Flip vertically: PIL is top-left origin, OpenGL is bottom-left.
-                arr = np.flipud(arr)
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                             tex.width, tex.height, 0,
-                             GL_RGBA, GL_UNSIGNED_BYTE, arr)
+            img = img.convert("RGBA")
+            if img.size != (tex.width, tex.height):
+                img = img.resize((tex.width, tex.height), Image.NEAREST)
+            arr = np.array(img, dtype=np.uint8)
+            # Flip vertically: PIL is top-left origin, OpenGL is bottom-left.
+            arr = np.flipud(arr)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                         tex.width, tex.height, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, arr)
         except Exception:
-            pass
+            glDeleteTextures(1, [handle])
+            return None
         self._gl_textures[tex.tex_id] = handle
         return handle
 
@@ -869,36 +888,45 @@ class Viewport(QOpenGLWidget):
         half = CHUNK_WORLD_UNIT / 2.0
         tile = chunk.floor[0][0]   # representative tile
         r, g, b = tile.r, tile.g, tile.b
+        tiling_u = getattr(chunk, 'floor_tile_u', 1.0)
+        tiling_v = getattr(chunk, 'floor_tile_v', 1.0)
 
         glNormal3f(0, 1, 0)
-        glColor3ub(r, g, b)
-
         glDisable(GL_TEXTURE_2D)
+
+        has_tex = False
         if tile.tex_id != NO_TEX and self.world:
             dtex = self.world.texture_by_id(tile.tex_id)
             if dtex:
                 h = self._get_or_upload_texture(dtex)
-                glBindTexture(GL_TEXTURE_2D, h)
-                glEnable(GL_TEXTURE_2D)
+                if h is not None:
+                    glBindTexture(GL_TEXTURE_2D, h)
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+                    glEnable(GL_TEXTURE_2D)
+                    has_tex = True
+
+        # With GL_MODULATE: texture color × vertex color.
+        # Set vertex color to the tint (white = no tint).
+        glColor3ub(r, g, b)
 
         x0, x1 = ox - half, ox + half
         z0, z1 = oz - half, oz + half
 
         glBegin(GL_TRIANGLES)
-        glTexCoord2f(0,0); glVertex3f(x0, 0, z0)
-        glTexCoord2f(0,1); glVertex3f(x0, 0, z1)
-        glTexCoord2f(1,0); glVertex3f(x1, 0, z0)
+        glTexCoord2f(0,        0       ); glVertex3f(x0, 0, z0)
+        glTexCoord2f(0,        tiling_v); glVertex3f(x0, 0, z1)
+        glTexCoord2f(tiling_u, 0       ); glVertex3f(x1, 0, z0)
 
-        glTexCoord2f(1,0); glVertex3f(x1, 0, z0)
-        glTexCoord2f(0,1); glVertex3f(x0, 0, z1)
-        glTexCoord2f(1,1); glVertex3f(x1, 0, z1)
+        glTexCoord2f(tiling_u, 0       ); glVertex3f(x1, 0, z0)
+        glTexCoord2f(0,        tiling_v); glVertex3f(x0, 0, z1)
+        glTexCoord2f(tiling_u, tiling_v); glVertex3f(x1, 0, z1)
         glEnd()
 
         glDisable(GL_TEXTURE_2D)
 
     def _draw_vertex_list(self, verts, ox, oz):
         cur_tex = None
-        glEnable(GL_TEXTURE_2D)
+        glDisable(GL_TEXTURE_2D)
         glBegin(GL_TRIANGLES)
         for v in verts:
             if v.tex_id != cur_tex:
@@ -908,8 +936,10 @@ class Viewport(QOpenGLWidget):
                     dtex = self.world.texture_by_id(v.tex_id)
                     if dtex:
                         h = self._get_or_upload_texture(dtex)
-                        glBindTexture(GL_TEXTURE_2D, h)
-                        glEnable(GL_TEXTURE_2D)
+                        if h is not None:
+                            glBindTexture(GL_TEXTURE_2D, h)
+                            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+                            glEnable(GL_TEXTURE_2D)
                 cur_tex = v.tex_id
                 glBegin(GL_TRIANGLES)
             glColor3ub(v.r, v.g, v.b)
@@ -920,9 +950,46 @@ class Viewport(QOpenGLWidget):
         glEnd()
         glDisable(GL_TEXTURE_2D)
 
+    def _pick_chunk_at(self, sx: float, sy: float) -> int:
+        """Return chunk index at screen position (floor plane), or -1."""
+        if not self.world or not self.world.chunks:
+            return -1
+        self.makeCurrent()
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        model = glGetDoublev(GL_MODELVIEW_MATRIX)
+        proj = glGetDoublev(GL_PROJECTION_MATRIX)
+        wy = viewport[3] - sy
+        try:
+            near = gluUnProject(sx, wy, 0.0, model, proj, viewport)
+            far = gluUnProject(sx, wy, 1.0, model, proj, viewport)
+        except Exception:
+            return -1
+        dy = far[1] - near[1]
+        if abs(dy) < 1e-8:
+            return -1
+        t = -near[1] / dy
+        if t < 0:
+            return -1
+        wx = near[0] + t * (far[0] - near[0])
+        wz = near[2] + t * (far[2] - near[2])
+        half = CHUNK_WORLD_UNIT / 2.0
+        best_i, best_dist = -1, float("inf")
+        for i, chunk in enumerate(self.world.chunks):
+            ox = chunk.grid_x * CHUNK_WORLD_UNIT
+            oz = chunk.grid_z * CHUNK_WORLD_UNIT
+            if ox - half <= wx <= ox + half and oz - half <= wz <= oz + half:
+                dist = (wx - ox) ** 2 + (wz - oz) ** 2
+                if dist < best_dist:
+                    best_dist, best_i = dist, i
+        return best_i
+
     # ---- Mouse ----
     def mousePressEvent(self, e):
         self._last_mouse = e.position()
+        if e.button() == Qt.MouseButton.LeftButton:
+            idx = self._pick_chunk_at(e.position().x(), e.position().y())
+            if idx >= 0:
+                self.object_clicked.emit(idx)
         if e.button() == Qt.MouseButton.RightButton:  self._rmb_down = True
         if e.button() == Qt.MouseButton.MiddleButton: self._mmb_down = True
 
@@ -976,6 +1043,7 @@ class FloorPainter(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.chunk:  DSChunk  | None = None
+        self.chunks: list[DSChunk]     = []
         self.world:  WorldFile| None = None
         self.active_tex_id = NO_TEX
         self.active_r, self.active_g, self.active_b = 180, 180, 180
@@ -986,7 +1054,11 @@ class FloorPainter(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_chunk(self, chunk, world):
-        self.chunk = chunk
+        self.set_chunks([chunk] if chunk else [], world)
+
+    def set_chunks(self, chunks, world):
+        self.chunks = list(chunks)
+        self.chunk = self.chunks[0] if self.chunks else None
         self.world = world
         self._tex_pixmaps.clear()
         self.update()
@@ -1025,14 +1097,14 @@ class FloorPainter(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        if not self.chunk:
+        if not self.chunks:
             p.fillRect(self.rect(), QColor(30, 32, 40))
             p.setPen(QColor(100, 100, 120))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No chunk selected")
             return
 
-        # Floor is a single quad — show it as one big swatch
-        tile = self.chunk.floor[0][0]
+        # Floor is a single quad — show first chunk as preview
+        tile = self.chunks[0].floor[0][0]
         rw, rh = self.width(), self.height()
 
         p.fillRect(0, 0, rw, rh, QColor(tile.r, tile.g, tile.b))
@@ -1047,8 +1119,9 @@ class FloorPainter(QWidget):
         # Label
         p.setPen(QColor(220, 220, 220))
         label = "No texture" if tile.tex_id == NO_TEX else f"Tex {tile.tex_id}"
+        multi = f" ({len(self.chunks)} chunks)" if len(self.chunks) > 1 else ""
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
-                   f" {label} | RGB({tile.r},{tile.g},{tile.b}) ")
+                   f" {label}{multi} | RGB({tile.r},{tile.g},{tile.b}) ")
 
     def mouseMoveEvent(self, e):
         self._hover = self._cell_at(e.position().x(), e.position().y())
@@ -1059,22 +1132,32 @@ class FloorPainter(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._paint_at(e.position().x(), e.position().y())
+        elif e.button() == Qt.MouseButton.RightButton:
+            self._paint_at(e.position().x(), e.position().y(), clear=True)
 
     def leaveEvent(self, e):
         self._hover = (-1, -1)
         self.update()
 
-    def _paint_at(self, x, y):
-        if not self.chunk:
+    def _paint_at(self, x, y, clear=False):
+        targets = self.chunks if self.chunks else ([self.chunk] if self.chunk else [])
+        if not targets:
             return
-        # Floor is a single quad — paint all tiles uniformly from floor[0][0]
-        for tz in range(FLOOR_TILES):
-            for tx in range(FLOOR_TILES):
-                tile = self.chunk.floor[tz][tx]
-                tile.tex_id = self.active_tex_id
-                tile.r = self.active_r
-                tile.g = self.active_g
-                tile.b = self.active_b
+        for chunk in targets:
+            for tz in range(FLOOR_TILES):
+                for tx in range(FLOOR_TILES):
+                    if clear:
+                        chunk.floor[tz][tx] = FloorTile()
+                    else:
+                        tile = chunk.floor[tz][tx]
+                        tile.tex_id = self.active_tex_id
+                        # If a texture is selected, use white so it isn't tinted
+                        if self.active_tex_id != NO_TEX:
+                            tile.r, tile.g, tile.b = 255, 255, 255
+                        else:
+                            tile.r = self.active_r
+                            tile.g = self.active_g
+                            tile.b = self.active_b
         self.update()
         self.tile_painted.emit()
 
@@ -1151,37 +1234,185 @@ class TexturePalette(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Inspector Panel
+# Collapsible section widget — used inside the context-sensitive right panel
+# ---------------------------------------------------------------------------
+class CollapsibleSection(QWidget):
+    """A titled, collapsible group for the right panel."""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._collapsed = False
+        self._build(title)
+
+    def _build(self, title: str):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 2)
+        outer.setSpacing(0)
+
+        # Header button
+        self._toggle_btn = QPushButton(f"▾  {title}")
+        self._toggle_btn.setCheckable(True)
+        self._toggle_btn.setChecked(True)
+        self._toggle_btn.setStyleSheet(
+            "QPushButton { text-align:left; font-size:11px; font-weight:bold;"
+            "  color:#9ab; background:#1e2130; border:none;"
+            "  border-top:1px solid #2a2d35; padding:4px 6px; }"
+            "QPushButton:hover { background:#252838; }"
+        )
+        self._toggle_btn.toggled.connect(self._on_toggle)
+        outer.addWidget(self._toggle_btn)
+
+        # Content container
+        self._content = QWidget()
+        self._content.setStyleSheet(
+            "QWidget { background:#181a22; }"
+        )
+        outer.addWidget(self._content)
+
+        self._inner = QVBoxLayout(self._content)
+        self._inner.setContentsMargins(4, 4, 4, 4)
+        self._inner.setSpacing(3)
+
+    def _on_toggle(self, checked: bool):
+        self._content.setVisible(checked)
+        arrow = "▾" if checked else "▸"
+        txt = self._toggle_btn.text()
+        # Replace first char (arrow)
+        self._toggle_btn.setText(arrow + txt[1:])
+
+    def add_widget(self, w: QWidget):
+        self._inner.addWidget(w)
+
+    def add_layout(self, lay):
+        self._inner.addLayout(lay)
+
+    def inner_layout(self) -> QVBoxLayout:
+        return self._inner
+
+
+# ---------------------------------------------------------------------------
+# Inspector Panel  (context-sensitive, section-based)
 # ---------------------------------------------------------------------------
 class InspectorPanel(QWidget):
     changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._chunk: DSChunk   | None = None
-        self._world: WorldFile | None = None
+        self._chunk:  DSChunk   | None = None
+        self._chunks: list             = []
+        self._world:  WorldFile | None = None
         self._viewport: Viewport | None = None
         self._build_ui()
 
     def set_viewport(self, vp: Viewport):
         self._viewport = vp
 
+    # ------------------------------------------------------------------
+    # Multi-chunk entry point  (called by MainWindow on every selection change)
+    # ------------------------------------------------------------------
+    def set_chunks(self, chunks: list):
+        """Set the active selection.  chunks is a list of DSChunk objects."""
+        self._chunks = chunks
+        self._chunk  = chunks[0] if len(chunks) == 1 else None
+
+        if not chunks:
+            self.title.setText("Nothing selected")
+            self._update_visible_sections(False)
+            return
+
+        if len(chunks) == 1:
+            self.set_chunk(chunks[0])
+            return
+
+        # ── Multi-select UI ──
+        self._update_visible_sections(True)
+        self.title.setText(f"{len(chunks)} chunks selected")
+
+        # Hide stats (not as useful for multi-select) but keep floor for batch paint
+        self._sec_floor.setVisible(True)
+        self._sec_stats.setVisible(False)
+        self.floor_painter.setVisible(True)
+        self.floor_painter.set_chunks(chunks, self._world)
+
+        # Show common grid offset if all share the same value, else blank
+        def _common(getter):
+            vals = [getter(c) for c in chunks]
+            return vals[0] if len(set(vals)) == 1 else None
+
+        for spin, getter in [
+            (self.gx_spin,  lambda c: c.grid_x),
+            (self.gz_spin,  lambda c: c.grid_z),
+        ]:
+            v = _common(getter)
+            spin.blockSignals(True)
+            spin.setValue(v if v is not None else 0)
+            spin.blockSignals(False)
+            spin.setSpecialValueText("" if v is not None else "—")
+
+        for spin, getter in [
+            (self.wx_spin, lambda c: c.world_x),
+            (self.wy_spin, lambda c: c.world_y),
+            (self.wz_spin, lambda c: c.world_z),
+        ]:
+            v = _common(getter)
+            spin.blockSignals(True)
+            spin.setValue(v if v is not None else 0.0)
+            spin.blockSignals(False)
+
+        self.chunk_name.setText("" if _common(lambda c: c.name) is None else chunks[0].name)
+        self.poly_label.setText(str(sum(c.poly_count() for c in chunks)))
+        self._refresh_model_tex_combo()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
+        # ── Title bar ──
         self.title = QLabel("Nothing selected")
-        self.title.setStyleSheet("font-weight:bold; font-size:13px; color:#c8ccd4;")
-        layout.addWidget(self.title)
+        self.title.setStyleSheet(
+            "font-weight:bold; font-size:13px; color:#c8ccd4;"
+            "background:#13151a; padding:6px 8px;"
+            "border-bottom:1px solid #2a2d35;")
+        root.addWidget(self.title)
 
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
+        # ── Scroll area holds all collapsible sections ──
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border:none; background:#13151a; }")
+        root.addWidget(scroll, 1)
 
-        # ---- Chunk tab ----
-        chunk_w = QWidget()
-        cf = QFormLayout(chunk_w)
-        cf.setContentsMargins(6,6,6,6)
+        self._scroll_widget = QWidget()
+        self._scroll_widget.setStyleSheet("background:#13151a;")
+        self._scroll_layout = QVBoxLayout(self._scroll_widget)
+        self._scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self._scroll_layout.setSpacing(0)
+        self._scroll_layout.addStretch(1)
+        scroll.setWidget(self._scroll_widget)
+
+        # Build all sections (some hidden by default)
+        self._build_chunk_section()
+        self._build_model_section()
+        self._build_floor_section()
+        self._build_textures_section()
+        self._build_stats_section()
+
+        # Default state: no selection → show only textures
+        self._update_visible_sections(chunk_selected=False)
+
+    # ── Section: Chunk ──
+    def _build_chunk_section(self):
+        self._sec_chunk = CollapsibleSection("Chunk")
+        il = self._sec_chunk.inner_layout()
+
+        form_w = QWidget()
+        cf = QFormLayout(form_w)
+        cf.setContentsMargins(0,0,0,0)
+        cf.setSpacing(3)
 
         self.gx_spin = QSpinBox(); self.gx_spin.setRange(-9999,9999)
         self.gz_spin = QSpinBox(); self.gz_spin.setRange(-9999,9999)
@@ -1192,36 +1423,53 @@ class InspectorPanel(QWidget):
         cf.addRow("Name:",    self.chunk_name)
         cf.addRow("Polys:",   self.poly_label)
 
-        # World-space position offset for the model inside this chunk
-        self.wx_spin = QDoubleSpinBox(); self.wx_spin.setRange(-9999,9999); self.wx_spin.setDecimals(3)
-        self.wy_spin = QDoubleSpinBox(); self.wy_spin.setRange(-9999,9999); self.wy_spin.setDecimals(3)
-        self.wz_spin = QDoubleSpinBox(); self.wz_spin.setRange(-9999,9999); self.wz_spin.setDecimals(3)
-        cf.addRow("Model X:", self.wx_spin)
-        cf.addRow("Model Y:", self.wy_spin)
-        cf.addRow("Model Z:", self.wz_spin)
-        apply_btn = QPushButton("Apply")
+        apply_btn = QPushButton("Apply Grid / Name")
         apply_btn.clicked.connect(self._apply_chunk)
         cf.addRow("", apply_btn)
 
-        # Apply texture to imported object verts
+        il.addWidget(form_w)
+        self._insert_section(self._sec_chunk)
+
+    # ── Section: Model Transform ──
+    def _build_model_section(self):
+        self._sec_model = CollapsibleSection("Model Transform")
+        il = self._sec_model.inner_layout()
+
+        form_w = QWidget()
+        mf = QFormLayout(form_w)
+        mf.setContentsMargins(0,0,0,0)
+        mf.setSpacing(3)
+
+        self.wx_spin = QDoubleSpinBox(); self.wx_spin.setRange(-9999,9999); self.wx_spin.setDecimals(3)
+        self.wy_spin = QDoubleSpinBox(); self.wy_spin.setRange(-9999,9999); self.wy_spin.setDecimals(3)
+        self.wz_spin = QDoubleSpinBox(); self.wz_spin.setRange(-9999,9999); self.wz_spin.setDecimals(3)
+        mf.addRow("Offset X:", self.wx_spin)
+        mf.addRow("Offset Y:", self.wy_spin)
+        mf.addRow("Offset Z:", self.wz_spin)
+
+        apply_xform_btn = QPushButton("Apply Offset")
+        apply_xform_btn.clicked.connect(self._apply_chunk)
+        mf.addRow("", apply_xform_btn)
+
+        # Texture assignment for model verts
         self.model_tex_combo = QComboBox()
-        cf.addRow("Model Tex:", self.model_tex_combo)
+        mf.addRow("Texture:", self.model_tex_combo)
         apply_tex_btn = QPushButton("Apply Texture to Model")
         apply_tex_btn.clicked.connect(self._apply_model_texture)
-        cf.addRow("", apply_tex_btn)
+        mf.addRow("", apply_tex_btn)
 
-        self.tabs.addTab(chunk_w, "Chunk")
+        il.addWidget(form_w)
+        self._insert_section(self._sec_model)
 
-        # ---- Floor tab ----
-        floor_w = QWidget()
-        fl = QVBoxLayout(floor_w)
-        fl.setContentsMargins(4,4,4,4)
-        fl.setSpacing(4)
+    # ── Section: Floor ──
+    def _build_floor_section(self):
+        self._sec_floor = CollapsibleSection("Floor")
+        il = self._sec_floor.inner_layout()
 
-        # Active brush row
+        # Brush row
         brush_row = QHBoxLayout()
         brush_lbl = QLabel("Brush:")
-        brush_lbl.setFixedWidth(36)
+        brush_lbl.setFixedWidth(38)
         brush_row.addWidget(brush_lbl)
 
         self.brush_color_btn = QPushButton()
@@ -1236,47 +1484,72 @@ class InspectorPanel(QWidget):
         fill_btn.clicked.connect(self._fill_all)
         brush_row.addWidget(fill_btn)
 
-        clear_btn = QPushButton("Clear Floor")
+        clear_btn = QPushButton("Clear")
         clear_btn.setFixedHeight(22)
         clear_btn.clicked.connect(self._clear_floor)
         brush_row.addWidget(clear_btn)
 
-        fl.addLayout(brush_row)
+        il.addLayout(brush_row)
 
-        # Texture palette
+        # Texture palette (floor brush)
         self.palette = TexturePalette()
         self.palette.texture_selected.connect(self._on_tex_selected)
-        fl.addWidget(self.palette)
+        il.addWidget(self.palette)
 
-        # Painter
+        # Tiling
+        tiling_row = QHBoxLayout()
+        tiling_row.addWidget(QLabel("Tile U:"))
+        self.floor_tile_u_spin = QDoubleSpinBox()
+        self.floor_tile_u_spin.setRange(0.1, 64.0)
+        self.floor_tile_u_spin.setSingleStep(0.25)
+        self.floor_tile_u_spin.setDecimals(2)
+        self.floor_tile_u_spin.setValue(1.0)
+        tiling_row.addWidget(self.floor_tile_u_spin)
+        tiling_row.addWidget(QLabel("V:"))
+        self.floor_tile_v_spin = QDoubleSpinBox()
+        self.floor_tile_v_spin.setRange(0.1, 64.0)
+        self.floor_tile_v_spin.setSingleStep(0.25)
+        self.floor_tile_v_spin.setDecimals(2)
+        self.floor_tile_v_spin.setValue(1.0)
+        tiling_row.addWidget(self.floor_tile_v_spin)
+        apply_tiling_btn = QPushButton("Apply")
+        apply_tiling_btn.setFixedWidth(48)
+        apply_tiling_btn.clicked.connect(self._apply_floor_tiling)
+        tiling_row.addWidget(apply_tiling_btn)
+        il.addLayout(tiling_row)
+
+        # Floor painter
         self.floor_painter = FloorPainter()
         self.floor_painter.tile_painted.connect(self._on_tile_painted)
-        fl.addWidget(self.floor_painter, 1)
+        self.floor_painter.setMinimumHeight(160)
+        il.addWidget(self.floor_painter)
 
-        self.tabs.addTab(floor_w, "Floor")
+        self._insert_section(self._sec_floor)
 
-        # ---- Textures tab ----
-        tex_w = QWidget()
-        tl = QVBoxLayout(tex_w)
-        tl.setContentsMargins(4,4,4,4)
-        tl.setSpacing(4)
+    # ── Section: Textures ──
+    def _build_textures_section(self):
+        self._sec_textures = CollapsibleSection("Textures")
+        il = self._sec_textures.inner_layout()
 
         import_btn = QPushButton("⊕  Import Texture(s)…")
         import_btn.clicked.connect(self._import_textures)
-        tl.addWidget(import_btn)
+        il.addWidget(import_btn)
 
         self.tex_list_widget = QListWidget()
+        self.tex_list_widget.setMinimumHeight(80)
         self.tex_list_widget.currentRowChanged.connect(self._on_tex_list_select)
-        tl.addWidget(self.tex_list_widget, 1)
+        il.addWidget(self.tex_list_widget)
 
         # Preview + props
         self.tex_preview = QLabel()
-        self.tex_preview.setFixedHeight(80)
+        self.tex_preview.setFixedHeight(72)
         self.tex_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.tex_preview.setStyleSheet("background:#1a1c20; border:1px solid #333;")
-        tl.addWidget(self.tex_preview)
+        il.addWidget(self.tex_preview)
 
         pf = QFormLayout()
+        pf.setContentsMargins(0,0,0,0)
+        pf.setSpacing(2)
         self.tp_id    = QLabel("-")
         self.tp_size  = QLabel("-")
         self.tp_fmt   = QLabel("-")
@@ -1285,16 +1558,16 @@ class InspectorPanel(QWidget):
         pf.addRow("Size:",   self.tp_size)
         pf.addRow("Format:", self.tp_fmt)
         pf.addRow("Bytes:",  self.tp_bytes)
-        tl.addLayout(pf)
+        il.addLayout(pf)
 
         fmt_row = QHBoxLayout()
         self.dsify_fmt = QComboBox()
         for name in LIBNDS_FORMATS:
             self.dsify_fmt.addItem(name, LIBNDS_FORMATS[name])
-        self.dsify_fmt.setCurrentIndex(1)   # RGBA
+        self.dsify_fmt.setCurrentIndex(1)
         fmt_row.addWidget(QLabel("DS fmt:"))
         fmt_row.addWidget(self.dsify_fmt)
-        tl.addLayout(fmt_row)
+        il.addLayout(fmt_row)
 
         size_row = QHBoxLayout()
         self.dsify_maxsize = QComboBox()
@@ -1303,32 +1576,55 @@ class InspectorPanel(QWidget):
         self.dsify_maxsize.setCurrentIndex(5)
         size_row.addWidget(QLabel("Max px:"))
         size_row.addWidget(self.dsify_maxsize)
-        tl.addLayout(size_row)
+        il.addLayout(size_row)
 
         dsify_btn = QPushButton("DS-ify selected")
         dsify_btn.clicked.connect(self._dsify_selected)
-        tl.addWidget(dsify_btn)
+        il.addWidget(dsify_btn)
 
         dsify_all_btn = QPushButton("DS-ify all")
         dsify_all_btn.clicked.connect(self._dsify_all)
-        tl.addWidget(dsify_all_btn)
+        il.addWidget(dsify_all_btn)
 
         del_btn = QPushButton("Remove selected")
         del_btn.clicked.connect(self._remove_tex)
-        tl.addWidget(del_btn)
+        il.addWidget(del_btn)
 
-        self.tabs.addTab(tex_w, "Textures")
+        self._insert_section(self._sec_textures)
 
-        # ---- Stats tab ----
-        stats_w = QWidget()
-        sf = QFormLayout(stats_w)
+    # ── Section: Stats ──
+    def _build_stats_section(self):
+        self._sec_stats = CollapsibleSection("Stats")
+        il = self._sec_stats.inner_layout()
+
+        sf = QFormLayout()
+        sf.setContentsMargins(0,0,0,0)
+        sf.setSpacing(2)
         self.stat_verts = QLabel("0")
         self.stat_polys = QLabel("0")
         sf.addRow("Vertices:",  self.stat_verts)
         sf.addRow("Triangles:", self.stat_polys)
-        self.tabs.addTab(stats_w, "Stats")
+        il.addLayout(sf)
 
-        layout.addStretch()
+        self._insert_section(self._sec_stats)
+
+    def _insert_section(self, sec: CollapsibleSection):
+        """Insert section before the trailing stretch."""
+        lay = self._scroll_layout
+        # Remove the stretch, insert section, re-add stretch
+        stretch_item = lay.takeAt(lay.count() - 1)
+        lay.addWidget(sec)
+        lay.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # Context switching
+    # ------------------------------------------------------------------
+    def _update_visible_sections(self, chunk_selected: bool):
+        self._sec_chunk.setVisible(chunk_selected)
+        self._sec_model.setVisible(chunk_selected)
+        self._sec_floor.setVisible(chunk_selected)
+        self._sec_stats.setVisible(chunk_selected)
+        # Textures always visible
 
     # ------------------------------------------------------------------
     def set_world(self, world: WorldFile | None):
@@ -1339,34 +1635,44 @@ class InspectorPanel(QWidget):
         self._refresh_model_tex_combo()
 
     def set_chunk(self, chunk: DSChunk | None):
+        self._chunks = [chunk] if chunk else []
         self._chunk = chunk
-        self.floor_painter.set_chunk(chunk, self._world)
+        self.floor_painter.set_chunks(self._chunks, self._world)
         self._refresh_model_tex_combo()
+
         if chunk is None:
             self.title.setText("Nothing selected")
-            self.poly_label.setText("0")
+            self._update_visible_sections(False)
             return
-        self.title.setText(f"Chunk [{chunk.grid_x}, {chunk.grid_z}]")
+
+        self._update_visible_sections(True)
+        self.floor_painter.setVisible(True)
+        self.title.setText(f"Chunk  [{chunk.grid_x}, {chunk.grid_z}]  —  {chunk.name}")
         self.gx_spin.setValue(chunk.grid_x)
         self.gz_spin.setValue(chunk.grid_z)
         self.chunk_name.setText(chunk.name)
         self.wx_spin.setValue(chunk.world_x)
         self.wy_spin.setValue(chunk.world_y)
         self.wz_spin.setValue(chunk.world_z)
+        self.floor_tile_u_spin.setValue(getattr(chunk, 'floor_tile_u', 1.0))
+        self.floor_tile_v_spin.setValue(getattr(chunk, 'floor_tile_v', 1.0))
         polys = chunk.poly_count()
         self.poly_label.setText(str(polys))
         self.stat_verts.setText(str(len(chunk.vertices)))
         self.stat_polys.setText(str(polys))
 
-    # ---- Chunk tab ----
+    # ---- Chunk / Model apply ----
     def _apply_chunk(self):
-        if not self._chunk: return
-        self._chunk.grid_x  = self.gx_spin.value()
-        self._chunk.grid_z  = self.gz_spin.value()
-        self._chunk.name    = self.chunk_name.text()
-        self._chunk.world_x = self.wx_spin.value()
-        self._chunk.world_y = self.wy_spin.value()
-        self._chunk.world_z = self.wz_spin.value()
+        targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
+        if not targets: return
+        for c in targets:
+            c.grid_x  = self.gx_spin.value()
+            c.grid_z  = self.gz_spin.value()
+            if self.chunk_name.text():
+                c.name = self.chunk_name.text()
+            c.world_x = self.wx_spin.value()
+            c.world_y = self.wy_spin.value()
+            c.world_z = self.wz_spin.value()
         self.changed.emit()
 
     def _refresh_model_tex_combo(self):
@@ -1377,42 +1683,60 @@ class InspectorPanel(QWidget):
                 self.model_tex_combo.addItem(f"[{tex.tex_id}] {tex.name}", tex.tex_id)
 
     def _apply_model_texture(self):
-        """Apply selected texture to all object (non-floor) vertices in the chunk."""
-        if not self._chunk: return
+        """Apply selected texture to all object verts in all selected chunks."""
+        targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
+        if not targets: return
         tex_id = self.model_tex_combo.currentData()
-        obj_verts = self._chunk.vertices[6:]   # first 6 verts are the floor quad
-        if not obj_verts:
-            QMessageBox.information(self, "No model", "This chunk has no imported model verts.")
-            return
-        # Recompute UV range based on texture size
         tex_w = tex_h = 1
         if self._world and tex_id != NO_TEX:
             dtex = self._world.texture_by_id(tex_id)
             if dtex:
                 tex_w = dtex.width
                 tex_h = dtex.height
-        # Bounding box for planar UV projection
-        xs = [v.x for v in obj_verts]
-        zs = [v.z for v in obj_verts]
-        min_x, max_x = min(xs), max(xs)
-        min_z, max_z = min(zs), max(zs)
-        rng_x = max(max_x - min_x, 1)
-        rng_z = max(max_z - min_z, 1)
-        for v in obj_verts:
-            v.tex_id = tex_id
-            v.u = clamp_s16(int(((v.x - min_x) / rng_x) * tex_w * 16))
-            v.v = clamp_s16(int(((v.z - min_z) / rng_z) * tex_h * 16))
+        any_model = False
+        for chunk in targets:
+            obj_verts = chunk.vertices[6:]
+            if not obj_verts:
+                continue
+            any_model = True
+            xs = [v.x for v in obj_verts]; zs = [v.z for v in obj_verts]
+            min_x, max_x = min(xs), max(xs)
+            min_z, max_z = min(zs), max(zs)
+            rng_x = max(max_x - min_x, 1); rng_z = max(max_z - min_z, 1)
+            for v in obj_verts:
+                v.tex_id = tex_id
+                v.u = clamp_s16(int(((v.x - min_x) / rng_x) * tex_w * 16))
+                v.v = clamp_s16(int(((v.z - min_z) / rng_z) * tex_h * 16))
+        if not any_model:
+            QMessageBox.information(self, "No model", "None of the selected chunks have imported model verts.")
+            return
         if self._viewport:
             self._viewport.update()
         self.changed.emit()
 
-    # ---- Floor tab ----
+    # ---- Floor ----
+    def _apply_floor_tiling(self):
+        targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
+        if not targets: return
+        u = self.floor_tile_u_spin.value()
+        v = self.floor_tile_v_spin.value()
+        for c in targets:
+            c.floor_tile_u = u
+            c.floor_tile_v = v
+            c.bake_floor_to_vertices()
+        if self._viewport: self._viewport.update()
+        self.changed.emit()
+
     def _on_tex_selected(self, tex_id: int):
         self.floor_painter.active_tex_id = tex_id
 
     def _on_tile_painted(self):
+        targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
+        for c in targets:
+            c.bake_floor_to_vertices()
         if self._viewport:
             self._viewport.update()
+        self.changed.emit()
 
     def _update_brush_btn(self):
         c = self._brush_color
@@ -1429,22 +1753,34 @@ class InspectorPanel(QWidget):
             self.floor_painter.active_b = c.blue()
 
     def _fill_all(self):
-        if not self._chunk: return
-        for tz in range(FLOOR_TILES):
-            for tx in range(FLOOR_TILES):
-                t = self._chunk.floor[tz][tx]
-                t.tex_id = self.floor_painter.active_tex_id
-                t.r = self.floor_painter.active_r
-                t.g = self.floor_painter.active_g
-                t.b = self.floor_painter.active_b
+        targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
+        if not targets:
+            return
+        for chunk in targets:
+            for tz in range(FLOOR_TILES):
+                for tx in range(FLOOR_TILES):
+                    t = chunk.floor[tz][tx]
+                    t.tex_id = self.floor_painter.active_tex_id
+                    if self.floor_painter.active_tex_id != NO_TEX:
+                        t.r, t.g, t.b = 255, 255, 255
+                    else:
+                        t.r = self.floor_painter.active_r
+                        t.g = self.floor_painter.active_g
+                        t.b = self.floor_painter.active_b
+            chunk.bake_floor_to_vertices()
         self.floor_painter.update()
-        if self._viewport: self._viewport.update()
+        if self._viewport:
+            self._viewport.update()
+        self.changed.emit()
 
     def _clear_floor(self):
-        if not self._chunk: return
-        for tz in range(FLOOR_TILES):
-            for tx in range(FLOOR_TILES):
-                self._chunk.floor[tz][tx] = FloorTile()
+        targets = self._chunks if self._chunks else ([self._chunk] if self._chunk else [])
+        if not targets: return
+        for chunk in targets:
+            for tz in range(FLOOR_TILES):
+                for tx in range(FLOOR_TILES):
+                    chunk.floor[tz][tx] = FloorTile()
+            chunk.bake_floor_to_vertices()
         self.floor_painter.update()
         if self._viewport: self._viewport.update()
 
@@ -1483,13 +1819,24 @@ class InspectorPanel(QWidget):
             return
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Import Textures", "",
-            "Images (*.png *.jpg *.bmp *.tga *.tiff);;All Files (*)")
+            "Images (*.png *.jpg *.jpeg *.bmp *.tga *.tiff *.tif *.gif *.webp "
+            "*.psd *.ico *.hdr *.exr *.dds *.pcx *.ppm *.pgm *.pbm *.xbm "
+            "*.jp2 *.j2k);;All Files (*)")
         fmt      = self.dsify_fmt.currentData()
         max_size = self.dsify_maxsize.currentData()
         added = 0
+        errors = []
         for path in paths:
             try:
-                img = Image.open(path).convert("RGBA")
+                # Open with PIL — handles virtually all formats.
+                # Save to an in-memory PNG first so even exotic formats
+                # (PSD, HDR, EXR, DDS) are normalised before DSify.
+                raw_img = Image.open(path)
+                raw_img.load()   # force decode (some formats are lazy)
+                buf = io.BytesIO()
+                raw_img.convert("RGBA").save(buf, format="PNG")
+                buf.seek(0)
+                img = Image.open(buf).convert("RGBA")
                 dsimg, raw, nw, nh = dsify_image(img, max_size, fmt)
                 tex = DSTexture(
                     tex_id=self._world.new_tex_id(),
@@ -1499,7 +1846,10 @@ class InspectorPanel(QWidget):
                 self._world.textures.append(tex)
                 added += 1
             except Exception as ex:
-                QMessageBox.warning(self, "Import failed", str(ex))
+                errors.append(f"{Path(path).name}: {ex}")
+        if errors:
+            QMessageBox.warning(self, "Some imports failed",
+                                "\n".join(errors))
         if added:
             self._refresh_tex_list()
             self._refresh_model_tex_combo()
@@ -1655,8 +2005,9 @@ class DSifyDialog(QDialog):
 # Object Selector (bottom strip)
 # ---------------------------------------------------------------------------
 class ObjectSelector(QWidget):
-    chunk_selected = pyqtSignal(int)
-    chunk_deleted  = pyqtSignal(int)
+    # Emits a list of selected indices (may be empty or have multiple items)
+    chunks_selected = pyqtSignal(list)
+    chunk_deleted   = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1671,7 +2022,8 @@ class ObjectSelector(QWidget):
         cl = QVBoxLayout(chunk_grp)
         self.chunk_list = QListWidget()
         self.chunk_list.setMaximumHeight(110)
-        self.chunk_list.currentRowChanged.connect(self.chunk_selected)
+        self.chunk_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.chunk_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.chunk_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.chunk_list.customContextMenuRequested.connect(self._chunk_context)
         cl.addWidget(self.chunk_list)
@@ -1696,9 +2048,11 @@ class ObjectSelector(QWidget):
     def refresh(self):
         self.chunk_list.clear(); self.tex_list.clear()
         if not self.world: return
-        for c in self.world.chunks:
-            self.chunk_list.addItem(
+        for i, c in enumerate(self.world.chunks):
+            item = QListWidgetItem(
                 f"[{c.grid_x},{c.grid_z}] {c.name}  ({c.poly_count()} polys)")
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.chunk_list.addItem(item)
         for t in self.world.textures:
             self.tex_list.addItem(f"[{t.tex_id}] {t.name} ({t.width}×{t.height})")
 
@@ -1744,22 +2098,32 @@ class ObjectSelector(QWidget):
         except Exception as ex:
             QMessageBox.critical(self,"Import failed",str(ex))
 
+    def _on_selection_changed(self):
+        idxs = [item.data(Qt.ItemDataRole.UserRole)
+                for item in self.chunk_list.selectedItems()]
+        self.chunks_selected.emit(idxs)
+
     def _chunk_context(self, pos):
+        selected_rows = sorted(
+            [item.data(Qt.ItemDataRole.UserRole)
+             for item in self.chunk_list.selectedItems()],
+            reverse=True)
+        if not selected_rows: return
         row = self.chunk_list.currentRow()
-        if row < 0: return
         menu = QMenu(self)
         dup  = menu.addAction("Duplicate")
-        dele = menu.addAction("Delete")
+        dele = menu.addAction(f"Delete ({len(selected_rows)})" if len(selected_rows) > 1 else "Delete")
         act  = menu.exec(self.chunk_list.mapToGlobal(pos))
-        if act == dup and self.world:
+        if act == dup and self.world and len(selected_rows) == 1:
             nc = copy.deepcopy(self.world.chunks[row])
             nc.grid_z += 1; nc.name += "_copy"
             self.world.chunks.insert(row+1, nc)
             self.refresh()
         elif act == dele and self.world:
-            self.world.chunks.pop(row)
+            for r in selected_rows:
+                self.world.chunks.pop(r)
             self.refresh()
-            self.chunk_deleted.emit(row)
+            self.chunk_deleted.emit(selected_rows[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -1785,27 +2149,29 @@ class MainWindow(QMainWindow):
         h_split = QSplitter(Qt.Orientation.Horizontal)
 
         self.viewport = Viewport()
+        self.viewport.object_clicked.connect(self._on_viewport_object_clicked)
         h_split.addWidget(self.viewport)
 
         self.inspector = InspectorPanel()
         self.inspector.set_viewport(self.viewport)
         self.inspector.changed.connect(self._on_inspector_changed)
-        self.inspector.setMinimumWidth(240)
-        self.inspector.setMaximumWidth(340)
+        self.inspector.setMinimumWidth(180)
         h_split.addWidget(self.inspector)
         h_split.setStretchFactor(0, 3)
         h_split.setStretchFactor(1, 1)
+        h_split.setSizes([960, 300])
 
         v_split = QSplitter(Qt.Orientation.Vertical)
         v_split.addWidget(h_split)
 
         self.obj_selector = ObjectSelector()
-        self.obj_selector.chunk_selected.connect(self._on_chunk_selected)
+        self.obj_selector.chunks_selected.connect(self._on_chunks_selected)
         self.obj_selector.chunk_deleted.connect(self._on_chunk_deleted)
-        self.obj_selector.setMaximumHeight(200)
+        self.obj_selector.setMinimumHeight(60)
         v_split.addWidget(self.obj_selector)
         v_split.setStretchFactor(0, 4)
         v_split.setStretchFactor(1, 1)
+        v_split.setSizes([660, 160])
 
         root.addWidget(v_split)
 
@@ -1900,7 +2266,7 @@ class MainWindow(QMainWindow):
         self.viewport.set_world(self.world)
         self.obj_selector.set_world(self.world)
         self.inspector.set_world(self.world)
-        self.inspector.set_chunk(None)
+        self.inspector.set_chunks([])
         self.setWindowTitle("Alone — World Editor  [New World]")
         self.status.showMessage("New world created")
 
@@ -1914,7 +2280,7 @@ class MainWindow(QMainWindow):
             self.viewport.set_world(self.world)
             self.obj_selector.set_world(self.world)
             self.inspector.set_world(self.world)
-            self.inspector.set_chunk(None)
+            self.inspector.set_chunks([])
             self.setWindowTitle(f"Alone — World Editor  [{Path(path).name}]")
             self.status.showMessage(
                 f"Loaded {len(self.world.chunks)} chunks, "
@@ -1998,22 +2364,64 @@ class MainWindow(QMainWindow):
             self.viewport.cam_dist   = 60
             self.viewport.update()
 
-    def _on_chunk_selected(self, idx):
+    def _on_viewport_object_clicked(self, idx: int):
         if not self.world or idx < 0 or idx >= len(self.world.chunks):
-            self.inspector.set_chunk(None)
-            self.viewport.selected_chunk = -1
-            self.viewport.update(); return
-        chunk = self.world.chunks[idx]
-        self.inspector.set_chunk(chunk)
-        self.viewport.selected_chunk = idx
-        self.viewport.focus_on_chunk(chunk)
-        self.status.showMessage(
-            f"Chunk [{chunk.grid_x},{chunk.grid_z}]  "
-            f"{len(chunk.vertices)} verts / {chunk.poly_count()} polys")
+            return
+        mods = QApplication.keyboardModifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            current = {
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in self.obj_selector.chunk_list.selectedItems()
+            }
+            if idx in current:
+                current.discard(idx)
+            else:
+                current.add(idx)
+            indices = sorted(current)
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            current = {
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in self.obj_selector.chunk_list.selectedItems()
+            }
+            current.add(idx)
+            indices = sorted(current)
+        else:
+            indices = [idx]
+        self.obj_selector.chunk_list.blockSignals(True)
+        self.obj_selector.chunk_list.clearSelection()
+        for row in range(self.obj_selector.chunk_list.count()):
+            item = self.obj_selector.chunk_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) in indices:
+                item.setSelected(True)
+        self.obj_selector.chunk_list.blockSignals(False)
+        self._on_chunks_selected(indices)
+
+    def _on_chunks_selected(self, indices: list):
+        if not self.world:
+            self.inspector.set_chunks([])
+            self.viewport.set_selected_chunks([])
+            return
+        # Filter valid indices
+        valid = [i for i in indices if 0 <= i < len(self.world.chunks)]
+        chunks = [self.world.chunks[i] for i in valid]
+        self.inspector.set_chunks(chunks)
+        self.viewport.set_selected_chunks(valid)
+        if len(chunks) == 1:
+            c = chunks[0]
+            self.viewport.focus_on_chunk(c)
+            self.status.showMessage(
+                f"Chunk [{c.grid_x},{c.grid_z}]  "
+                f"{len(c.vertices)} verts / {c.poly_count()} polys")
+        elif chunks:
+            total_polys = sum(c.poly_count() for c in chunks)
+            self.status.showMessage(
+                f"{len(chunks)} chunks selected  —  {total_polys} total polys")
+        else:
+            self.status.showMessage("No selection")
 
     def _on_chunk_deleted(self, idx):
-        self.inspector.set_chunk(None)
-        self.viewport.selected_chunk = -1
+        self.inspector.set_chunks([])
+        self.viewport.set_selected_chunks([])
         self.viewport.update()
 
     def _on_inspector_changed(self):
