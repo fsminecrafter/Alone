@@ -86,6 +86,22 @@ DS_VRAM_BYTES    = 512 * 1024
 
 NO_TEX = 0xFF   # tex_id sentinel for "no texture"
 
+# Billboard mode sentinels stored in nx.
+# Impossible for a real normalised normal in f32 (max s16 = 0x7FFF).
+#   0x7FFF  cylindrical -- rotates around Y only (stays vertical)
+#   0x7FFE  spherical   -- fully faces camera (tilts to match camera angle)
+#   0x7FFD  fixed       -- no rotation, always faces world +Z
+BILLBOARD_SENTINEL      = 0x7FFF   # cylindrical (default / legacy)
+BILLBOARD_SENTINEL_SPH  = 0x7FFE   # spherical
+BILLBOARD_SENTINEL_FIX  = 0x7FFD   # fixed
+
+BB_MODE_SENTINELS = {
+    "cylindrical": BILLBOARD_SENTINEL,
+    "spherical":   BILLBOARD_SENTINEL_SPH,
+    "fixed":       BILLBOARD_SENTINEL_FIX,
+}
+BB_SENTINEL_TO_MODE = {v: k for k, v in BB_MODE_SENTINELS.items()}
+
 # ---------------------------------------------------------------------------
 # Fixed-point helpers (NDS f32 = float * (1<<12))
 # ---------------------------------------------------------------------------
@@ -228,6 +244,147 @@ class DSTexture:
         return None
 
 
+class DSBillboard:
+    """A camera-facing sprite placed in the world.
+    Stored independently of chunks in the editor, but exported baked into the
+    chunk it sits on (like a model object).  The runtime identifies billboard
+    verts by the BILLBOARD_SENTINEL value in nx and renders them camera-facing.
+    """
+    def __init__(self):
+        self.name    = "billboard"
+        self.world_x = 0.0
+        self.world_y = 0.0
+        self.world_z = 0.0
+        self.width    = 2.0    # world units
+        self.height   = 2.0
+        self.rotation = 0      # 0, 90, 180, 270 degrees (UV rotation)
+        self.bb_mode  = "cylindrical"  # "cylindrical" | "spherical" | "fixed"
+        self.tex_id   = NO_TEX
+        self.r       = 255
+        self.g       = 255
+        self.b       = 255
+
+    def bake_vertices(self) -> list["DSVertex"]:
+        """Bake this billboard to 6 DSVertex triangles in local space (centred at 0,0,0).
+        nx is set to BILLBOARD_SENTINEL so the runtime knows to billboard-orient these.
+        The actual world position is stored in world_x/y/z and applied during export.
+        """
+        hw = self.width  / 2.0
+        hh = self.height / 2.0
+        # UV corners: full texture
+        u0, u1 = 0, 1 * 16   # t16: texel*16, texture is 1 texel wide at index 0
+        v0, v1 = 0, 1 * 16
+        # Try to get texture dimensions for UV
+        # (caller passes world for tex lookup; we keep it simple here and use 1..n)
+        def v(lx, ly, u, vv):
+            return DSVertex(
+                x=clamp_s16(to_fp(lx)), y=clamp_s16(to_fp(ly)), z=0,
+                nx=BILLBOARD_SENTINEL, ny=0, nz=0,
+                r=self.r, g=self.g, b=self.b,
+                tex_id=self.tex_id,
+                u=u, v=vv,
+            )
+        tl = v(-hw,  hh, 0,   0)
+        tr = v( hw,  hh, 16,  0)
+        bl = v(-hw, -hh, 0,  16)
+        br = v( hw, -hh, 16, 16)
+        return [tl, bl, tr,  tr, bl, br]
+
+    def bake_vertices_with_tex(self, world: "WorldFile") -> list["DSVertex"]:
+        """Bake to 6 DSVertex triangles using the correct runtime layout.
+
+        Vertex layout (ChunkLibrary.cpp cylindrical billboard):
+          x, y, z  = chunk-local anchor (same for all 6 verts; export adds anchor)
+          ny       = camera-RIGHT offset in NDS f32 (+/-half-width)
+          nz       = world-UP offset in NDS f32 (0=bottom, height=top)
+          nx       = BILLBOARD_SENTINEL (flags this as a billboard vertex)
+        """
+        hw = self.width  / 2.0
+        hh = self.height / 2.0
+        tex_w = tex_h = 1
+        if world and self.tex_id != NO_TEX:
+            dtex = world.texture_by_id(self.tex_id)
+            if dtex:
+                tex_w = dtex.width
+                tex_h = dtex.height
+        u1 = clamp_s16(tex_w * 16)
+        v1 = clamp_s16(tex_h * 16)
+
+        # UV corners before rotation
+        uvs = {
+            "tl": (0,  0 ),
+            "tr": (u1, 0 ),
+            "bl": (0,  v1),
+            "br": (u1, v1),
+        }
+        # Apply 90-degree CW UV rotation steps
+        steps = (self.rotation // 90) % 4
+        for _ in range(steps):
+            # CW 90: tl->tr->br->bl->tl  (u,v) -> (v1-v, u)
+            old_uvs = dict(uvs)
+            uvs["tl"] = (v1 - old_uvs["bl"][1], old_uvs["bl"][0])
+            uvs["tr"] = (v1 - old_uvs["tl"][1], old_uvs["tl"][0])
+            uvs["br"] = (v1 - old_uvs["tr"][1], old_uvs["tr"][0])
+            uvs["bl"] = (v1 - old_uvs["br"][1], old_uvs["br"][0])
+
+        sentinel = BB_MODE_SENTINELS.get(self.bb_mode, BILLBOARD_SENTINEL)
+
+        def mkv(offR, offU, u, vv):
+            """offR = camera-right offset, offU = world-up offset."""
+            return DSVertex(
+                x=0, y=0, z=0,           # anchor filled in by export
+                nx=sentinel,
+                ny=clamp_s16(to_fp(offR)),
+                nz=clamp_s16(to_fp(offU)),
+                r=self.r, g=self.g, b=self.b,
+                tex_id=self.tex_id,
+                u=clamp_s16(u), v=clamp_s16(vv),
+            )
+        # Two triangles forming a quad (CCW winding)
+        tl = mkv(-hw,  hh, *uvs["tl"])
+        tr = mkv( hw,  hh, *uvs["tr"])
+        bl = mkv(-hw,   0, *uvs["bl"])
+        br = mkv( hw,   0, *uvs["br"])
+        return [tl, bl, tr,  tr, bl, br]
+
+
+class DSFoliageInstance:
+    """A single painted foliage billboard instance.
+
+    Each instance is a billboard with its own world position but shares the
+    foliage settings (texture, size, mode, colour) from the brush that created
+    it.  On export every instance is baked into the chunk it sits on exactly
+    like a manually placed DSBillboard.
+    """
+    __slots__ = ("world_x", "world_y", "world_z",
+                 "width", "height", "rotation", "bb_mode",
+                 "tex_id", "r", "g", "b")
+
+    def __init__(self):
+        self.world_x  = 0.0
+        self.world_y  = 0.0
+        self.world_z  = 0.0
+        self.width    = 1.0
+        self.height   = 1.0
+        self.rotation = 0          # 0/90/180/270
+        self.bb_mode  = "cylindrical"
+        self.tex_id   = NO_TEX
+        self.r = self.g = self.b = 255
+
+    def to_billboard(self) -> "DSBillboard":
+        bb = DSBillboard()
+        bb.world_x  = self.world_x
+        bb.world_y  = self.world_y
+        bb.world_z  = self.world_z
+        bb.width    = self.width
+        bb.height   = self.height
+        bb.rotation = self.rotation
+        bb.bb_mode  = self.bb_mode
+        bb.tex_id   = self.tex_id
+        bb.r = self.r; bb.g = self.g; bb.b = self.b
+        return bb
+
+
 class FloorTile:
     """One tile cell in the chunk floor grid."""
     __slots__ = ("tex_id", "r", "g", "b")
@@ -244,10 +401,15 @@ class DSChunk:
         self.grid_x   = grid_x
         self.grid_z   = grid_z
         # World-space offset applied to model (object) verts during export.
-        # Lets you position an imported model precisely within its chunk.
         self.world_x  = 0.0
         self.world_y  = 0.0
         self.world_z  = 0.0
+        # Euler rotation in degrees applied to model verts (Y is most useful)
+        self.rot_x    = 0.0
+        self.rot_y    = 0.0
+        self.rot_z    = 0.0
+        # True when this chunk was created by importing a 3D model (not a floor chunk)
+        self.is_model = False
         self.vertices: list[DSVertex] = []
         self.name     = f"chunk_{grid_x}_{grid_z}"
         # Floor texture tiling (how many times the texture repeats across the chunk)
@@ -320,25 +482,58 @@ class DSChunk:
         ]
 
         # --- Object vertices (skip bottom-facing triangles) ---
-        # Object verts start after the 6 floor verts in the editor's vertex list
         floor_verts_count = 6
         obj_verts = self.vertices[floor_verts_count:]
+
+        # Build rotation matrix from Euler angles (degrees, YXZ order)
+        def _rot_matrix(rx_deg, ry_deg, rz_deg):
+            rx, ry, rz = math.radians(rx_deg), math.radians(ry_deg), math.radians(rz_deg)
+            cx, sx = math.cos(rx), math.sin(rx)
+            cy, sy = math.cos(ry), math.sin(ry)
+            cz, sz = math.cos(rz), math.sin(rz)
+            # Y then X then Z
+            Ry = [[cy,0,sy],[0,1,0],[-sy,0,cy]]
+            Rx = [[1,0,0],[0,cx,-sx],[0,sx,cx]]
+            Rz = [[cz,-sz,0],[sz,cz,0],[0,0,1]]
+            def mm(A, B):
+                return [[sum(A[i][k]*B[k][j] for k in range(3))
+                         for j in range(3)] for i in range(3)]
+            return mm(Rz, mm(Rx, Ry))
+
+        R = _rot_matrix(self.rot_x, self.rot_y, self.rot_z)
+
+        def _apply_rot(vx, vy, vz):
+            return (R[0][0]*vx + R[0][1]*vy + R[0][2]*vz,
+                    R[1][0]*vx + R[1][1]*vy + R[1][2]*vz,
+                    R[2][0]*vx + R[2][1]*vy + R[2][2]*vz)
+
         ox_fp = clamp_s16(to_fp(self.world_x))
         oy_fp = clamp_s16(to_fp(self.world_y))
         oz_fp = clamp_s16(to_fp(self.world_z))
+        has_rot = (self.rot_x != 0.0 or self.rot_y != 0.0 or self.rot_z != 0.0)
+
         for ti in range(len(obj_verts) // 3):
             a, b_v, c = obj_verts[ti*3], obj_verts[ti*3+1], obj_verts[ti*3+2]
             avg_ny = (a.ny + b_v.ny + c.ny) / 3.0 / FP
             if avg_ny <= -0.5:
                 continue
-            def _shift(v, ox=ox_fp, oy=oy_fp, oz=oz_fp):
+            def _transform(v, ox=ox_fp, oy=oy_fp, oz=oz_fp):
                 import copy as _copy
                 sv = _copy.copy(v)
+                if has_rot:
+                    rx2, ry2, rz2 = _apply_rot(sv.x / FP, sv.y / FP, sv.z / FP)
+                    sv.x = clamp_s16(to_fp(rx2))
+                    sv.y = clamp_s16(to_fp(ry2))
+                    sv.z = clamp_s16(to_fp(rz2))
+                    nx2, ny2, nz2 = _apply_rot(sv.nx / FP, sv.ny / FP, sv.nz / FP)
+                    sv.nx = clamp_s16(to_fp(nx2))
+                    sv.ny = clamp_s16(to_fp(ny2))
+                    sv.nz = clamp_s16(to_fp(nz2))
                 sv.x = clamp_s16(sv.x + ox)
                 sv.y = clamp_s16(sv.y + oy)
                 sv.z = clamp_s16(sv.z + oz)
                 return sv
-            verts += [_shift(a), _shift(b_v), _shift(c)]
+            verts += [_transform(a), _transform(b_v), _transform(c)]
 
         return verts
 
@@ -365,8 +560,10 @@ class DSChunk:
 
 class WorldFile:
     def __init__(self):
-        self.textures: list[DSTexture] = []
-        self.chunks:   list[DSChunk]   = []
+        self.textures:   list[DSTexture]   = []
+        self.chunks:     list[DSChunk]     = []
+        self.billboards: list[DSBillboard] = []
+        self.foliage:    list[DSFoliageInstance] = []
         self.path = None
 
     def save(self, path):
@@ -409,10 +606,36 @@ class WorldFile:
                 "world_x": chunk.world_x,
                 "world_y": chunk.world_y,
                 "world_z": chunk.world_z,
+                "rot_x": chunk.rot_x,
+                "rot_y": chunk.rot_y,
+                "rot_z": chunk.rot_z,
+                "is_model": chunk.is_model,
                 "floor_tile_u": getattr(chunk, 'floor_tile_u', 1.0),
                 "floor_tile_v": getattr(chunk, 'floor_tile_v', 1.0),
                 "floor": floor_rows,
                 "object_verts": verts_data,
+            })
+        doc["billboards"] = []
+        for bb in self.billboards:
+            doc["billboards"].append({
+                "name":    bb.name,
+                "world_x": bb.world_x,
+                "world_y": bb.world_y,
+                "world_z": bb.world_z,
+                "width":    bb.width,
+                "height":   bb.height,
+                "rotation": bb.rotation,
+                "bb_mode":  bb.bb_mode,
+                "tex_id":   bb.tex_id,
+                "r": bb.r, "g": bb.g, "b": bb.b,
+            })
+        doc["foliage"] = []
+        for fi in self.foliage:
+            doc["foliage"].append({
+                "world_x": fi.world_x, "world_y": fi.world_y, "world_z": fi.world_z,
+                "width": fi.width, "height": fi.height,
+                "rotation": fi.rotation, "bb_mode": fi.bb_mode,
+                "tex_id": fi.tex_id, "r": fi.r, "g": fi.g, "b": fi.b,
             })
         with open(path, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2)
@@ -442,19 +665,73 @@ class WorldFile:
             tex_list.append(etex)
 
         # --- Merge chunks with identical grid coords ---
-        # The ChunkLibrary runtime uses (gridX, gridZ) as a key and only stores
-        # one slot per position.  Multiple editor objects at the same grid cell
-        # (e.g. a floor chunk + an imported model chunk) must be written as one
-        # ChunkEntry with all their vertices concatenated.
+        # Floor chunks use their grid_x/z directly.
+        # Model objects are free-standing: their export grid position is computed
+        # from their world position (world_x + grid_x*UNIT, world_z + grid_z*UNIT)
+        # so they land in whichever chunk they are actually placed on.
         from collections import OrderedDict
         merged_chunks: OrderedDict[tuple, list] = OrderedDict()
         for chunk in self.chunks:
-            key = (chunk.grid_x, chunk.grid_z)
+            if chunk.is_model:
+                # Determine which chunk grid cell the model sits on
+                wx = chunk.grid_x * CHUNK_WORLD_UNIT + chunk.world_x
+                wz = chunk.grid_z * CHUNK_WORLD_UNIT + chunk.world_z
+                key = (int(math.floor(wx / CHUNK_WORLD_UNIT)),
+                       int(math.floor(wz / CHUNK_WORLD_UNIT)))
+            else:
+                key = (chunk.grid_x, chunk.grid_z)
             verts = chunk.bake_to_vertices(world=self)
+            if chunk.is_model:
+                # For model objects bake_to_vertices applies world_x/y/z offset.
+                # We still need to re-base the XZ verts relative to the target chunk
+                # origin so the runtime's per-chunk origin addition is correct.
+                target_ox = key[0] * CHUNK_WORLD_UNIT
+                target_oz = key[1] * CHUNK_WORLD_UNIT
+                # The current chunk origin used in bake is (grid_x*UNIT, grid_z*UNIT)
+                src_ox = chunk.grid_x * CHUNK_WORLD_UNIT
+                src_oz = chunk.grid_z * CHUNK_WORLD_UNIT
+                dx_fp = clamp_s16(to_fp(float(src_ox - target_ox)))
+                dz_fp = clamp_s16(to_fp(float(src_oz - target_oz)))
+                for v in verts:
+                    v.x = clamp_s16(v.x + dx_fp)
+                    v.z = clamp_s16(v.z + dz_fp)
+                # Skip the floor-placeholder verts (first 6) — models don't own a floor
+                verts = verts[6:]
             if key not in merged_chunks:
                 merged_chunks[key] = verts
             else:
                 merged_chunks[key].extend(verts)
+
+        # --- Bake billboards into their respective chunks ---
+        # Billboard verts are in local space centred at (0,0,0); the Y offset
+        # is baked in by shifting the Y coordinates.  XZ position is stored
+        # relative to the target chunk origin.  nx=BILLBOARD_SENTINEL tells
+        # ChunkLibrary.cpp to apply a camera-facing transform.
+        def _bake_bb_into_chunks(bb_obj):
+            gx = int(math.floor(bb_obj.world_x / CHUNK_WORLD_UNIT))
+            gz = int(math.floor(bb_obj.world_z / CHUNK_WORLD_UNIT))
+            key = (gx, gz)
+            bb_verts = bb_obj.bake_vertices_with_tex(self)
+            local_x = bb_obj.world_x - gx * CHUNK_WORLD_UNIT
+            local_z = bb_obj.world_z - gz * CHUNK_WORLD_UNIT
+            ox_fp = clamp_s16(to_fp(local_x))
+            oy_fp = clamp_s16(to_fp(bb_obj.world_y))
+            oz_fp = clamp_s16(to_fp(local_z))
+            for bv in bb_verts:
+                bv.x = clamp_s16(ox_fp)
+                bv.y = clamp_s16(oy_fp)
+                bv.z = clamp_s16(oz_fp)
+            if key not in merged_chunks:
+                merged_chunks[key] = bb_verts
+            else:
+                merged_chunks[key].extend(bb_verts)
+
+        for bb in self.billboards:
+            _bake_bb_into_chunks(bb)
+
+        # Foliage instances are baked exactly like billboards
+        for fi in self.foliage:
+            _bake_bb_into_chunks(fi.to_billboard())
 
         with open(path, "wb") as f:
             f.write(struct.pack("<4sHHLh",
@@ -495,6 +772,10 @@ class WorldFile:
                 chunk.world_x = cd.get("world_x", 0.0)
                 chunk.world_y = cd.get("world_y", 0.0)
                 chunk.world_z = cd.get("world_z", 0.0)
+                chunk.rot_x   = cd.get("rot_x",   0.0)
+                chunk.rot_y   = cd.get("rot_y",   0.0)
+                chunk.rot_z   = cd.get("rot_z",   0.0)
+                chunk.is_model = cd.get("is_model", False)
                 chunk.floor_tile_u = cd.get("floor_tile_u", 1.0)
                 chunk.floor_tile_v = cd.get("floor_tile_v", 1.0)
                 for tz, row in enumerate(cd.get("floor", [])):
@@ -515,6 +796,35 @@ class WorldFile:
                         u=vd["u"], v=vd["v"],
                     ))
                 w.chunks.append(chunk)
+            for bd in doc.get("billboards", []):
+                bb = DSBillboard()
+                bb.name    = bd.get("name",    "billboard")
+                bb.world_x = bd.get("world_x", 0.0)
+                bb.world_y = bd.get("world_y", 0.0)
+                bb.world_z = bd.get("world_z", 0.0)
+                bb.width    = bd.get("width",    2.0)
+                bb.height   = bd.get("height",   2.0)
+                bb.rotation = bd.get("rotation", 0)
+                bb.bb_mode  = bd.get("bb_mode",  "cylindrical")
+                bb.tex_id  = bd.get("tex_id",  NO_TEX)
+                bb.r       = bd.get("r",       255)
+                bb.g       = bd.get("g",       255)
+                bb.b       = bd.get("b",       255)
+                w.billboards.append(bb)
+            for fd in doc.get("foliage", []):
+                fi = DSFoliageInstance()
+                fi.world_x  = fd.get("world_x",  0.0)
+                fi.world_y  = fd.get("world_y",  0.0)
+                fi.world_z  = fd.get("world_z",  0.0)
+                fi.width    = fd.get("width",    1.0)
+                fi.height   = fd.get("height",   1.0)
+                fi.rotation = fd.get("rotation", 0)
+                fi.bb_mode  = fd.get("bb_mode",  "cylindrical")
+                fi.tex_id   = fd.get("tex_id",   NO_TEX)
+                fi.r        = fd.get("r",        255)
+                fi.g        = fd.get("g",        255)
+                fi.b        = fd.get("b",        255)
+                w.foliage.append(fi)
             return w
 
         # Legacy binary .world
@@ -692,7 +1002,7 @@ def nds_pack_texture(pil_img_rgba: Image.Image, fmt: int) -> bytes:
     return packed.astype(np.uint16).tobytes()
 
 
-def import_model_as_chunk(filepath, tex_id=NO_TEX, grid_x=0, grid_z=0,
+def import_model_as_chunk(filepath, tex_id=NO_TEX,
                            scale=1.0, max_polys=DS_MAX_POLYS,
                            world=None):
     """Import OBJ/GLB/STL and convert to DSChunk with fixed-point vertices.
@@ -734,7 +1044,13 @@ def import_model_as_chunk(filepath, tex_id=NO_TEX, grid_x=0, grid_z=0,
     else:
         min_x = min_z = 0.0; rng_x = rng_z = 1.0
 
-    chunk = DSChunk(grid_x, grid_z)
+    # Models are standalone objects — grid position is always (0,0) and serves
+    # only as a display origin.  The real placement is world_x/y/z.
+    # No floor quad is added; the 6-vert floor prefix stays empty (just the 6
+    # placeholder verts so the rest of the code that indexes vertices[6:] works).
+    chunk = DSChunk(0, 0)
+    # Prepend the 6-vert floor placeholder so vertices[6:] == object verts
+    chunk.bake_floor_to_vertices(world=world)
     for face in faces:
         for vi in face:
             p, n = verts[vi], normals[vi]
@@ -750,7 +1066,6 @@ def import_model_as_chunk(filepath, tex_id=NO_TEX, grid_x=0, grid_z=0,
                 r=200, g=200, b=200, tex_id=tex_id,
                 u=u, v=v,
             ))
-    chunk.bake_floor_to_vertices(world=world)
     return chunk
 
 
@@ -758,7 +1073,8 @@ def import_model_as_chunk(filepath, tex_id=NO_TEX, grid_x=0, grid_z=0,
 # OpenGL Viewport
 # ---------------------------------------------------------------------------
 class Viewport(QOpenGLWidget):
-    object_clicked = pyqtSignal(int)
+    object_clicked  = pyqtSignal(int)
+    chunks_moved    = pyqtSignal()   # emitted after a gizmo drag commits
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -784,6 +1100,21 @@ class Viewport(QOpenGLWidget):
         # Shader program handles — set in initializeGL
         self._prog_chunk = 0
         self._prog_flat  = 0
+        # Gizmo state
+        self._gizmo_drag_axis     = None   # 'x' | 'z' | None
+        self._gizmo_drag_start_w  = None   # world pos of ray-plane hit at drag start
+        self._gizmo_chunk_origins = {}     # {idx: (gx, gz)} at drag start
+        # Billboard selection
+        self._selected_billboard  = -1     # index into world.billboards or -1
+        self._bb_drag_axis        = None
+        self._bb_drag_start_w     = None
+        self._bb_origin           = None   # (wx, wy, wz) at drag start
+
+        # Foliage paint tool
+        self.foliage_tool_active  = False  # True when the foliage brush is enabled
+        self._foliage_brush_pos   = None   # (wx, wz) world position of cursor on Y-plane
+        self._lmb_down            = False
+        self._foliage_paint_timer = None   # QTimer for continuous painting
 
     def set_world(self, world):
         self.world = world
@@ -793,6 +1124,13 @@ class Viewport(QOpenGLWidget):
     def set_selected_chunks(self, indices: list):
         self.selected_chunks = set(indices)
         self.selected_chunk  = indices[0] if len(indices) == 1 else -1
+        self._selected_billboard = -1
+        self.update()
+
+    def set_selected_billboard(self, bi: int):
+        self._selected_billboard = bi
+        self.selected_chunks = set()
+        self.selected_chunk  = -1
         self.update()
 
     # ------------------------------------------------------------------
@@ -820,11 +1158,14 @@ varying vec3 v_color;
 varying vec2 v_uv;
 void main() {
     vec4 t    = texture2D(u_tex, v_uv);
-    vec3 tint = v_color * t.rgb;
-    // mix(v_color, tint, ...) avoids branching on the uniform
-    // u_has_tex == 1 → textured, 0 → vertex colour only
     float use = float(u_has_tex);
-    gl_FragColor = vec4(mix(v_color, tint, use), 1.0);
+    vec3 rgb  = mix(v_color, v_color * t.rgb, use);
+    // NDS uses 1-bit alpha (A1 in GL_RGBA format).
+    // Match that with a 0.5 cutout: discard transparent pixels entirely
+    // so they don't write to the depth buffer (avoids the blue-box halo).
+    float alpha = mix(1.0, t.a, use);
+    if (alpha < 0.5) discard;
+    gl_FragColor = vec4(rgb, 1.0);
 }
 """
     _FRAG_FLAT_SRC = """
@@ -945,6 +1286,39 @@ void main() {
         mvp = self._proj @ mv @ T
         return np.ascontiguousarray(mvp.T, dtype=np.float32)
 
+    def _build_mvp_model(self, chunk):
+        """MVP for a model chunk: grid origin + world_x/y/z offset + rotation."""
+        tx = chunk.grid_x * CHUNK_WORLD_UNIT + chunk.world_x
+        ty = chunk.world_y
+        tz = chunk.grid_z * CHUNK_WORLD_UNIT + chunk.world_z
+
+        # Translation
+        T = np.eye(4, dtype=np.float32)
+        T[0, 3] = tx; T[1, 3] = ty; T[2, 3] = tz
+
+        # Rotation (YXZ Euler, degrees)
+        def rot_y(d):
+            r = math.radians(d); c = math.cos(r); s = math.sin(r)
+            return np.array([[c,0,s,0],[0,1,0,0],[-s,0,c,0],[0,0,0,1]], dtype=np.float32)
+        def rot_x(d):
+            r = math.radians(d); c = math.cos(r); s = math.sin(r)
+            return np.array([[1,0,0,0],[0,c,-s,0],[0,s,c,0],[0,0,0,1]], dtype=np.float32)
+        def rot_z(d):
+            r = math.radians(d); c = math.cos(r); s = math.sin(r)
+            return np.array([[c,-s,0,0],[s,c,0,0],[0,0,1,0],[0,0,0,1]], dtype=np.float32)
+
+        R = rot_z(chunk.rot_z) @ rot_x(chunk.rot_x) @ rot_y(chunk.rot_y)
+        M = T @ R   # translate then rotate
+
+        yaw   = math.radians(self.cam_yaw)
+        pitch = math.radians(self.cam_pitch)
+        cx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
+        cy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
+        cz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
+        mv = self._lookat_matrix([cx, cy, cz], self.cam_target, [0, 1, 0])
+        mvp = self._proj @ mv @ M
+        return np.ascontiguousarray(mvp.T, dtype=np.float32)
+
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         self._pick_viewport = (0, 0, self._vp_w, self._vp_h)
@@ -956,8 +1330,118 @@ void main() {
         if self.world:
             for i, chunk in enumerate(self.world.chunks):
                 self._draw_chunk(chunk, selected=(i in self.selected_chunks), base_mvp=mvp)
+            # Batch all billboards + foliage into as few draw calls as possible.
+            # Selected billboards are drawn individually so their outline is correct;
+            # everything else is merged by texture into one draw call each.
+            sel_bi = self._selected_billboard
+            unsel_bbs = [bb for bi, bb in enumerate(self.world.billboards) if bi != sel_bi]
+            foliage_bbs = [fi.to_billboard() for fi in self.world.foliage]
+            self._draw_billboards_batched(mvp, unsel_bbs + foliage_bbs)
+            if 0 <= sel_bi < len(self.world.billboards):
+                self._draw_billboard(self.world.billboards[sel_bi], selected=True)
+
+        if self.selected_chunks and self.world:
+            cx, cz = self._selection_centroid_world()
+            self._draw_gizmo(mvp, cx, cz)
+
+        # Billboard gizmo
+        if (self._selected_billboard >= 0 and self.world and
+                self._selected_billboard < len(self.world.billboards)):
+            bb = self.world.billboards[self._selected_billboard]
+            self._draw_billboard_gizmo(mvp, bb)
+
+        # Foliage brush circle
+        if self.foliage_tool_active and self._foliage_brush_pos:
+            self._draw_foliage_cursor(mvp)
 
         glUseProgram(0)
+
+    def _selection_centroid_world(self):
+        """World-space (x, z) centroid of selected chunks."""
+        chunks = [self.world.chunks[i] for i in self.selected_chunks
+                  if i < len(self.world.chunks)]
+        if not chunks:
+            return 0.0, 0.0
+        cx = sum(c.grid_x * CHUNK_WORLD_UNIT + (c.world_x if c.is_model else 0)
+                 for c in chunks) / len(chunks)
+        cz = sum(c.grid_z * CHUNK_WORLD_UNIT + (c.world_z if c.is_model else 0)
+                 for c in chunks) / len(chunks)
+        return cx, cz
+
+    def _selection_is_model(self):
+        """True if the selection is a single model chunk."""
+        if len(self.selected_chunks) != 1:
+            return False
+        idxs = list(self.selected_chunks)
+        return (idxs[0] < len(self.world.chunks) and
+                self.world.chunks[idxs[0]].is_model)
+
+    def _draw_gizmo(self, mvp, cx, cz):
+        """Draw translate arrows. Model chunks get Y-translate + Y-rotate handles."""
+        L  = CHUNK_WORLD_UNIT * 0.9
+        HW = CHUNK_WORLD_UNIT * 0.12
+        HL = CHUNK_WORLD_UNIT * 0.22
+        Y  = 0.5
+
+        is_model = self._selection_is_model()
+        model_y  = 0.0
+        if is_model:
+            c = self.world.chunks[list(self.selected_chunks)[0]]
+            model_y = c.world_y
+
+        def arrow(ox, oy, oz, dx, dy, dz, col):
+            """Shaft + arrowhead lines along (dx,dy,dz)."""
+            ex, ey, ez = ox+dx*L, oy+dy*L, oz+dz*L
+            # perpendicular for arrowhead: use cross with up/right
+            if abs(dy) < 0.9:
+                perp = np.cross([dx,dy,dz],[0,1,0])
+            else:
+                perp = np.cross([dx,dy,dz],[1,0,0])
+            perp = perp / (np.linalg.norm(perp) + 1e-9) * HW
+            bx,by,bz = ex-dx*HL, ey-dy*HL, ez-dz*HL
+            return [
+                ox,oy,oz,*col, ex,ey,ez,*col,
+                ex,ey,ez,*col, bx+perp[0],by+perp[1],bz+perp[2],*col,
+                ex,ey,ez,*col, bx-perp[0],by-perp[1],bz-perp[2],*col,
+                bx+perp[0],by+perp[1],bz+perp[2],*col,
+                bx-perp[0],by-perp[1],bz-perp[2],*col,
+            ]
+
+        RED  = (1.0, 0.2, 0.2)
+        GRN  = (0.2, 0.9, 0.2)
+        BLU  = (0.2, 0.5, 1.0)
+        WHT  = (1.0, 1.0, 1.0)
+        ORG  = (1.0, 0.6, 0.1)
+
+        pts = []
+        pts += arrow(cx, Y, cz,  1,0,0, RED)   # +X
+        pts += arrow(cx, Y, cz,  0,0,1, BLU)   # +Z
+
+        if is_model:
+            pts += arrow(cx, model_y, cz,  0,1,0, GRN)   # +Y (model only)
+
+            # Y-rotation ring (drawn as 16-segment circle in XZ plane)
+            R2 = L * 0.65
+            segs = 24
+            ry = model_y + L * 0.15
+            ring_col = ORG
+            for si in range(segs):
+                a0 = 2*math.pi*si/segs
+                a1 = 2*math.pi*(si+1)/segs
+                pts += [
+                    cx + R2*math.cos(a0), ry, cz + R2*math.sin(a0), *ring_col,
+                    cx + R2*math.cos(a1), ry, cz + R2*math.sin(a1), *ring_col,
+                ]
+
+        # Centre dot
+        d = HW * 0.5
+        pts += [cx-d,Y,cz,*WHT, cx+d,Y,cz,*WHT,
+                cx,Y,cz-d,*WHT, cx,Y,cz+d,*WHT]
+
+        arr = np.array(pts, dtype=np.float32).reshape(-1, 6)
+        glDisable(GL_DEPTH_TEST)
+        self._draw_lines(mvp, arr, line_width=3.0)
+        glEnable(GL_DEPTH_TEST)
 
     # _apply_camera kept for ray-picking which reads cam_yaw/pitch/dist directly
     def _apply_camera(self):
@@ -1015,7 +1499,7 @@ void main() {
         img = tex.get_pil()
         if img is None:
             return None
-        handle = glGenTextures(1)
+        handle = int(glGenTextures(1))
         glBindTexture(GL_TEXTURE_2D, handle)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
@@ -1027,10 +1511,13 @@ void main() {
                 img = img.resize((tex.width, tex.height), Image.NEAREST)
             arr = np.ascontiguousarray(np.flipud(np.array(img, dtype=np.uint8)))
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+            # 0x1908 = GL_RGBA (avoid PyOpenGL constant alias issues)
+            glTexImage2D(GL_TEXTURE_2D, 0, 0x1908,
                          tex.width, tex.height, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, arr)
-        except Exception:
+                         0x1908, GL_UNSIGNED_BYTE, arr)
+            glBindTexture(GL_TEXTURE_2D, 0)
+        except Exception as e:
+            print(f"[tex upload error] tex_id={tex.tex_id}: {e}")
             glDeleteTextures(1, [handle])
             return None
         self._gl_textures[tex.tex_id] = handle
@@ -1056,7 +1543,7 @@ void main() {
         if verts_data is None or len(verts_data) == 0:
             return
         n   = len(verts_data)
-        arr = np.array(verts_data, dtype=np.float32)   # N x 8
+        arr = np.array(verts_data, dtype=np.float32)
         pos = np.ascontiguousarray(arr[:, 0:3])
         col = np.ascontiguousarray(arr[:, 3:6])
         uv  = np.ascontiguousarray(arr[:, 6:8])
@@ -1087,7 +1574,8 @@ void main() {
     def _draw_chunk(self, chunk: DSChunk, selected=False, base_mvp=None):
         ox = float(chunk.grid_x * CHUNK_WORLD_UNIT)
         oz = float(chunk.grid_z * CHUNK_WORLD_UNIT)
-        mvp = self._build_mvp_translated(ox, 0.0, oz)
+        floor_mvp = self._build_mvp_translated(ox, 0.0, oz)
+        model_mvp = self._build_mvp_model(chunk) if chunk.is_model else floor_mvp
 
         if selected:
             s  = CHUNK_WORLD_UNIT / 2.0
@@ -1099,16 +1587,17 @@ void main() {
                 -s, 0.15,  s, *sc,  -s, 0.15, -s, *sc,
             ]
             arr = np.array(sel_pts, dtype=np.float32).reshape(-1, 6)
-            self._draw_lines(mvp, arr, line_width=2.5)
+            self._draw_lines(model_mvp if chunk.is_model else floor_mvp, arr, line_width=2.5)
 
         mode = GL_LINE if self.wireframe else GL_FILL
         glPolygonMode(GL_FRONT_AND_BACK, mode)
 
-        self._draw_floor(chunk, mvp)
+        if not chunk.is_model:
+            self._draw_floor(chunk, floor_mvp)
 
         extra_verts = chunk.vertices[6:]
         if extra_verts:
-            self._draw_vertex_list(extra_verts, mvp)
+            self._draw_vertex_list(extra_verts, model_mvp)
 
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
@@ -1241,14 +1730,20 @@ void main() {
         best_i, best_t = -1, float("inf")
         half = CHUNK_WORLD_UNIT / 2.0
         for i, chunk in enumerate(self.world.chunks):
-            ox = chunk.grid_x * CHUNK_WORLD_UNIT
-            oz = chunk.grid_z * CHUNK_WORLD_UNIT
+            if chunk.is_model:
+                ox = chunk.grid_x * CHUNK_WORLD_UNIT + chunk.world_x
+                oy_offset = chunk.world_y
+                oz = chunk.grid_z * CHUNK_WORLD_UNIT + chunk.world_z
+            else:
+                ox = chunk.grid_x * CHUNK_WORLD_UNIT
+                oy_offset = 0.0
+                oz = chunk.grid_z * CHUNK_WORLD_UNIT
             hit = False
             for ti in range(len(chunk.vertices) // 3):
                 a, b, c = (chunk.vertices[ti * 3 + k] for k in range(3))
-                v0 = np.array([ox + a.x / FP, a.y / FP, oz + a.z / FP])
-                v1 = np.array([ox + b.x / FP, b.y / FP, oz + b.z / FP])
-                v2 = np.array([ox + c.x / FP, c.y / FP, oz + c.z / FP])
+                v0 = np.array([ox + a.x / FP, oy_offset + a.y / FP, oz + a.z / FP])
+                v1 = np.array([ox + b.x / FP, oy_offset + b.y / FP, oz + b.z / FP])
+                v2 = np.array([ox + c.x / FP, oy_offset + c.y / FP, oz + c.z / FP])
                 t = self._ray_triangle(orig, direction, v0, v1, v2)
                 if t is not None and t < best_t:
                     best_t, best_i = t, i
@@ -1268,25 +1763,240 @@ void main() {
         return best_i
 
     # ---- Mouse ----
+    # ------------------------------------------------------------------
+    # Gizmo hit-test — returns 'x', 'z', or None
+    # ------------------------------------------------------------------
+    def _hit_gizmo(self, sx, sy):
+        """Returns 'x', 'z', 'y', 'ry', or None."""
+        if not self.selected_chunks or not self.world:
+            return None
+        cx, cz = self._selection_centroid_world()
+        L  = CHUNK_WORLD_UNIT * 0.9
+        HW = CHUNK_WORLD_UNIT * 0.22
+        orig, direction = self._screen_ray(sx, sy)
+
+        # Hit Y=0.5 plane for X/Z arrows
+        if abs(direction[1]) > 1e-8:
+            t = (0.5 - orig[1]) / direction[1]
+            if t > 0:
+                wx = orig[0] + direction[0] * t
+                wz = orig[2] + direction[2] * t
+                if cx <= wx <= cx + L and abs(wz - cz) < HW:
+                    return 'x'
+                if cz <= wz <= cz + L and abs(wx - cx) < HW:
+                    return 'z'
+
+        if self._selection_is_model():
+            c = self.world.chunks[list(self.selected_chunks)[0]]
+            my = c.world_y
+
+            # Y arrow: vertical line at (cx, cz), test in XZ proximity + Y range
+            # Project ray to XZ and check dist to (cx,cz), then check Y in range
+            if abs(direction[0]) > 1e-8 or abs(direction[2]) > 1e-8:
+                # closest point on ray to vertical line at (cx, cz)
+                dx_r = orig[0] - cx; dz_r = orig[2] - cz
+                denom = direction[0]**2 + direction[2]**2
+                if denom > 1e-8:
+                    t_xz = -(dx_r*direction[0] + dz_r*direction[2]) / denom
+                    if t_xz > 0:
+                        cx_r = orig[0] + direction[0]*t_xz
+                        cz_r = orig[2] + direction[2]*t_xz
+                        cy_r = orig[1] + direction[1]*t_xz
+                        if (math.sqrt((cx_r-cx)**2+(cz_r-cz)**2) < HW and
+                                my <= cy_r <= my + L):
+                            return 'y'
+
+            # Y-rotation ring: test distance from ray to ring circle in XZ
+            R2 = L * 0.65
+            ry = my + L * 0.15
+            if abs(direction[1]) > 1e-8:
+                t = (ry - orig[1]) / direction[1]
+                if t > 0:
+                    wx = orig[0] + direction[0] * t
+                    wz = orig[2] + direction[2] * t
+                    dist = math.sqrt((wx-cx)**2 + (wz-cz)**2)
+                    if abs(dist - R2) < HW * 0.7:
+                        return 'ry'
+        return None
+
+    def _ray_y_plane(self, sx, sy, y=0.0):
+        orig, direction = self._screen_ray(sx, sy)
+        if abs(direction[1]) < 1e-8:
+            return None
+        t = (y - orig[1]) / direction[1]
+        if t < 0:
+            return None
+        return orig[0] + direction[0] * t, orig[2] + direction[2] * t
+
     def mousePressEvent(self, e):
         self._last_mouse = e.position()
+        sx, sy = e.position().x(), e.position().y()
+
+        # ---- Foliage paint tool ----
+        if self.foliage_tool_active and self.world:
+            if e.button() == Qt.MouseButton.LeftButton:
+                self._lmb_down = True
+                hit = self._ray_y_plane(sx, sy, y=0.0)
+                if hit:
+                    self._foliage_brush_pos = hit
+                    self._foliage_try_paint(hit[0], hit[1], erase=False)
+                return
+            if e.button() == Qt.MouseButton.RightButton:
+                self._rmb_down = True   # still allow camera orbit
+                hit = self._ray_y_plane(sx, sy, y=0.0)
+                if hit:
+                    self._foliage_brush_pos = hit
+                    self._foliage_try_paint(hit[0], hit[1], erase=True)
+                return
+            if e.button() == Qt.MouseButton.MiddleButton:
+                self._mmb_down = True
+            return
+
         if e.button() == Qt.MouseButton.LeftButton:
-            idx = self._pick_chunk_at(e.position().x(), e.position().y())
+            # Billboard gizmo takes priority when a billboard is selected
+            bb_axis = self._hit_billboard_gizmo(sx, sy)
+            if bb_axis and self._selected_billboard >= 0 and self.world:
+                bb = self.world.billboards[self._selected_billboard]
+                self._bb_drag_axis         = bb_axis
+                self._bb_drag_start_screen = (sx, sy)
+                self._bb_drag_start_w      = self._ray_y_plane(sx, sy, y=bb.world_y)
+                self._bb_origin            = (bb.world_x, bb.world_y, bb.world_z)
+                return
+
+            axis = self._hit_gizmo(sx, sy)
+            if axis and self.selected_chunks and self.world:
+                self._gizmo_drag_axis = axis
+                self._gizmo_drag_start_w = self._ray_y_plane(sx, sy, y=0.0)
+                self._gizmo_drag_start_screen = (sx, sy)
+                self._gizmo_chunk_origins = {}
+                for i in self.selected_chunks:
+                    if i < len(self.world.chunks):
+                        c = self.world.chunks[i]
+                        self._gizmo_chunk_origins[i] = (
+                            c.grid_x, c.grid_z,
+                            c.world_x, c.world_y, c.world_z,
+                            c.rot_y
+                        )
+                return
+            idx = self._pick_chunk_at(sx, sy)
             if idx >= 0:
+                self._selected_billboard = -1
                 self.object_clicked.emit(idx)
+            else:
+                self.selected_chunks = set()
+                self.selected_chunk  = -1
+                self._selected_billboard = -1
+                self.object_clicked.emit(-1)
+                self.update()
+
         if e.button() == Qt.MouseButton.RightButton:  self._rmb_down = True
         if e.button() == Qt.MouseButton.MiddleButton: self._mmb_down = True
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._lmb_down = False
+            if self.foliage_tool_active:
+                return
+            if self._bb_drag_axis:
+                self._bb_drag_axis     = None
+                self._bb_drag_start_w  = None
+                self._bb_origin        = None
+                self.chunks_moved.emit()   # reuse signal to refresh inspector
+            elif self._gizmo_drag_axis:
+                self._gizmo_drag_axis     = None
+                self._gizmo_drag_start_w  = None
+                self._gizmo_chunk_origins = {}
+                self.chunks_moved.emit()
         if e.button() == Qt.MouseButton.RightButton:  self._rmb_down = False
         if e.button() == Qt.MouseButton.MiddleButton: self._mmb_down = False
 
     def mouseMoveEvent(self, e):
         if self._last_mouse is None:
             self._last_mouse = e.position(); return
-        dx = e.position().x() - self._last_mouse.x()
-        dy = e.position().y() - self._last_mouse.y()
+        sx, sy = e.position().x(), e.position().y()
+        dx = sx - self._last_mouse.x()
+        dy = sy - self._last_mouse.y()
         self._last_mouse = e.position()
+
+        # Foliage tool: update brush cursor position and continuous paint/erase
+        if self.foliage_tool_active:
+            hit = self._ray_y_plane(sx, sy, y=0.0)
+            self._foliage_brush_pos = hit
+            if hit:
+                if self._lmb_down and self.world:
+                    self._foliage_try_paint(hit[0], hit[1], erase=False)
+                elif self._rmb_down and self.world:
+                    self._foliage_try_paint(hit[0], hit[1], erase=True)
+            # Still allow middle-mouse pan when foliage tool is active
+            if self._mmb_down:
+                yaw   = math.radians(self.cam_yaw)
+                right = [math.cos(yaw), 0, -math.sin(yaw)]
+                spd   = self.cam_dist * 0.005
+                self.cam_target[0] -= right[0] * dx * spd
+                self.cam_target[2] -= right[2] * dx * spd
+                self.cam_target[1] += dy * spd
+            self.update()
+            return
+
+        # Billboard drag
+        if self._bb_drag_axis and self.world and self._bb_origin:
+            bi = self._selected_billboard
+            if 0 <= bi < len(self.world.billboards):
+                bb = self.world.billboards[bi]
+                owx, owy, owz = self._bb_origin
+                sx0, sy0 = self._bb_drag_start_screen
+                if self._bb_drag_axis in ('x', 'z'):
+                    hit = self._ray_y_plane(sx, sy, y=owy)
+                    if hit and self._bb_drag_start_w:
+                        dwx = hit[0] - self._bb_drag_start_w[0]
+                        dwz = hit[1] - self._bb_drag_start_w[1]
+                        if self._bb_drag_axis == 'x': bb.world_x = owx + dwx
+                        else:                         bb.world_z = owz + dwz
+                elif self._bb_drag_axis == 'y':
+                    total_dy = sy - sy0
+                    bb.world_y = owy - total_dy * (self.cam_dist * 0.01)
+            self.update()
+            return
+
+        if self._gizmo_drag_axis and self.world:
+            axis = self._gizmo_drag_axis
+            U = CHUNK_WORLD_UNIT
+
+            for idx, origin in self._gizmo_chunk_origins.items():
+                if idx >= len(self.world.chunks):
+                    continue
+                c = self.world.chunks[idx]
+                ogx, ogz, owx, owy, owz, ory = origin
+
+                if axis in ('x', 'z'):
+                    # Floor chunks snap to grid; model chunks move freely in world space
+                    hit = self._ray_y_plane(sx, sy, y=0.0)
+                    if hit and self._gizmo_drag_start_w:
+                        dwx = hit[0] - self._gizmo_drag_start_w[0]
+                        dwz = hit[1] - self._gizmo_drag_start_w[1]
+                        if c.is_model:
+                            if axis == 'x': c.world_x = owx + dwx
+                            else:           c.world_z = owz + dwz
+                        else:
+                            if axis == 'x': c.grid_x = ogx + round(dwx / U)
+                            else:           c.grid_z  = ogz + round(dwz / U)
+
+                elif axis == 'y' and c.is_model:
+                    # Y: drag screen vertically → move world_y
+                    # Use total delta from drag start (like 'ry') so it doesn't bounce
+                    sx0, sy0 = self._gizmo_drag_start_screen
+                    total_dy = sy - sy0
+                    c.world_y = owy - total_dy * (self.cam_dist * 0.01)
+
+                elif axis == 'ry' and c.is_model:
+                    # Rotate around Y: horizontal drag → degrees
+                    sx0, sy0 = self._gizmo_drag_start_screen
+                    total_dx = sx - sx0
+                    c.rot_y = ory + total_dx * 0.5
+
+            self.update()
+            return
+
         if self._rmb_down:
             self.cam_yaw   += dx * 0.4
             self.cam_pitch += dy * 0.3
@@ -1294,8 +2004,8 @@ void main() {
             self.update()
         elif self._mmb_down:
             yaw   = math.radians(self.cam_yaw)
-            right   = [math.cos(yaw), 0, -math.sin(yaw)]
-            spd = self.cam_dist * 0.005
+            right = [math.cos(yaw), 0, -math.sin(yaw)]
+            spd   = self.cam_dist * 0.005
             self.cam_target[0] -= right[0] * dx * spd
             self.cam_target[2] -= right[2] * dx * spd
             self.cam_target[1] += dy * spd
@@ -1307,11 +2017,1210 @@ void main() {
         self.cam_dist  = max(2, min(1000, self.cam_dist))
         self.update()
 
+    def _draw_billboards_batched(self, mvp, bbs: list):
+        """Draw many billboards with minimal GL calls.
+
+        All billboards sharing the same texture are merged into one numpy array
+        and submitted with a single glDrawArrays.  Camera vectors are computed
+        once for the whole batch.
+        """
+        if not bbs:
+            return
+
+        # --- Camera vectors (computed once) ---
+        yaw   = math.radians(self.cam_yaw)
+        pitch = math.radians(self.cam_pitch)
+        ecx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
+        ecy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
+        ecz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
+        world_up = np.array([0.0, 1.0, 0.0])
+
+        # For cylindrical mode, right/up depend on each billboard's position,
+        # so we can only cache the spherical right/up here as a fallback.
+        # We build verts per-bb in a fast Python loop, then batch by tex_id.
+
+        # Groups: tex_id → flat list of float vertex data (x,y,z,r,g,b,u,v)*6
+        groups: dict[int, list] = {}
+
+        # Precompute UV corner sets for 0/90/180/270 once
+        _base_uvs = [(0,1),(1,1),(0,0),(1,0)]  # tl,tr,bl,br
+        _rot_uvs  = [None] * 4
+        for rot in range(4):
+            uvs = list(_base_uvs)
+            for _ in range(rot):
+                uvs = [uvs[2], uvs[0], uvs[3], uvs[1]]  # bl→tl, tl→tr, br→bl, tr→br (CW)
+            _rot_uvs[rot] = uvs   # [tl, tr, bl, br]
+
+        for bb in bbs:
+            hw  = bb.width  / 2.0
+            hh  = bb.height
+            bx, by, bz = bb.world_x, bb.world_y, bb.world_z
+            mode = getattr(bb, "bb_mode", "cylindrical")
+
+            if mode == "fixed":
+                rx, ry, rz = 1.0, 0.0, 0.0
+                ux, uy, uz = 0.0, 1.0, 0.0
+            elif mode == "spherical":
+                fx = bx - ecx; fy = by - ecy; fz = bz - ecz
+                flen = math.sqrt(fx*fx + fy*fy + fz*fz) + 1e-9
+                fx /= flen; fy /= flen; fz /= flen
+                # right = forward × world_up
+                rx = fy*0 - fz*1;  ry = fz*0 - fx*0;  rz = fx*1 - fy*0
+                rlen = math.sqrt(rx*rx + ry*ry + rz*rz) + 1e-9
+                rx /= rlen; ry /= rlen; rz /= rlen
+                # up = right × (-forward)
+                ux = ry*(-fz) - rz*(-fy)
+                uy = rz*(-fx) - rx*(-fz)
+                uz = rx*(-fy) - ry*(-fx)
+                ulen = math.sqrt(ux*ux + uy*uy + uz*uz) + 1e-9
+                ux /= ulen; uy /= ulen; uz /= ulen
+            else:  # cylindrical
+                fwdX = bx - ecx; fwdZ = bz - ecz
+                flen = math.sqrt(fwdX*fwdX + fwdZ*fwdZ) + 1e-9
+                fwdX /= flen; fwdZ /= flen
+                rx, ry, rz = -fwdZ, 0.0, fwdX
+                ux, uy, uz =  0.0,  1.0, 0.0
+
+            # Four corners: bl/br at anchor, tl/tr at anchor+height
+            blx = bx - rx*hw;  bly = by;      blz = bz - rz*hw
+            brx = bx + rx*hw;  bry = by;      brz = bz + rz*hw
+            tlx = blx + ux*hh; tly = bly + uy*hh; tlz = blz + uz*hh
+            trx = brx + ux*hh; try_ = bry + uy*hh; trz = brz + uz*hh
+
+            rc = bb.r / 255.0; gc = bb.g / 255.0; bc2 = bb.b / 255.0
+            rot_idx = (bb.rotation // 90) % 4
+            utl, utr, ubl, ubr = _rot_uvs[rot_idx]
+
+            tid = int(bb.tex_id) if bb.tex_id != NO_TEX else -1
+            if tid not in groups:
+                groups[tid] = []
+            g = groups[tid]
+            # Two triangles: tl,bl,tr and tr,bl,br
+            g += [tlx, tly, tlz, rc, gc, bc2, *utl,
+                  blx, bly, blz, rc, gc, bc2, *ubl,
+                  trx, try_, trz, rc, gc, bc2, *utr,
+                  trx, try_, trz, rc, gc, bc2, *utr,
+                  blx, bly, blz, rc, gc, bc2, *ubl,
+                  brx, bry, brz, rc, gc, bc2, *ubr]
+
+        glDisable(GL_CULL_FACE)
+        for tid, vdata in groups.items():
+            tex_h = None
+            if tid >= 0 and self.world:
+                dtex = self.world.texture_by_id(tid)
+                if dtex:
+                    tex_h = self._get_or_upload_texture(dtex)
+            arr = np.array(vdata, dtype=np.float32).reshape(-1, 8)
+            self._draw_tris(mvp, arr, tex_handle=tex_h)
+        glEnable(GL_CULL_FACE)
+
+    def _draw_billboard(self, bb: "DSBillboard", selected=False):
+        """Draw billboard matching the runtime mode (cylindrical/spherical/fixed)."""
+        yaw   = math.radians(self.cam_yaw)
+        pitch = math.radians(self.cam_pitch)
+        ecy = self.cam_target[1] + self.cam_dist * math.sin(math.radians(self.cam_pitch))
+        ecx = self.cam_target[0] + self.cam_dist * math.cos(math.radians(self.cam_pitch)) * math.sin(yaw)
+        ecz = self.cam_target[2] + self.cam_dist * math.cos(math.radians(self.cam_pitch)) * math.cos(yaw)
+
+        hw  = bb.width  / 2.0
+        hh  = bb.height
+        cx  = np.array([bb.world_x, bb.world_y, bb.world_z], dtype=np.float64)
+        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        mode = getattr(bb, "bb_mode", "cylindrical")
+
+        if mode == "fixed":
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            up    = world_up
+
+        elif mode == "spherical":
+            fwd = cx - np.array([ecx, ecy, ecz])
+            flen = np.linalg.norm(fwd) + 1e-9
+            fwd /= flen
+            right = np.cross(fwd, world_up)
+            rlen = np.linalg.norm(right) + 1e-9
+            right /= rlen
+            up = np.cross(right, fwd)
+            ulen = np.linalg.norm(up) + 1e-9
+            up /= ulen
+
+        else:  # cylindrical — per-billboard right from eye to anchor (XZ only)
+            fwdX = bb.world_x - ecx
+            fwdZ = bb.world_z - ecz
+            flen = math.sqrt(fwdX*fwdX + fwdZ*fwdZ) + 1e-9
+            fwdX /= flen; fwdZ /= flen
+            # right = forward rotated 90 CW around Y: (-fwdZ, 0, fwdX)
+            right = np.array([-fwdZ, 0.0, fwdX], dtype=np.float64)
+            up    = world_up
+
+        # Four corners: bottom edge at anchor Y, top edge at anchor Y + height
+        bl = cx - right * hw
+        br = cx + right * hw
+        tl = bl + up * hh
+        tr = br + up * hh
+
+        rc, gc, bc = bb.r / 255.0, bb.g / 255.0, bb.b / 255.0
+
+        # UV corners — the editor uploads textures with np.flipud so OpenGL
+        # v=0 == image bottom, v=1 == image top.
+        # tl/tr are the TOP world corners → they should sample from the top of
+        # the texture → v=1.  bl/br are the BOTTOM corners → v=0.
+        # Without this correction the billboard renders upside-down.
+        uvs = {"tl": (0, 1), "tr": (1, 1), "bl": (0, 0), "br": (1, 0)}
+
+        # Apply 90° CW rotation steps (each step rotates the texture CW).
+        # CW rotation maps: tl←bl, tr←tl, br←tr, bl←br
+        steps = (bb.rotation // 90) % 4
+        for _ in range(steps):
+            old_u = dict(uvs)
+            uvs["tl"] = old_u["bl"]
+            uvs["tr"] = old_u["tl"]
+            uvs["br"] = old_u["tr"]
+            uvs["bl"] = old_u["br"]
+
+        tex_h = None
+        if bb.tex_id != NO_TEX and self.world:
+            dtex = self.world.texture_by_id(bb.tex_id)
+            if dtex:
+                tex_h = self._get_or_upload_texture(dtex)
+
+        mvp = self._build_mvp()
+        verts = [
+            *tl, rc, gc, bc, *uvs["tl"],
+            *bl, rc, gc, bc, *uvs["bl"],
+            *tr, rc, gc, bc, *uvs["tr"],
+            *tr, rc, gc, bc, *uvs["tr"],
+            *bl, rc, gc, bc, *uvs["bl"],
+            *br, rc, gc, bc, *uvs["br"],
+        ]
+        arr = np.array(verts, dtype=np.float32).reshape(-1, 8)
+        glDisable(GL_CULL_FACE)
+        self._draw_tris(mvp, arr, tex_handle=tex_h)
+        glEnable(GL_CULL_FACE)
+
+        if selected:
+            sel_col = (1.0, 0.85, 0.1)
+            pts = [
+                *tl, *sel_col, *tr, *sel_col,
+                *tr, *sel_col, *br, *sel_col,
+                *br, *sel_col, *bl, *sel_col,
+                *bl, *sel_col, *tl, *sel_col,
+            ]
+            arr2 = np.array(pts, dtype=np.float32).reshape(-1, 6)
+            glDisable(GL_DEPTH_TEST)
+            self._draw_lines(mvp, arr2, line_width=2.0)
+            glEnable(GL_DEPTH_TEST)
+
+    def _draw_billboard_gizmo(self, mvp, bb: "DSBillboard"):
+        """Draw XYZ translate arrows centred on the billboard's world position."""
+        cx, cy, cz = bb.world_x, bb.world_y, bb.world_z
+        L  = CHUNK_WORLD_UNIT * 0.7
+        HW = CHUNK_WORLD_UNIT * 0.10
+        HL = CHUNK_WORLD_UNIT * 0.18
+
+        def arrow(dx, dy, dz, col):
+            ex, ey, ez = cx+dx*L, cy+dy*L, cz+dz*L
+            if abs(dy) < 0.9: perp = np.cross([dx,dy,dz],[0,1,0])
+            else:              perp = np.cross([dx,dy,dz],[1,0,0])
+            perp = perp/(np.linalg.norm(perp)+1e-9)*HW
+            bx,by,bz = ex-dx*HL, ey-dy*HL, ez-dz*HL
+            return [
+                cx,cy,cz,*col, ex,ey,ez,*col,
+                ex,ey,ez,*col, bx+perp[0],by+perp[1],bz+perp[2],*col,
+                ex,ey,ez,*col, bx-perp[0],by-perp[1],bz-perp[2],*col,
+            ]
+
+        pts = (arrow(1,0,0,(1.,.2,.2)) +
+               arrow(0,1,0,(.2,.9,.2)) +
+               arrow(0,0,1,(.2,.5,1.)))
+        d = HW*0.5
+        pts += [cx-d,cy,cz, 1.,1.,1.,  cx+d,cy,cz, 1.,1.,1.,
+                cx,cy,cz-d, 1.,1.,1.,  cx,cy,cz+d, 1.,1.,1.]
+        arr = np.array(pts, dtype=np.float32).reshape(-1,6)
+        glDisable(GL_DEPTH_TEST)
+        self._draw_lines(mvp, arr, line_width=2.5)
+        glEnable(GL_DEPTH_TEST)
+
+    def _hit_billboard_gizmo(self, sx, sy):
+        """Return 'x','y','z' if gizmo arrow hit, else None."""
+        if self._selected_billboard < 0 or not self.world:
+            return None
+        if self._selected_billboard >= len(self.world.billboards):
+            return None
+        bb = self.world.billboards[self._selected_billboard]
+        cx, cy, cz = bb.world_x, bb.world_y, bb.world_z
+        L  = CHUNK_WORLD_UNIT * 0.7
+        HW = CHUNK_WORLD_UNIT * 0.18
+        orig, direction = self._screen_ray(sx, sy)
+
+        for axis, ddx, ddy, ddz in [('x',1,0,0),('y',0,1,0),('z',0,0,1)]:
+            p0 = np.array([cx,cy,cz], dtype=np.float64)
+            d  = np.array([ddx,ddy,ddz], dtype=np.float64)
+            w  = orig - p0
+            a  = np.dot(direction,direction) - np.dot(direction,d)**2
+            b  = 2*(np.dot(direction,w) - np.dot(direction,d)*np.dot(w,d))
+            c_ = np.dot(w,w) - np.dot(w,d)**2 - HW**2
+            disc = b*b - 4*a*c_
+            if disc < 0 or abs(a) < 1e-10: continue
+            t = (-b - math.sqrt(disc))/(2*a)
+            if t < 0: continue
+            hit = orig + direction*t
+            proj = float(np.dot(hit - p0, d))
+            if 0 <= proj <= L:
+                return axis
+        return None
+
+    def _draw_foliage_cursor(self, mvp):
+        """Draw a circle on the ground plane showing the foliage brush radius."""
+        wx, wz = self._foliage_brush_pos
+        r = getattr(self, "_foliage_brush_radius", 4.0)
+        segs = 32
+        col = (0.4, 0.9, 0.3)   # green
+        pts = []
+        for i in range(segs):
+            a0 = 2 * math.pi * i / segs
+            a1 = 2 * math.pi * (i + 1) / segs
+            pts += [wx + r * math.cos(a0), 0.08, wz + r * math.sin(a0), *col,
+                    wx + r * math.cos(a1), 0.08, wz + r * math.sin(a1), *col]
+        arr = np.array(pts, dtype=np.float32).reshape(-1, 6)
+        glDisable(GL_DEPTH_TEST)
+        self._draw_lines(mvp, arr, line_width=2.0)
+        glEnable(GL_DEPTH_TEST)
+
+    def _foliage_try_paint(self, wx, wz, erase=False):
+        """Add or remove foliage instances near (wx, wz)."""
+        if not self.world:
+            return
+        radius   = getattr(self, "_foliage_brush_radius",   4.0)
+        density  = getattr(self, "_foliage_brush_density",  5)
+        rand_amt = getattr(self, "_foliage_brush_random",   0.7)
+        brush    = getattr(self, "_foliage_brush_settings", None)
+
+        if erase:
+            # Remove all instances within radius
+            r2 = radius * radius
+            self.world.foliage = [
+                fi for fi in self.world.foliage
+                if (fi.world_x - wx)**2 + (fi.world_z - wz)**2 > r2
+            ]
+            self.update()
+            # Notify any FoliageToolPanel listening on the main window
+            p = self.parent()
+            while p:
+                if hasattr(p, "foliage_panel"):
+                    p.foliage_panel.refresh_count()
+                    break
+                p = p.parent() if hasattr(p, "parent") else None
+            return
+
+        if brush is None:
+            return
+
+        import random as _rnd
+
+        min_sep   = max(0.05, (brush["width"] * 0.5) * (1.0 - rand_amt * 0.8))
+        min_sep2  = min_sep * min_sep
+
+        # Build a spatial grid covering the brush area so the proximity check
+        # is O(1) per candidate instead of O(n) — critical once the foliage
+        # list grows large.
+        cell = max(min_sep, 0.1)
+        # Grid key: (int(x/cell), int(z/cell))
+        _grid: dict[tuple, list] = {}
+        search_r = radius + min_sep
+        gx0 = int((wx - search_r) / cell) - 1
+        gx1 = int((wx + search_r) / cell) + 1
+        gz0 = int((wz - search_r) / cell) - 1
+        gz1 = int((wz + search_r) / cell) + 1
+        for fi in self.world.foliage:
+            k = (int(fi.world_x / cell), int(fi.world_z / cell))
+            if gx0 <= k[0] <= gx1 and gz0 <= k[1] <= gz1:
+                _grid.setdefault(k, []).append((fi.world_x, fi.world_z))
+
+        def _too_close(px, pz):
+            ck = (int(px / cell), int(pz / cell))
+            for dk0 in (-1, 0, 1):
+                for dk1 in (-1, 0, 1):
+                    for ox, oz in _grid.get((ck[0]+dk0, ck[1]+dk1), []):
+                        if (ox-px)**2 + (oz-pz)**2 < min_sep2:
+                            return True
+            return False
+
+        placed = 0
+        attempts = 0
+        r2 = radius * radius
+        while placed < density and attempts < density * 20:
+            attempts += 1
+            angle  = _rnd.uniform(0, 2 * math.pi)
+            dist   = radius * math.sqrt(_rnd.uniform(0, 1))
+            px = wx + math.cos(angle) * dist
+            pz = wz + math.sin(angle) * dist
+            if _too_close(px, pz):
+                continue
+            fi = DSFoliageInstance()
+            fi.world_x  = px
+            fi.world_y  = brush["world_y"]
+            fi.world_z  = pz
+            fi.width    = brush["width"]  * _rnd.uniform(1.0 - rand_amt * 0.3, 1.0 + rand_amt * 0.3)
+            fi.height   = brush["height"] * _rnd.uniform(1.0 - rand_amt * 0.3, 1.0 + rand_amt * 0.3)
+            fi.rotation = _rnd.choice([0, 90, 180, 270]) if rand_amt > 0.1 else brush["rotation"]
+            fi.bb_mode  = brush["bb_mode"]
+            fi.tex_id   = brush["tex_id"]
+            fi.r = brush["r"]; fi.g = brush["g"]; fi.b = brush["b"]
+            self.world.foliage.append(fi)
+            # Add to local grid so subsequent placements in the same stroke also
+            # respect the separation — prevents stacking within one mouse drag.
+            k2 = (int(px / cell), int(pz / cell))
+            _grid.setdefault(k2, []).append((px, pz))
+            placed += 1
+        self.update()
+
     def focus_on_chunk(self, chunk: DSChunk):
         self.cam_target = [chunk.grid_x * CHUNK_WORLD_UNIT, 0.0,
                            chunk.grid_z * CHUNK_WORLD_UNIT]
         self.cam_dist = 50.0
         self.update()
+
+
+# ---------------------------------------------------------------------------
+# Model Editor — standalone window for editing model geometry
+# ---------------------------------------------------------------------------
+class ModelEditorViewport(QOpenGLWidget):
+    """3D viewport inside the Model Editor. Supports:
+    - Orbit (RMB drag), pan (MMB drag), zoom (wheel)
+    - Vertex / edge / face selection (click)
+    - XYZ gizmo to move selected elements
+    - Vertex colour painting
+    """
+    selection_changed = pyqtSignal()
+
+    _VERT_SRC = """
+#version 120
+uniform mat4 u_mvp;
+attribute vec3 a_pos;
+attribute vec3 a_color;
+attribute vec2 a_uv;
+varying vec3 v_color;
+varying vec2 v_uv;
+void main() {
+    gl_Position = u_mvp * vec4(a_pos, 1.0);
+    v_color = a_color;
+    v_uv    = a_uv;
+}
+"""
+    _FRAG_SRC = """
+#version 120
+uniform sampler2D u_tex;
+uniform int       u_has_tex;
+varying vec3 v_color;
+varying vec2 v_uv;
+void main() {
+    vec4 t = texture2D(u_tex, v_uv);
+    float use = float(u_has_tex);
+    gl_FragColor = vec4(mix(v_color, v_color * t.rgb, use), 1.0);
+}
+"""
+    _FRAG_FLAT_SRC = """
+#version 120
+varying vec3 v_color;
+void main() { gl_FragColor = vec4(v_color, 1.0); }
+"""
+
+    # Edit modes
+    MODE_VERT  = "vertex"
+    MODE_EDGE  = "edge"
+    MODE_FACE  = "face"
+
+    def __init__(self, chunk: "DSChunk", world: "WorldFile", parent=None):
+        super().__init__(parent)
+        self.chunk = chunk
+        self.world = world
+        self._cam_yaw   = 30.0
+        self._cam_pitch = -25.0
+        self._cam_dist  = 12.0
+        self._cam_target = [0.0, 0.0, 0.0]
+        self._last_mouse = None
+        self._rmb = self._mmb = False
+        self._vp_w = self._vp_h = 1
+        self._proj = np.eye(4, dtype=np.float32)
+        # Selection
+        self.mode = self.MODE_VERT
+        self.selected: set[int] = set()  # indices into obj_verts list
+        # Gizmo
+        self._gizmo_axis  = None
+        self._gizmo_start_screen = None
+        self._gizmo_start_positions: list = []  # [(v_idx, ox, oy, oz)]
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+
+    @property
+    def obj_verts(self):
+        """The editable vertices (skip the 6-vert floor placeholder)."""
+        return self.chunk.vertices[6:]
+
+    def _centroid(self):
+        verts = self.obj_verts
+        if not verts:
+            return [0.0, 0.0, 0.0]
+        xs = [v.x / FP for v in verts]
+        ys = [v.y / FP for v in verts]
+        zs = [v.z / FP for v in verts]
+        return [sum(xs)/len(xs), sum(ys)/len(ys), sum(zs)/len(zs)]
+
+    def initializeGL(self):
+        glEnable(GL_DEPTH_TEST)
+        glClearColor(0.12, 0.13, 0.16, 1.0)
+        # Main shader
+        self._prog = self._link(self._VERT_SRC, self._FRAG_SRC)
+        self._uloc_mvp  = glGetUniformLocation(self._prog, "u_mvp")
+        self._uloc_tex  = glGetUniformLocation(self._prog, "u_tex")
+        self._uloc_htex = glGetUniformLocation(self._prog, "u_has_tex")
+        # Flat shader for lines/overlays
+        self._prog_flat = self._link(self._VERT_SRC, self._FRAG_FLAT_SRC)
+        self._uloc_mvp_flat = glGetUniformLocation(self._prog_flat, "u_mvp")
+        # White fallback texture
+        self._tex_white = int(glGenTextures(1))
+        glBindTexture(GL_TEXTURE_2D, self._tex_white)
+        white = np.array([255,255,255,255], dtype=np.uint8)
+        glTexImage2D(GL_TEXTURE_2D, 0, 0x1908, 1, 1, 0, 0x1908, GL_UNSIGNED_BYTE, white)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        self._gl_textures: dict[int, int] = {}
+        # Auto-fit camera
+        c = self._centroid()
+        self._cam_target = c
+
+    @staticmethod
+    def _compile(src, kind):
+        s = glCreateShader(kind)
+        glShaderSource(s, src)
+        glCompileShader(s)
+        if not glGetShaderiv(s, GL_COMPILE_STATUS):
+            raise RuntimeError(glGetShaderInfoLog(s).decode())
+        return s
+
+    @classmethod
+    def _link(cls, vs_src, fs_src):
+        vs = cls._compile(vs_src, GL_VERTEX_SHADER)
+        fs = cls._compile(fs_src, GL_FRAGMENT_SHADER)
+        prog = glCreateProgram()
+        glAttachShader(prog, vs); glAttachShader(prog, fs)
+        glBindAttribLocation(prog, 0, "a_pos")
+        glBindAttribLocation(prog, 1, "a_color")
+        glBindAttribLocation(prog, 2, "a_uv")
+        glLinkProgram(prog)
+        if not glGetProgramiv(prog, GL_LINK_STATUS):
+            raise RuntimeError(glGetProgramInfoLog(prog).decode())
+        glDeleteShader(vs); glDeleteShader(fs)
+        return prog
+
+    def resizeGL(self, w, h):
+        self._vp_w, self._vp_h = max(w,1), max(h,1)
+        glViewport(0, 0, w, h)
+        f  = 1.0 / math.tan(math.radians(45.0) / 2.0)
+        nf = 1.0 / (0.01 - 500.0)
+        asp = w / max(h, 1)
+        self._proj = np.array([
+            [f/asp, 0,           0,                    0],
+            [0,     f,           0,                    0],
+            [0,     0, (500+0.01)*nf,   2*500*0.01*nf],
+            [0,     0,          -1,                    0],
+        ], dtype=np.float32)
+
+    def _mvp(self, tx=0, ty=0, tz=0):
+        yaw   = math.radians(self._cam_yaw)
+        pitch = math.radians(self._cam_pitch)
+        cx = self._cam_target[0] + self._cam_dist * math.cos(pitch) * math.sin(yaw)
+        cy = self._cam_target[1] + self._cam_dist * math.sin(pitch)
+        cz = self._cam_target[2] + self._cam_dist * math.cos(pitch) * math.cos(yaw)
+        eye = np.array([cx, cy, cz], dtype=np.float64)
+        tgt = np.array(self._cam_target, dtype=np.float64)
+        f = tgt - eye; f /= np.linalg.norm(f)
+        u = np.array([0,1,0], dtype=np.float64)
+        s = np.cross(f, u); s /= np.linalg.norm(s)
+        u = np.cross(s, f)
+        mv = np.eye(4, dtype=np.float32)
+        mv[0,:3]=s;  mv[0,3]=-float(np.dot(s,eye))
+        mv[1,:3]=u;  mv[1,3]=-float(np.dot(u,eye))
+        mv[2,:3]=-f; mv[2,3]= float(np.dot(f,eye))
+        if tx or ty or tz:
+            T = np.eye(4, dtype=np.float32)
+            T[0,3]=tx; T[1,3]=ty; T[2,3]=tz
+            mv = mv @ T
+        return np.ascontiguousarray((self._proj @ mv).T, dtype=np.float32)
+
+    def _get_or_upload_tex(self, tex: "DSTexture"):
+        if tex.tex_id in self._gl_textures:
+            return self._gl_textures[tex.tex_id]
+        img = tex.get_pil()
+        if img is None: return None
+        handle = int(glGenTextures(1))
+        glBindTexture(GL_TEXTURE_2D, handle)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        arr = np.ascontiguousarray(np.flipud(np.array(img.convert("RGBA"), dtype=np.uint8)))
+        glTexImage2D(GL_TEXTURE_2D, 0, 0x1908, tex.width, tex.height, 0,
+                     0x1908, GL_UNSIGNED_BYTE, arr)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        self._gl_textures[tex.tex_id] = handle
+        return handle
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        mvp = self._mvp()
+        verts = self.obj_verts
+        if not verts:
+            return
+
+        # --- Draw mesh triangles ---
+        glDisable(GL_CULL_FACE)
+        batches: dict[int, list] = {}
+        for ti, v in enumerate(verts):
+            v_idx = ti  # raw vert index in obj_verts
+            tri_idx = ti // 3
+            is_sel = any(i in self.selected for i in range(tri_idx*3, tri_idx*3+3)) if self.mode==self.MODE_FACE else v_idx in self.selected
+            if is_sel:
+                rc, gc, bc = 1.0, 0.7, 0.1
+            else:
+                rc, gc, bc = v.r/255., v.g/255., v.b/255.
+            tid = int(v.tex_id)
+            if tid not in batches: batches[tid] = []
+            vx, vy, vz = v.x/FP, v.y/FP, v.z/FP
+            if tid != NO_TEX and self.world:
+                dtex = self.world.texture_by_id(tid)
+                if dtex:
+                    tu = v.u / (max(dtex.width,1)*16.0)
+                    tv = v.v / (max(dtex.height,1)*16.0)
+                else:
+                    tu = tv = 0.0
+            else:
+                tu = tv = 0.0
+            batches[tid].append((vx, vy, vz, rc, gc, bc, tu, tv))
+
+        glUseProgram(self._prog)
+        glUniformMatrix4fv(self._uloc_mvp, 1, GL_FALSE, mvp)
+        glUniform1i(self._uloc_tex, 0)
+        for tid, vdata in batches.items():
+            tex_h = None
+            if tid != NO_TEX and self.world:
+                dtex = self.world.texture_by_id(tid)
+                if dtex: tex_h = self._get_or_upload_tex(dtex)
+            glUniform1i(self._uloc_htex, 1 if tex_h else 0)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, tex_h if tex_h else self._tex_white)
+            arr = np.array(vdata, dtype=np.float32)
+            pos = np.ascontiguousarray(arr[:, :3])
+            col = np.ascontiguousarray(arr[:, 3:6])
+            uv  = np.ascontiguousarray(arr[:, 6:8])
+            glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2)
+            glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,pos)
+            glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,0,col)
+            glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,0,uv)
+            glDrawArrays(GL_TRIANGLES, 0, len(arr))
+            glDisableVertexAttribArray(0); glDisableVertexAttribArray(1); glDisableVertexAttribArray(2)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glEnable(GL_CULL_FACE)
+
+        # --- Draw wireframe overlay ---
+        glUseProgram(self._prog_flat)
+        glUniformMatrix4fv(self._uloc_mvp_flat, 1, GL_FALSE, mvp)
+        wire_pts = []
+        wc = (0.3, 0.35, 0.4)
+        for ti in range(len(verts)//3):
+            a, b, c = verts[ti*3], verts[ti*3+1], verts[ti*3+2]
+            for v0, v1 in [(a,b),(b,c),(c,a)]:
+                wire_pts += [v0.x/FP, v0.y/FP, v0.z/FP, *wc,
+                             v1.x/FP, v1.y/FP, v1.z/FP, *wc]
+        if wire_pts:
+            arr = np.array(wire_pts, dtype=np.float32).reshape(-1, 6)
+            pos = np.ascontiguousarray(arr[:,:3]); col = np.ascontiguousarray(arr[:,3:])
+            uv  = np.zeros((len(arr), 2), dtype=np.float32)
+            glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2)
+            glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,pos)
+            glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,0,col)
+            glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,0,uv)
+            glLineWidth(1.0)
+            glDrawArrays(GL_LINES, 0, len(arr))
+            glDisableVertexAttribArray(0); glDisableVertexAttribArray(1); glDisableVertexAttribArray(2)
+
+        # --- Draw vertex dots ---
+        if self.mode == self.MODE_VERT:
+            vc_pts = []
+            for vi, v in enumerate(verts):
+                col = (1.0,0.7,0.1) if vi in self.selected else (0.8, 0.9, 1.0)
+                vc_pts += [v.x/FP, v.y/FP, v.z/FP, *col]
+            if vc_pts:
+                arr = np.array(vc_pts, dtype=np.float32).reshape(-1, 6)
+                pos = np.ascontiguousarray(arr[:,:3]); col = np.ascontiguousarray(arr[:,3:])
+                uv  = np.zeros((len(arr), 2), dtype=np.float32)
+                glPointSize(6.0)
+                glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2)
+                glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,pos)
+                glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,0,col)
+                glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,0,uv)
+                glDrawArrays(GL_POINTS, 0, len(arr))
+                glDisableVertexAttribArray(0); glDisableVertexAttribArray(1); glDisableVertexAttribArray(2)
+                glPointSize(1.0)
+
+        # --- Gizmo ---
+        if self.selected:
+            sx, sy, sz = self._selection_centroid()
+            self._draw_gizmo(mvp, sx, sy, sz)
+
+        glUseProgram(0)
+
+    def _selection_centroid(self):
+        verts = self.obj_verts
+        if not verts or not self.selected: return 0.,0.,0.
+        sel = [verts[i] for i in self.selected if i < len(verts)]
+        if not sel: return 0.,0.,0.
+        return (sum(v.x/FP for v in sel)/len(sel),
+                sum(v.y/FP for v in sel)/len(sel),
+                sum(v.z/FP for v in sel)/len(sel))
+
+    def _draw_gizmo(self, mvp, cx, cy, cz):
+        L  = self._cam_dist * 0.15
+        HW = L * 0.15
+        HL = L * 0.25
+        def arrow(dx,dy,dz,col):
+            ex,ey,ez = cx+dx*L, cy+dy*L, cz+dz*L
+            if abs(dy)<0.9: perp = np.cross([dx,dy,dz],[0,1,0])
+            else:           perp = np.cross([dx,dy,dz],[1,0,0])
+            perp = perp/(np.linalg.norm(perp)+1e-9)*HW
+            bx,by,bz = ex-dx*HL,ey-dy*HL,ez-dz*HL
+            return [cx,cy,cz,*col, ex,ey,ez,*col,
+                    ex,ey,ez,*col, bx+perp[0],by+perp[1],bz+perp[2],*col,
+                    ex,ey,ez,*col, bx-perp[0],by-perp[1],bz-perp[2],*col]
+        pts = arrow(1,0,0,(1,.2,.2)) + arrow(0,1,0,(.2,.9,.2)) + arrow(0,0,1,(.2,.5,1.))
+        arr = np.array(pts, dtype=np.float32).reshape(-1,6)
+        pos = np.ascontiguousarray(arr[:,:3]); col = np.ascontiguousarray(arr[:,3:])
+        uv  = np.zeros((len(arr),2), dtype=np.float32)
+        glUseProgram(self._prog_flat)
+        glUniformMatrix4fv(self._uloc_mvp_flat,1,GL_FALSE,mvp)
+        glDisable(GL_DEPTH_TEST)
+        glLineWidth(2.5)
+        glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2)
+        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,0,pos)
+        glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,0,col)
+        glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,0,uv)
+        glDrawArrays(GL_LINES, 0, len(arr))
+        glDisableVertexAttribArray(0); glDisableVertexAttribArray(1); glDisableVertexAttribArray(2)
+        glLineWidth(1.0)
+        glEnable(GL_DEPTH_TEST)
+
+    def _screen_ray(self, sx, sy):
+        dpr = self.devicePixelRatioF()
+        w, h = self._vp_w, self._vp_h
+        ndc_x = 2.0*(sx*dpr)/w - 1.0
+        ndc_y = 1.0 - 2.0*(sy*dpr)/h
+        asp = w/h
+        tan_f = math.tan(math.radians(22.5))
+        yaw   = math.radians(self._cam_yaw)
+        pitch = math.radians(self._cam_pitch)
+        cx = self._cam_target[0] + self._cam_dist*math.cos(pitch)*math.sin(yaw)
+        cy = self._cam_target[1] + self._cam_dist*math.sin(pitch)
+        cz = self._cam_target[2] + self._cam_dist*math.cos(pitch)*math.cos(yaw)
+        eye = np.array([cx,cy,cz], dtype=np.float64)
+        fwd = np.array(self._cam_target, dtype=np.float64) - eye
+        fwd /= np.linalg.norm(fwd)
+        right = np.cross(fwd, [0,1,0]); right /= np.linalg.norm(right)
+        up    = np.cross(right, fwd);    up    /= np.linalg.norm(up)
+        direction = fwd + right*(ndc_x*tan_f*asp) + up*(ndc_y*tan_f)
+        direction /= np.linalg.norm(direction)
+        return eye, direction
+
+    def _hit_gizmo(self, sx, sy):
+        if not self.selected: return None
+        cx, cy, cz = self._selection_centroid()
+        L  = self._cam_dist * 0.15
+        HW = L * 0.25
+        orig, direction = self._screen_ray(sx, sy)
+        # Test X axis: ray vs cylinder along X
+        for axis, dx, dy, dz in [('x',1,0,0),('y',0,1,0),('z',0,0,1)]:
+            # Simple approach: find t where ray is closest to axis line
+            p0 = np.array([cx,cy,cz], dtype=np.float64)
+            d  = np.array([dx,dy,dz], dtype=np.float64)
+            w  = orig - p0
+            a  = np.dot(direction, direction) - np.dot(direction,d)**2
+            b  = 2*(np.dot(direction,w) - np.dot(direction,d)*np.dot(w,d))
+            c_ = np.dot(w,w) - np.dot(w,d)**2 - HW**2
+            disc = b*b - 4*a*c_
+            if disc < 0 or abs(a) < 1e-10: continue
+            t = (-b - math.sqrt(disc))/(2*a)
+            if t < 0: continue
+            hit = orig + direction*t
+            proj = np.dot(hit - p0, d)
+            if 0 <= proj <= L:
+                return axis
+        return None
+
+    def _pick_vertex(self, sx, sy):
+        orig, direction = self._screen_ray(sx, sy)
+        best_i, best_t = -1, float('inf')
+        verts = self.obj_verts
+        for i, v in enumerate(verts):
+            pt = np.array([v.x/FP, v.y/FP, v.z/FP], dtype=np.float64)
+            w  = pt - orig
+            t  = np.dot(w, direction)
+            if t < 0: continue
+            dist = np.linalg.norm(w - direction*t)
+            thresh = self._cam_dist * 0.015
+            if dist < thresh and t < best_t:
+                best_t, best_i = t, i
+        return best_i
+
+    def _pick_face(self, sx, sy):
+        orig, direction = self._screen_ray(sx, sy)
+        best_i, best_t = -1, float('inf')
+        verts = self.obj_verts
+        for ti in range(len(verts)//3):
+            a, b, c = verts[ti*3], verts[ti*3+1], verts[ti*3+2]
+            v0 = np.array([a.x/FP,a.y/FP,a.z/FP])
+            v1 = np.array([b.x/FP,b.y/FP,b.z/FP])
+            v2 = np.array([c.x/FP,c.y/FP,c.z/FP])
+            e1, e2 = v1-v0, v2-v0
+            pv = np.cross(direction, e2)
+            det = np.dot(e1, pv)
+            if abs(det) < 1e-8: continue
+            inv = 1/det
+            tv = orig - v0
+            u  = np.dot(tv, pv)*inv
+            if u < 0 or u > 1: continue
+            qv = np.cross(tv, e1)
+            vv = np.dot(direction, qv)*inv
+            if vv < 0 or u+vv > 1: continue
+            t  = np.dot(e2, qv)*inv
+            if t > 0 and t < best_t:
+                best_t, best_i = t, ti*3  # return index of first vert in tri
+        return best_i
+
+    def mousePressEvent(self, e):
+        self._last_mouse = e.position()
+        sx, sy = e.position().x(), e.position().y()
+        if e.button() == Qt.MouseButton.LeftButton:
+            axis = self._hit_gizmo(sx, sy)
+            if axis and self.selected:
+                self._gizmo_axis = axis
+                self._gizmo_start_screen = (sx, sy)
+                verts = self.obj_verts
+                self._gizmo_start_positions = [
+                    (i, verts[i].x, verts[i].y, verts[i].z)
+                    for i in self.selected if i < len(verts)
+                ]
+                return
+            # Selection
+            mods = QApplication.keyboardModifiers()
+            add = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+            if self.mode == self.MODE_VERT:
+                idx = self._pick_vertex(sx, sy)
+                if idx >= 0:
+                    if add: self.selected ^= {idx}
+                    else:   self.selected = {idx}
+                elif not add:
+                    self.selected.clear()
+            elif self.mode == self.MODE_FACE:
+                idx = self._pick_face(sx, sy)
+                if idx >= 0:
+                    tri_verts = {idx, idx+1, idx+2}
+                    if add: self.selected ^= tri_verts
+                    else:   self.selected = tri_verts
+                elif not add:
+                    self.selected.clear()
+            self.selection_changed.emit()
+            self.update()
+        if e.button() == Qt.MouseButton.RightButton:  self._rmb = True
+        if e.button() == Qt.MouseButton.MiddleButton: self._mmb = True
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._gizmo_axis = None
+            self._gizmo_start_positions = []
+        if e.button() == Qt.MouseButton.RightButton:  self._rmb = False
+        if e.button() == Qt.MouseButton.MiddleButton: self._mmb = False
+
+    def mouseMoveEvent(self, e):
+        if self._last_mouse is None:
+            self._last_mouse = e.position(); return
+        sx, sy = e.position().x(), e.position().y()
+        dx = sx - self._last_mouse.x()
+        dy = sy - self._last_mouse.y()
+        self._last_mouse = e.position()
+
+        if self._gizmo_axis and self._gizmo_start_positions:
+            sx0, sy0 = self._gizmo_start_screen
+            total_dx = sx - sx0
+            total_dy = sy - sy0
+            # Scale move by camera distance
+            spd = self._cam_dist * 0.005
+            verts = self.obj_verts
+            for vi, ox, oy, oz in self._gizmo_start_positions:
+                if vi >= len(verts): continue
+                v = verts[vi]
+                if   self._gizmo_axis == 'x': v.x = clamp_s16(ox + to_fp(total_dx * spd))
+                elif self._gizmo_axis == 'y': v.y = clamp_s16(oy - to_fp(total_dy * spd))
+                elif self._gizmo_axis == 'z': v.z = clamp_s16(oz + to_fp(total_dx * spd))
+            self.update()
+            return
+
+        if self._rmb:
+            self._cam_yaw   += dx * 0.4
+            self._cam_pitch += dy * 0.3
+            self._cam_pitch = max(-89, min(89, self._cam_pitch))
+            self.update()
+        elif self._mmb:
+            yaw   = math.radians(self._cam_yaw)
+            right = [math.cos(yaw), 0, -math.sin(yaw)]
+            spd   = self._cam_dist * 0.005
+            self._cam_target[0] -= right[0]*dx*spd
+            self._cam_target[2] -= right[2]*dx*spd
+            self._cam_target[1] += dy*spd
+            self.update()
+
+    def wheelEvent(self, e):
+        self._cam_dist *= 0.9 if e.angleDelta().y() > 0 else 1.1
+        self._cam_dist = max(0.5, min(500, self._cam_dist))
+        self.update()
+
+
+class ModelEditorWindow(QDialog):
+    """Standalone window for editing a model chunk's geometry."""
+
+    def __init__(self, chunk: "DSChunk", world: "WorldFile", parent=None):
+        super().__init__(parent)
+        self.chunk = chunk
+        self.world = world
+        self.setWindowTitle(f"Model Editor — {chunk.name}")
+        self.resize(1100, 700)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0,0,0,0)
+        root.setSpacing(0)
+
+        # --- Toolbar ---
+        tb = QToolBar()
+        tb.setMovable(False)
+        tb.setStyleSheet("QToolBar { background:#1a1c22; border-bottom:1px solid #2a2d35; spacing:4px; }")
+
+        def tbtn(label, tip, slot):
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            b.setFixedHeight(26)
+            b.setCheckable(False)
+            b.clicked.connect(slot)
+            tb.addWidget(b)
+            return b
+
+        self._mode_btns = {}
+        for mode, label, tip in [
+            (ModelEditorViewport.MODE_VERT, "◉ Vertex", "Select individual vertices"),
+            (ModelEditorViewport.MODE_FACE, "△ Face",   "Select whole triangles"),
+        ]:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setChecked(mode == ModelEditorViewport.MODE_VERT)
+            b.setFixedHeight(26)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda checked, m=mode: self._set_mode(m))
+            tb.addWidget(b)
+            self._mode_btns[mode] = b
+
+        tb.addSeparator()
+        tbtn("Select All",    "Select all vertices (Ctrl+A)", self._select_all)
+        tbtn("Select None",   "Deselect all",                 self._select_none)
+        tb.addSeparator()
+        tbtn("Delete Faces",  "Delete selected faces",        self._delete_faces)
+        tb.addSeparator()
+
+        root.addWidget(tb)
+
+        # --- Main splitter: viewport left, properties right ---
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        self.vp = ModelEditorViewport(self.chunk, self.world, self)
+        self.vp.selection_changed.connect(self._on_selection_changed)
+        splitter.addWidget(self.vp)
+
+        # Properties panel
+        props = QWidget()
+        props.setMinimumWidth(220)
+        props.setMaximumWidth(300)
+        pl = QVBoxLayout(props)
+        pl.setContentsMargins(6,6,6,6)
+        pl.setSpacing(4)
+
+        pl.addWidget(QLabel("Vertex Paint", objectName="sec_lbl"))
+        self._paint_color_btn = QPushButton()
+        self._paint_color_btn.setFixedHeight(28)
+        self._paint_color = QColor(200, 200, 200)
+        self._update_paint_btn()
+        self._paint_color_btn.clicked.connect(self._pick_paint_color)
+        pl.addWidget(self._paint_color_btn)
+        paint_btn = QPushButton("Paint Selection")
+        paint_btn.clicked.connect(self._paint_selection)
+        pl.addWidget(paint_btn)
+
+        pl.addWidget(QLabel("─"*30))
+        pl.addWidget(QLabel("Texture"))
+        self._tex_combo = QComboBox()
+        self._refresh_tex_combo()
+        pl.addWidget(self._tex_combo)
+        apply_tex_btn = QPushButton("Apply Tex to Selection")
+        apply_tex_btn.clicked.connect(self._apply_tex)
+        pl.addWidget(apply_tex_btn)
+
+        pl.addWidget(QLabel("─"*30))
+        pl.addWidget(QLabel("Selection Info"))
+        self._info_lbl = QLabel("Nothing selected")
+        self._info_lbl.setWordWrap(True)
+        pl.addWidget(self._info_lbl)
+
+        pl.addStretch(1)
+
+        close_btn = QPushButton("Close & Apply")
+        close_btn.clicked.connect(self.accept)
+        pl.addWidget(close_btn)
+
+        splitter.addWidget(props)
+        splitter.setSizes([820, 240])
+        root.addWidget(splitter, 1)
+
+        self._apply_style()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QDialog, QWidget { background:#13151a; color:#c8ccd4; }
+            QPushButton { background:#23262e; border:1px solid #33363f;
+                border-radius:3px; padding:3px 8px; color:#c8ccd4; }
+            QPushButton:hover  { background:#2e3240; }
+            QPushButton:checked { background:#3a4a6a; border-color:#5a8adf; }
+            QComboBox { background:#1e2028; border:1px solid #2a2d35;
+                border-radius:3px; padding:2px 6px; color:#c8ccd4; }
+            QLabel[objectName="sec_lbl"] { font-weight:bold; color:#9ab; padding-top:6px; }
+            QSplitter::handle { background:#2a2d35; }
+            QToolBar { padding:2px; }
+        """)
+
+    def _set_mode(self, mode):
+        self.vp.mode = mode
+        self.vp.selected.clear()
+        for m, b in self._mode_btns.items():
+            b.setChecked(m == mode)
+        self.vp.update()
+
+    def _select_all(self):
+        self.vp.selected = set(range(len(self.vp.obj_verts)))
+        self.vp.update()
+        self._on_selection_changed()
+
+    def _select_none(self):
+        self.vp.selected.clear()
+        self.vp.update()
+        self._on_selection_changed()
+
+    def _delete_faces(self):
+        if not self.vp.selected: return
+        verts = self.vp.obj_verts
+        # Collect triangle indices that have ANY selected vert
+        keep = []
+        for ti in range(len(verts)//3):
+            tri = {ti*3, ti*3+1, ti*3+2}
+            if tri & self.vp.selected:
+                continue  # delete
+            keep += [verts[ti*3], verts[ti*3+1], verts[ti*3+2]]
+        # Replace object verts (after floor placeholder)
+        self.chunk.vertices = self.chunk.vertices[:6] + keep
+        self.vp.selected.clear()
+        self.vp.update()
+        self._on_selection_changed()
+
+    def _refresh_tex_combo(self):
+        self._tex_combo.clear()
+        self._tex_combo.addItem("(none)", NO_TEX)
+        if self.world:
+            for tex in self.world.textures:
+                self._tex_combo.addItem(f"[{tex.tex_id}] {tex.name}", tex.tex_id)
+
+    def _apply_tex(self):
+        tid = self._tex_combo.currentData()
+        for i in self.vp.selected:
+            verts = self.vp.obj_verts
+            if i < len(verts):
+                verts[i].tex_id = tid
+        self.vp.update()
+
+    def _update_paint_btn(self):
+        c = self._paint_color
+        self._paint_color_btn.setText(f"  Color  ({c.red()},{c.green()},{c.blue()})")
+        self._paint_color_btn.setStyleSheet(
+            f"background: rgb({c.red()},{c.green()},{c.blue()}); "
+            f"color: {'#000' if c.lightness() > 128 else '#fff'}; border:1px solid #555;")
+
+    def _pick_paint_color(self):
+        c = QColorDialog.getColor(self._paint_color, self, "Pick vertex colour")
+        if c.isValid():
+            self._paint_color = c
+            self._update_paint_btn()
+
+    def _paint_selection(self):
+        c = self._paint_color
+        for i in self.vp.selected:
+            verts = self.vp.obj_verts
+            if i < len(verts):
+                verts[i].r = c.red()
+                verts[i].g = c.green()
+                verts[i].b = c.blue()
+        self.vp.update()
+
+    def _on_selection_changed(self):
+        n = len(self.vp.selected)
+        if n == 0:
+            self._info_lbl.setText("Nothing selected")
+        else:
+            verts = self.vp.obj_verts
+            sel_verts = [verts[i] for i in self.vp.selected if i < len(verts)]
+            if sel_verts:
+                cx = sum(v.x/FP for v in sel_verts)/len(sel_verts)
+                cy = sum(v.y/FP for v in sel_verts)/len(sel_verts)
+                cz = sum(v.z/FP for v in sel_verts)/len(sel_verts)
+                self._info_lbl.setText(
+                    f"{n} vert(s) selected\n"
+                    f"Centroid:\n  X={cx:.3f}\n  Y={cy:.3f}\n  Z={cz:.3f}")
+            else:
+                self._info_lbl.setText(f"{n} selected")
+
+
+# ---------------------------------------------------------------------------
+# Billboard Inspector Panel (embedded in InspectorPanel when a billboard is selected)
+# ---------------------------------------------------------------------------
+class BillboardInspector(QWidget):
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bb: "DSBillboard | None" = None
+        self._world: "WorldFile | None" = None
+        self._build()
+
+    def _build(self):
+        fl = QFormLayout(self)
+        fl.setContentsMargins(4,4,4,4)
+        fl.setSpacing(3)
+
+        self.name_edit = QLineEdit()
+        fl.addRow("Name:", self.name_edit)
+
+        self.wx_spin = QDoubleSpinBox(); self.wx_spin.setRange(-9999,9999); self.wx_spin.setDecimals(3)
+        self.wy_spin = QDoubleSpinBox(); self.wy_spin.setRange(-9999,9999); self.wy_spin.setDecimals(3)
+        self.wz_spin = QDoubleSpinBox(); self.wz_spin.setRange(-9999,9999); self.wz_spin.setDecimals(3)
+        fl.addRow("X:", self.wx_spin); fl.addRow("Y:", self.wy_spin); fl.addRow("Z:", self.wz_spin)
+
+        self.w_spin = QDoubleSpinBox(); self.w_spin.setRange(0.1,100); self.w_spin.setDecimals(2)
+        self.h_spin = QDoubleSpinBox(); self.h_spin.setRange(0.1,100); self.h_spin.setDecimals(2)
+        fl.addRow("Width:",  self.w_spin)
+        fl.addRow("Height:", self.h_spin)
+
+        self.tex_combo = QComboBox()
+        fl.addRow("Texture:", self.tex_combo)
+
+        # Rotation: 90-degree CW steps
+        rot_row = QHBoxLayout()
+        self.rot_label = QLabel("0°")
+        self.rot_label.setFixedWidth(30)
+        rot_cw  = QPushButton("↻ 90°")
+        rot_ccw = QPushButton("↺ 90°")
+        rot_cw.setFixedHeight(22);  rot_ccw.setFixedHeight(22)
+        rot_cw.clicked.connect(self._rotate_cw)
+        rot_ccw.clicked.connect(self._rotate_ccw)
+        rot_row.addWidget(self.rot_label)
+        rot_row.addWidget(rot_ccw)
+        rot_row.addWidget(rot_cw)
+        fl.addRow("UV Rot:", rot_row)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Cylindrical (Y-rotate only)", "cylindrical")
+        self.mode_combo.addItem("Spherical (fully faces camera)", "spherical")
+        self.mode_combo.addItem("Fixed (no rotation)", "fixed")
+        fl.addRow("Mode:", self.mode_combo)
+
+        self._color_btn = QPushButton("Color (255,255,255)")
+        self._color = QColor(255,255,255)
+        self._color_btn.clicked.connect(self._pick_color)
+        fl.addRow("", self._color_btn)
+
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(self._apply)
+        fl.addRow("", apply_btn)
+
+    def set_world(self, world):
+        self._world = world
+        self._refresh_tex()
+
+    def _refresh_tex(self):
+        self.tex_combo.clear()
+        self.tex_combo.addItem("(none)", NO_TEX)
+        if self._world:
+            for tex in self._world.textures:
+                self.tex_combo.addItem(f"[{tex.tex_id}] {tex.name}", tex.tex_id)
+
+    def set_billboard(self, bb: "DSBillboard | None"):
+        self._bb = bb
+        self.setVisible(bb is not None)
+        if bb is None: return
+        self._refresh_tex()
+        self.name_edit.setText(bb.name)
+        self.wx_spin.setValue(bb.world_x)
+        self.wy_spin.setValue(bb.world_y)
+        self.wz_spin.setValue(bb.world_z)
+        self.w_spin.setValue(bb.width)
+        self.h_spin.setValue(bb.height)
+        self.rot_label.setText(f"{bb.rotation}°")
+        self._color = QColor(bb.r, bb.g, bb.b)
+        self._update_color_btn()
+        idx = self.tex_combo.findData(bb.tex_id)
+        if idx >= 0: self.tex_combo.setCurrentIndex(idx)
+        midx = self.mode_combo.findData(getattr(bb, "bb_mode", "cylindrical"))
+        if midx >= 0: self.mode_combo.setCurrentIndex(midx)
+
+    def _update_color_btn(self):
+        c = self._color
+        self._color_btn.setText(f"Color ({c.red()},{c.green()},{c.blue()})")
+        self._color_btn.setStyleSheet(
+            f"background:rgb({c.red()},{c.green()},{c.blue()});"
+            f"color:{'#000' if c.lightness()>128 else '#fff'};border:1px solid #555;")
+
+    def _pick_color(self):
+        c = QColorDialog.getColor(self._color, self, "Billboard colour")
+        if c.isValid():
+            self._color = c
+            self._update_color_btn()
+
+    def _rotate_cw(self):
+        if not self._bb: return
+        self._bb.rotation = (self._bb.rotation + 90) % 360
+        self.rot_label.setText(f"{self._bb.rotation}°")
+        self.changed.emit()
+
+    def _rotate_ccw(self):
+        if not self._bb: return
+        self._bb.rotation = (self._bb.rotation - 90) % 360
+        self.rot_label.setText(f"{self._bb.rotation}°")
+        self.changed.emit()
+
+    def _apply(self):
+        if not self._bb: return
+        self._bb.name    = self.name_edit.text()
+        self._bb.world_x = self.wx_spin.value()
+        self._bb.world_y = self.wy_spin.value()
+        self._bb.world_z = self.wz_spin.value()
+        self._bb.width    = self.w_spin.value()
+        self._bb.height   = self.h_spin.value()
+        self._bb.bb_mode  = self.mode_combo.currentData()
+        self._bb.tex_id   = self.tex_combo.currentData()
+        self._bb.r       = self._color.red()
+        self._bb.g       = self._color.green()
+        self._bb.b       = self._color.blue()
+        self.changed.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -1578,7 +3487,8 @@ class CollapsibleSection(QWidget):
 # Inspector Panel  (context-sensitive, section-based)
 # ---------------------------------------------------------------------------
 class InspectorPanel(QWidget):
-    changed = pyqtSignal()
+    changed          = pyqtSignal()
+    textures_changed = pyqtSignal()   # emitted whenever the texture list is modified
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1684,6 +3594,7 @@ class InspectorPanel(QWidget):
         self._build_floor_section()
         self._build_textures_section()
         self._build_stats_section()
+        self._build_billboard_section()
 
         # Default state: no selection → show only textures
         self._update_visible_sections(chunk_selected=False)
@@ -1892,6 +3803,20 @@ class InspectorPanel(QWidget):
 
         self._insert_section(self._sec_stats)
 
+    # ── Section: Billboard ──
+    def _build_billboard_section(self):
+        self._sec_billboard = CollapsibleSection("Billboard")
+        il = self._sec_billboard.inner_layout()
+        self._bb_inspector = BillboardInspector()
+        self._bb_inspector.changed.connect(self._on_bb_inspector_changed)
+        il.addWidget(self._bb_inspector)
+        self._insert_section(self._sec_billboard)
+
+    def _on_bb_inspector_changed(self):
+        if self._viewport:
+            self._viewport.update()
+        self.changed.emit()
+
     def _insert_section(self, sec: CollapsibleSection):
         """Insert section before the trailing stretch."""
         lay = self._scroll_layout
@@ -1908,7 +3833,23 @@ class InspectorPanel(QWidget):
         self._sec_model.setVisible(chunk_selected)
         self._sec_floor.setVisible(chunk_selected)
         self._sec_stats.setVisible(chunk_selected)
+        self._sec_billboard.setVisible(False)
         # Textures always visible
+
+    def set_billboard(self, bb: "DSBillboard | None"):
+        """Show billboard inspector for the given billboard (or hide if None)."""
+        # Hide chunk sections
+        self._sec_chunk.setVisible(False)
+        self._sec_model.setVisible(False)
+        self._sec_floor.setVisible(False)
+        self._sec_stats.setVisible(False)
+        self._sec_billboard.setVisible(bb is not None)
+        if bb is None:
+            self.title.setText("Nothing selected")
+            return
+        self.title.setText(f"Billboard  —  {bb.name}")
+        self._bb_inspector.set_world(self._world)
+        self._bb_inspector.set_billboard(bb)
 
     # ------------------------------------------------------------------
     def set_world(self, world: WorldFile | None):
@@ -2141,6 +4082,7 @@ class InspectorPanel(QWidget):
                 for tex in self._world.textures[-added:]:
                     self._viewport.invalidate_texture(tex.tex_id)
                 self._viewport.update()
+            self.textures_changed.emit()
 
     def _dsify_selected(self):
         row = self.tex_list_widget.currentRow()
@@ -2149,6 +4091,7 @@ class InspectorPanel(QWidget):
         self._do_dsify(tex)
         self._refresh_tex_list()
         self.tex_list_widget.setCurrentRow(row)
+        self.textures_changed.emit()
 
     def _dsify_all(self):
         if not self._world: return
@@ -2160,6 +4103,7 @@ class InspectorPanel(QWidget):
         if self._viewport:
             self._viewport._gl_textures.clear()
             self._viewport.update()
+        self.textures_changed.emit()
 
     def _do_dsify(self, tex: DSTexture):
         fmt      = self.dsify_fmt.currentData()
@@ -2190,6 +4134,7 @@ class InspectorPanel(QWidget):
         self.palette.refresh()
         self.floor_painter.invalidate_tex_cache()
         if self._viewport: self._viewport.update()
+        self.textures_changed.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -2285,12 +4230,235 @@ class DSifyDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Foliage Tool Panel
+# ---------------------------------------------------------------------------
+class FoliageToolPanel(QWidget):
+    """Side-panel shown when the foliage paint brush is active.
+
+    Settings
+    --------
+    Brush radius    — how large the paint circle is in world units
+    Density         — how many instances to try to place per paint stroke tick
+    Randomness      — 0=perfectly uniform sizing/rotation, 1=fully random
+
+    Billboard settings (shared by every instance laid down by this brush)
+    ---------
+    Width / Height, Texture, Mode, Colour, UV Rotation, Y offset
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._world:    "WorldFile | None" = None
+        self._viewport: "Viewport  | None" = None
+        self._build_ui()
+
+    def set_world(self, world):
+        self._world = world
+        self._refresh_tex()
+
+    def set_viewport(self, vp):
+        self._viewport = vp
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        # ── Active toggle ──
+        self.active_btn = QPushButton("🌿  Foliage Paint Tool  (OFF)")
+        self.active_btn.setCheckable(True)
+        self.active_btn.setChecked(False)
+        self.active_btn.setStyleSheet(
+            "QPushButton:checked { background:#2a5c2a; border-color:#4a9a4a; color:#afffaf; }")
+        self.active_btn.toggled.connect(self._on_toggle)
+        layout.addWidget(self.active_btn)
+
+        hint = QLabel("LMB = paint   RMB = erase   MMB = pan")
+        hint.setStyleSheet("color:#6a7080; font-size:10px;")
+        layout.addWidget(hint)
+
+        # ── Brush settings ──
+        brush_grp = QGroupBox("Brush")
+        bf = QFormLayout(brush_grp)
+        bf.setContentsMargins(6, 8, 6, 4)
+        bf.setSpacing(3)
+
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setRange(0.5, 128.0)
+        self.radius_spin.setValue(4.0)
+        self.radius_spin.setSingleStep(0.5)
+        self.radius_spin.setDecimals(1)
+        self.radius_spin.valueChanged.connect(self._sync_to_viewport)
+        bf.addRow("Radius (wu):", self.radius_spin)
+
+        self.density_spin = QSpinBox()
+        self.density_spin.setRange(1, 50)
+        self.density_spin.setValue(5)
+        self.density_spin.valueChanged.connect(self._sync_to_viewport)
+        bf.addRow("Density:", self.density_spin)
+
+        self.random_spin = QDoubleSpinBox()
+        self.random_spin.setRange(0.0, 1.0)
+        self.random_spin.setValue(0.7)
+        self.random_spin.setSingleStep(0.05)
+        self.random_spin.setDecimals(2)
+        self.random_spin.valueChanged.connect(self._sync_to_viewport)
+        bf.addRow("Randomness:", self.random_spin)
+
+        layout.addWidget(brush_grp)
+
+        # ── Billboard settings ──
+        bb_grp = QGroupBox("Billboard Brush")
+        bbf = QFormLayout(bb_grp)
+        bbf.setContentsMargins(6, 8, 6, 4)
+        bbf.setSpacing(3)
+
+        self.tex_combo = QComboBox()
+        bbf.addRow("Texture:", self.tex_combo)
+
+        self.width_spin = QDoubleSpinBox()
+        self.width_spin.setRange(0.1, 64.0)
+        self.width_spin.setValue(1.0)
+        self.width_spin.setDecimals(2)
+        self.width_spin.setSingleStep(0.25)
+        bbf.addRow("Width:", self.width_spin)
+
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setRange(0.1, 64.0)
+        self.height_spin.setValue(2.0)
+        self.height_spin.setDecimals(2)
+        self.height_spin.setSingleStep(0.25)
+        bbf.addRow("Height:", self.height_spin)
+
+        self.y_spin = QDoubleSpinBox()
+        self.y_spin.setRange(-64.0, 64.0)
+        self.y_spin.setValue(0.0)
+        self.y_spin.setDecimals(2)
+        self.y_spin.setSingleStep(0.25)
+        bbf.addRow("Y offset:", self.y_spin)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Cylindrical", "cylindrical")
+        self.mode_combo.addItem("Spherical",   "spherical")
+        self.mode_combo.addItem("Fixed",       "fixed")
+        bbf.addRow("Mode:", self.mode_combo)
+
+        # UV rotation
+        rot_row = QHBoxLayout()
+        self.rot_label = QLabel("0°")
+        rot_ccw = QPushButton("↺ CCW"); rot_cw = QPushButton("CW ↻")
+        rot_cw.setFixedHeight(22);  rot_ccw.setFixedHeight(22)
+        rot_cw.clicked.connect(self._rot_cw)
+        rot_ccw.clicked.connect(self._rot_ccw)
+        rot_row.addWidget(self.rot_label)
+        rot_row.addWidget(rot_ccw)
+        rot_row.addWidget(rot_cw)
+        bbf.addRow("UV Rot:", rot_row)
+        self._rotation = 0
+
+        self.color_btn = QPushButton("Color (255,255,255)")
+        self._color = QColor(255, 255, 255)
+        self._update_color_btn()
+        self.color_btn.clicked.connect(self._pick_color)
+        bbf.addRow("", self.color_btn)
+
+        layout.addWidget(bb_grp)
+
+        # ── Clear all foliage ──
+        clear_btn = QPushButton("🗑  Clear All Foliage")
+        clear_btn.clicked.connect(self._clear_all)
+        layout.addWidget(clear_btn)
+
+        # Count label
+        self.count_lbl = QLabel("Instances: 0")
+        self.count_lbl.setStyleSheet("color:#6a7080; font-size:10px;")
+        layout.addWidget(self.count_lbl)
+
+        layout.addStretch()
+
+    # ------------------------------------------------------------------
+    def _refresh_tex(self):
+        self.tex_combo.clear()
+        self.tex_combo.addItem("(none)", NO_TEX)
+        if self._world:
+            for tex in self._world.textures:
+                self.tex_combo.addItem(f"[{tex.tex_id}] {tex.name}", tex.tex_id)
+
+    def refresh_count(self):
+        if self._world:
+            self.count_lbl.setText(f"Instances: {len(self._world.foliage)}")
+
+    def _on_toggle(self, checked: bool):
+        self.active_btn.setText(
+            "🌿  Foliage Paint Tool  (ON)" if checked else "🌿  Foliage Paint Tool  (OFF)")
+        if self._viewport:
+            self._viewport.foliage_tool_active = checked
+            # Clear cursor when deactivated
+            if not checked:
+                self._viewport._foliage_brush_pos = None
+            self._viewport.update()
+        self._sync_to_viewport()
+
+    def _sync_to_viewport(self):
+        if not self._viewport:
+            return
+        self._viewport._foliage_brush_radius  = self.radius_spin.value()
+        self._viewport._foliage_brush_density  = self.density_spin.value()
+        self._viewport._foliage_brush_random   = self.random_spin.value()
+        self._viewport._foliage_brush_settings = {
+            "width":    self.width_spin.value(),
+            "height":   self.height_spin.value(),
+            "world_y":  self.y_spin.value(),
+            "rotation": self._rotation,
+            "bb_mode":  self.mode_combo.currentData(),
+            "tex_id":   self.tex_combo.currentData(),
+            "r": self._color.red(),
+            "g": self._color.green(),
+            "b": self._color.blue(),
+        }
+
+    def _rot_cw(self):
+        self._rotation = (self._rotation + 90) % 360
+        self.rot_label.setText(f"{self._rotation}°")
+        self._sync_to_viewport()
+
+    def _rot_ccw(self):
+        self._rotation = (self._rotation - 90) % 360
+        self.rot_label.setText(f"{self._rotation}°")
+        self._sync_to_viewport()
+
+    def _update_color_btn(self):
+        c = self._color
+        self.color_btn.setText(f"Color ({c.red()},{c.green()},{c.blue()})")
+        self.color_btn.setStyleSheet(
+            f"background:rgb({c.red()},{c.green()},{c.blue()});"
+            f"color:{'#000' if c.lightness()>128 else '#fff'};"
+            f"border:1px solid #555;")
+
+    def _pick_color(self):
+        c = QColorDialog.getColor(self._color, self, "Foliage colour")
+        if c.isValid():
+            self._color = c
+            self._update_color_btn()
+            self._sync_to_viewport()
+
+    def _clear_all(self):
+        if not self._world:
+            return
+        self._world.foliage.clear()
+        self.refresh_count()
+        if self._viewport:
+            self._viewport.update()
+
+
+# ---------------------------------------------------------------------------
 # Object Selector (bottom strip)
 # ---------------------------------------------------------------------------
 class ObjectSelector(QWidget):
     # Emits a list of selected indices (may be empty or have multiple items)
-    chunks_selected = pyqtSignal(list)
-    chunk_deleted   = pyqtSignal(int)
+    chunks_selected    = pyqtSignal(list)
+    chunk_deleted      = pyqtSignal(int)
+    billboard_selected = pyqtSignal(int)   # billboard index or -1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2307,6 +4475,7 @@ class ObjectSelector(QWidget):
         self.chunk_list.setMaximumHeight(110)
         self.chunk_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.chunk_list.itemSelectionChanged.connect(self._on_selection_changed)
+        self.chunk_list.itemDoubleClicked.connect(self._on_chunk_double_clicked)
         self.chunk_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.chunk_list.customContextMenuRequested.connect(self._chunk_context)
         cl.addWidget(self.chunk_list)
@@ -2314,7 +4483,10 @@ class ObjectSelector(QWidget):
         btn_row = QHBoxLayout()
         add_chunk = QPushButton("+ Chunk"); add_chunk.clicked.connect(self._add_chunk)
         import_btn = QPushButton("Import Model…"); import_btn.clicked.connect(self._import_model)
+        edit_btn = QPushButton("Edit Model…"); edit_btn.clicked.connect(self._edit_model)
+        add_bb_btn = QPushButton("+ Billboard"); add_bb_btn.clicked.connect(self._add_billboard)
         btn_row.addWidget(add_chunk); btn_row.addWidget(import_btn)
+        btn_row.addWidget(edit_btn); btn_row.addWidget(add_bb_btn)
         cl.addLayout(btn_row)
         layout.addWidget(chunk_grp, 2)
 
@@ -2323,6 +4495,17 @@ class ObjectSelector(QWidget):
         self.tex_list = QListWidget(); self.tex_list.setMaximumHeight(110)
         tl.addWidget(self.tex_list)
         layout.addWidget(tex_grp, 1)
+
+        bb_grp = QGroupBox("Billboards")
+        bl = QVBoxLayout(bb_grp)
+        self.bb_list = QListWidget()
+        self.bb_list.setMaximumHeight(110)
+        self.bb_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.bb_list.itemSelectionChanged.connect(self._on_bb_selection_changed)
+        self.bb_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bb_list.customContextMenuRequested.connect(self._bb_context)
+        bl.addWidget(self.bb_list)
+        layout.addWidget(bb_grp, 1)
 
     def set_world(self, world):
         self.world = world
@@ -2335,17 +4518,25 @@ class ObjectSelector(QWidget):
                 selected.add(item.data(Qt.ItemDataRole.UserRole))
         self.chunk_list.clear()
         self.tex_list.clear()
+        self.bb_list.clear()
         if not self.world:
             return
         for i, c in enumerate(self.world.chunks):
+            kind = "◈ model" if c.is_model else "▦ floor"
             item = QListWidgetItem(
-                f"[{c.grid_x},{c.grid_z}] {c.name}  ({c.poly_count()} polys)")
+                f"{kind}  [{c.grid_x},{c.grid_z}] {c.name}  ({c.poly_count()} polys)")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.chunk_list.addItem(item)
             if i in selected:
                 item.setSelected(True)
         for t in self.world.textures:
             self.tex_list.addItem(f"[{t.tex_id}] {t.name} ({t.width}×{t.height})")
+        for bi, bb in enumerate(self.world.billboards):
+            tid_str = f" tex={bb.tex_id}" if bb.tex_id != NO_TEX else ""
+            item = QListWidgetItem(
+                f"◉ {bb.name}  ({bb.width:.1f}×{bb.height:.1f}){tid_str}")
+            item.setData(Qt.ItemDataRole.UserRole, bi)
+            self.bb_list.addItem(item)
 
     def _add_chunk(self):
         if not self.world: return
@@ -2355,6 +4546,42 @@ class ObjectSelector(QWidget):
         self.world.chunks.append(chunk)
         self.refresh()
         self.chunk_list.setCurrentRow(len(self.world.chunks) - 1)
+
+    def _edit_model(self):
+        if not self.world: return
+        items = self.chunk_list.selectedItems()
+        if not items:
+            QMessageBox.information(self, "No selection", "Select a model chunk first.")
+            return
+        idx = items[0].data(Qt.ItemDataRole.UserRole)
+        chunk = self.world.chunks[idx]
+        if not chunk.is_model:
+            QMessageBox.information(self, "Not a model",
+                "Only model chunks can be edited in the Model Editor.\n"
+                "Floor chunks use the Floor section in the Inspector.")
+            return
+        dlg = ModelEditorWindow(chunk, self.world, self)
+        dlg.exec()
+        self.refresh(keep_selection=True)
+
+    def _add_billboard(self):
+        if not self.world:
+            QMessageBox.information(self, "No world", "Create or open a world first.")
+            return
+        bb = DSBillboard()
+        bb.name = f"billboard_{len(self.world.billboards)}"
+        # Place it at camera target if viewport is available
+        self.world.billboards.append(bb)
+        self.refresh()
+        # Auto-select the new billboard
+        for row in range(self.bb_list.count()):
+            item = self.bb_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == len(self.world.billboards) - 1:
+                self.bb_list.blockSignals(True)
+                self.bb_list.setCurrentItem(item)
+                self.bb_list.blockSignals(False)
+                self._on_bb_selection_changed()
+                break
 
     def _import_model(self):
         if not self.world:
@@ -2382,7 +4609,8 @@ class ObjectSelector(QWidget):
 
             chunk = import_model_as_chunk(path, tex_id=tex_id, scale=scale,
                                            world=self.world)
-            chunk.name = Path(path).stem
+            chunk.name     = Path(path).stem
+            chunk.is_model = True
             self.world.chunks.append(chunk)
             self.refresh()
             self.chunk_list.setCurrentRow(len(self.world.chunks)-1)
@@ -2393,6 +4621,29 @@ class ObjectSelector(QWidget):
         idxs = [item.data(Qt.ItemDataRole.UserRole)
                 for item in self.chunk_list.selectedItems()]
         self.chunks_selected.emit(idxs)
+
+    def _on_chunk_double_clicked(self, item):
+        """Double-click a model chunk to open the Model Editor directly."""
+        if not self.world: return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if idx is None or idx >= len(self.world.chunks): return
+        chunk = self.world.chunks[idx]
+        if chunk.is_model:
+            dlg = ModelEditorWindow(chunk, self.world, self)
+            dlg.exec()
+            self.refresh(keep_selection=True)
+
+    def _on_bb_selection_changed(self):
+        items = self.bb_list.selectedItems()
+        if items:
+            bi = items[0].data(Qt.ItemDataRole.UserRole)
+            self.billboard_selected.emit(bi)
+            # Deselect chunks when billboard is selected
+            self.chunk_list.blockSignals(True)
+            self.chunk_list.clearSelection()
+            self.chunk_list.blockSignals(False)
+        else:
+            self.billboard_selected.emit(-1)
 
     def _chunk_context(self, pos):
         selected_rows = sorted(
@@ -2415,6 +4666,25 @@ class ObjectSelector(QWidget):
                 self.world.chunks.pop(r)
             self.refresh()
             self.chunk_deleted.emit(selected_rows[-1])
+
+    def _bb_context(self, pos):
+        items = self.bb_list.selectedItems()
+        if not items or not self.world: return
+        bi = items[0].data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        dup  = menu.addAction("Duplicate")
+        dele = menu.addAction("Delete")
+        act  = menu.exec(self.bb_list.mapToGlobal(pos))
+        if act == dup:
+            nb = copy.deepcopy(self.world.billboards[bi])
+            nb.name += "_copy"
+            nb.world_x += 2.0
+            self.world.billboards.insert(bi + 1, nb)
+            self.refresh()
+        elif act == dele:
+            self.world.billboards.pop(bi)
+            self.refresh()
+            self.billboard_selected.emit(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -2441,13 +4711,24 @@ class MainWindow(QMainWindow):
 
         self.viewport = Viewport()
         self.viewport.object_clicked.connect(self._on_viewport_object_clicked)
+        self.viewport.chunks_moved.connect(self._on_chunks_moved)
         h_split.addWidget(self.viewport)
+
+        # Right panel: tabs for Inspector and Foliage Tool
+        right_tabs = QTabWidget()
+        right_tabs.setTabPosition(QTabWidget.TabPosition.North)
 
         self.inspector = InspectorPanel()
         self.inspector.set_viewport(self.viewport)
         self.inspector.changed.connect(self._on_inspector_changed)
-        self.inspector.setMinimumWidth(180)
-        h_split.addWidget(self.inspector)
+        right_tabs.addTab(self.inspector, "Inspector")
+
+        self.foliage_panel = FoliageToolPanel()
+        self.foliage_panel.set_viewport(self.viewport)
+        right_tabs.addTab(self.foliage_panel, "🌿 Foliage")
+
+        right_tabs.setMinimumWidth(180)
+        h_split.addWidget(right_tabs)
         h_split.setStretchFactor(0, 3)
         h_split.setStretchFactor(1, 1)
         h_split.setSizes([960, 300])
@@ -2458,6 +4739,7 @@ class MainWindow(QMainWindow):
         self.obj_selector = ObjectSelector()
         self.obj_selector.chunks_selected.connect(self._on_chunks_selected)
         self.obj_selector.chunk_deleted.connect(self._on_chunk_deleted)
+        self.obj_selector.billboard_selected.connect(self._on_billboard_selected)
         self.obj_selector.setMinimumHeight(60)
         v_split.addWidget(self.obj_selector)
         v_split.setStretchFactor(0, 4)
@@ -2555,9 +4837,12 @@ class MainWindow(QMainWindow):
     def _new_world(self):
         self.world = WorldFile()
         self.viewport.set_world(self.world)
+        self.viewport.set_selected_billboard(-1)
         self.obj_selector.set_world(self.world)
         self.inspector.set_world(self.world)
         self.inspector.set_chunks([])
+        self.foliage_panel.set_world(self.world)
+        self.foliage_panel.refresh_count()
         self.setWindowTitle("Alone — World Editor  [New World]")
         self.status.showMessage("New world created")
 
@@ -2572,6 +4857,8 @@ class MainWindow(QMainWindow):
             self.obj_selector.set_world(self.world)
             self.inspector.set_world(self.world)
             self.inspector.set_chunks([])
+            self.foliage_panel.set_world(self.world)
+            self.foliage_panel.refresh_count()
             self.setWindowTitle(f"Alone — World Editor  [{Path(path).name}]")
             self.status.showMessage(
                 f"Loaded {len(self.world.chunks)} chunks, "
@@ -2656,7 +4943,14 @@ class MainWindow(QMainWindow):
             self.viewport.update()
 
     def _on_viewport_object_clicked(self, idx: int):
-        if not self.world or idx < 0 or idx >= len(self.world.chunks):
+        if not self.world:
+            return
+        # idx == -1 means clicked empty space → deselect all
+        if idx < 0 or idx >= len(self.world.chunks):
+            self._on_chunks_selected([])
+            self.obj_selector.chunk_list.blockSignals(True)
+            self.obj_selector.chunk_list.clearSelection()
+            self.obj_selector.chunk_list.blockSignals(False)
             return
         mods = QApplication.keyboardModifiers()
         if mods & Qt.KeyboardModifier.ControlModifier:
@@ -2709,6 +5003,38 @@ class MainWindow(QMainWindow):
         else:
             self.status.showMessage("No selection")
 
+    def _on_chunks_moved(self):
+        """Called after gizmo drag finishes — refresh chunk list and inspector."""
+        self.obj_selector.refresh(keep_selection=True)
+        # If a billboard is selected, refresh its inspector too
+        bi = self.viewport._selected_billboard
+        if self.world and 0 <= bi < len(self.world.billboards):
+            self.inspector.set_billboard(self.world.billboards[bi])
+            return
+        # Update inspector grid coords display
+        selected = [self.world.chunks[i] for i in self.viewport.selected_chunks
+                    if i < len(self.world.chunks)] if self.world else []
+        self.inspector.set_chunks(selected)
+        self.viewport.update()
+
+    def _on_billboard_selected(self, bi: int):
+        """Called when a billboard is selected/deselected in ObjectSelector."""
+        if not self.world:
+            return
+        if bi < 0 or bi >= len(self.world.billboards):
+            self.inspector.set_billboard(None)
+            self.viewport.set_selected_billboard(-1)
+            return
+        bb = self.world.billboards[bi]
+        self.inspector.set_billboard(bb)
+        self.viewport.set_selected_billboard(bi)
+        # Centre camera on billboard
+        self.viewport.cam_target = [bb.world_x, 0.0, bb.world_z]
+        self.viewport.update()
+        self.status.showMessage(
+            f"Billboard '{bb.name}'  ({bb.width:.1f}×{bb.height:.1f})  "
+            f"at ({bb.world_x:.1f}, {bb.world_y:.1f}, {bb.world_z:.1f})")
+
     def _on_chunk_deleted(self, idx):
         self.inspector.set_chunks([])
         self.viewport.set_selected_chunks([])
@@ -2716,6 +5042,7 @@ class MainWindow(QMainWindow):
 
     def _on_inspector_changed(self):
         self.obj_selector.refresh(keep_selection=True)
+        self.foliage_panel.refresh_count()
         self.viewport.update()
 
 

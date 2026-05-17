@@ -127,6 +127,11 @@ public:
         outZ = (sumZ / (float)worldChunkCount) * (float)CHUNK_WORLD_UNIT;
     }
 
+    // Must be called each frame before render(), with the same eye/target used
+    // by applyCamera(). Updates the camera right/up vectors used to orient billboards.
+    void setCamera(float eyeX, float eyeY, float eyeZ,
+                   float tgtX, float tgtY, float tgtZ);
+
     // Debug: read back a chunk descriptor by index
     void getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const {
         if (idx < worldChunkCount) {
@@ -170,7 +175,7 @@ private:
     bool       loadChunk(ChunkDesc* desc, Chunk* slot);
     void       unloadChunk(Chunk* slot);
 
-    void  renderChunk(Chunk* c, int debugIdx);
+    void  renderChunk(Chunk* c, int debugIdx, bool billboardsOnly);
     void  bindTexture(u8 texId);
 
     // floorf ensures negative coords round toward -inf, not zero.

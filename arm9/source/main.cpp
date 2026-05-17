@@ -140,7 +140,7 @@ static void applyCamera(float px, float pz)
 {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    gluLookAt(px, 20.0f, pz + 15.0f, px, 0.0f, pz, 0.0f, 1.0f, 0.0f);
+    gluLookAt(px, 30.0f, pz + 15.0f, px, 0.0f, pz, 0.0f, 1.0f, 0.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +296,9 @@ int main()
 
         applyCamera(px, pz);
 
+        float eyeY = 30.0f, eyeZ = pz + 15.0f;
         if (worldLoaded) {
+            world.setCamera(px, eyeY, eyeZ, px, 0.0f, pz);
             world.update(px, pz);
             world.render();
         } else {
