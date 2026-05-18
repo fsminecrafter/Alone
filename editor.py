@@ -4721,6 +4721,7 @@ class MainWindow(QMainWindow):
         self.inspector = InspectorPanel()
         self.inspector.set_viewport(self.viewport)
         self.inspector.changed.connect(self._on_inspector_changed)
+        self.inspector.textures_changed.connect(self._on_textures_changed)
         right_tabs.addTab(self.inspector, "Inspector")
 
         self.foliage_panel = FoliageToolPanel()
@@ -5044,6 +5045,26 @@ class MainWindow(QMainWindow):
         self.obj_selector.refresh(keep_selection=True)
         self.foliage_panel.refresh_count()
         self.viewport.update()
+
+    def _on_textures_changed(self):
+        """Called whenever a texture is added, removed, or DS-ified.
+
+        Refreshes every widget that shows a texture picker so they never go
+        stale — the foliage panel tex combo, the billboard inspector inside
+        the inspector panel, and the object selector quick-view list.
+        """
+        if self.world is None:
+            return
+        # Foliage panel texture combo
+        self.foliage_panel._refresh_tex()
+        # Billboard inspector texture combo (lives inside InspectorPanel)
+        if hasattr(self.inspector, "_bb_inspector") and self.inspector._bb_inspector:
+            self.inspector._bb_inspector._refresh_tex_combo()
+        # Model tex combo in the Chunk tab
+        if hasattr(self.inspector, "_refresh_model_tex_combo"):
+            self.inspector._refresh_model_tex_combo()
+        # Object selector texture quick-view
+        self.obj_selector.refresh(keep_selection=True)
 
 
 # ---------------------------------------------------------------------------
