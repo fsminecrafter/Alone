@@ -293,14 +293,20 @@ class DSBillboard:
     def bake_vertices_with_tex(self, world: "WorldFile") -> list["DSVertex"]:
         """Bake to 6 DSVertex triangles using the correct runtime layout.
 
-        Vertex layout (ChunkLibrary.cpp cylindrical billboard):
+        Vertex layout for the NDS runtime:
           x, y, z  = chunk-local anchor (same for all 6 verts; export adds anchor)
+          nx       = BILLBOARD_SENTINEL (mode flag — 0x7FFF/7FFE/7FFD)
           ny       = camera-RIGHT offset in NDS f32 (+/-half-width)
-          nz       = world-UP offset in NDS f32 (0=bottom, height=top)
-          nx       = BILLBOARD_SENTINEL (flags this as a billboard vertex)
+          nz       = world-UP  offset in NDS f32 (0 = bottom, height = top)
+
+        UV origin convention for the NDS (libnds TEXGEN_TEXCOORD):
+          u=0, v=0 is the TOP-LEFT of the texture.
+          So the top-left corner of the quad gets (0, 0) and the
+          bottom-right gets (tex_w*16, tex_h*16).
         """
         hw = self.width  / 2.0
-        hh = self.height / 2.0
+        hh = self.height
+
         tex_w = tex_h = 1
         if world and self.tex_id != NO_TEX:
             dtex = world.texture_by_id(self.tex_id)
@@ -310,22 +316,14 @@ class DSBillboard:
         u1 = clamp_s16(tex_w * 16)
         v1 = clamp_s16(tex_h * 16)
 
-        # UV corners before rotation
-        uvs = {
-            "tl": (0,  0 ),
-            "tr": (u1, 0 ),
-            "bl": (0,  v1),
-            "br": (u1, v1),
-        }
-        # Apply 90-degree CW UV rotation steps
+        # UV corners: [tl, tr, bl, br] — NDS v=0 is top of image
+        uvs = [(0, 0), (u1, 0), (0, v1), (u1, v1)]  # tl, tr, bl, br
+
+        # CW 90° rotation permutation: tl←bl, tr←tl, br←tr, bl←br
         steps = (self.rotation // 90) % 4
         for _ in range(steps):
-            # CW 90: tl->tr->br->bl->tl  (u,v) -> (v1-v, u)
-            old_uvs = dict(uvs)
-            uvs["tl"] = (v1 - old_uvs["bl"][1], old_uvs["bl"][0])
-            uvs["tr"] = (v1 - old_uvs["tl"][1], old_uvs["tl"][0])
-            uvs["br"] = (v1 - old_uvs["tr"][1], old_uvs["tr"][0])
-            uvs["bl"] = (v1 - old_uvs["br"][1], old_uvs["br"][0])
+            uvs = [uvs[2], uvs[0], uvs[3], uvs[1]]
+        utl, utr, ubl, ubr = uvs
 
         sentinel = BB_MODE_SENTINELS.get(self.bb_mode, BILLBOARD_SENTINEL)
 
@@ -340,11 +338,11 @@ class DSBillboard:
                 tex_id=self.tex_id,
                 u=clamp_s16(u), v=clamp_s16(vv),
             )
-        # Two triangles forming a quad (CCW winding)
-        tl = mkv(-hw,  hh, *uvs["tl"])
-        tr = mkv( hw,  hh, *uvs["tr"])
-        bl = mkv(-hw,   0, *uvs["bl"])
-        br = mkv( hw,   0, *uvs["br"])
+        # CCW winding: tl, bl, tr, tr, bl, br
+        tl = mkv(-hw, hh, *utl)
+        tr = mkv( hw, hh, *utr)
+        bl = mkv(-hw,  0, *ubl)
+        br = mkv( hw,  0, *ubr)
         return [tl, bl, tr,  tr, bl, br]
 
 
@@ -2023,32 +2021,34 @@ void main() {
         All billboards sharing the same texture are merged into one numpy array
         and submitted with a single glDrawArrays.  Camera vectors are computed
         once for the whole batch.
+
+        Convention for all modes:
+          fwd   = normalize(camera - billboard)   ← face normal, points toward cam
+          right = perpendicular to fwd in the relevant plane
+          up    = world Y (cylindrical / fixed) or right × fwd (spherical)
         """
         if not bbs:
             return
 
-        # --- Camera vectors (computed once) ---
+        # --- Camera position (computed once) ---
         yaw   = math.radians(self.cam_yaw)
         pitch = math.radians(self.cam_pitch)
         ecx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
         ecy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
         ecz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
-        world_up = np.array([0.0, 1.0, 0.0])
-
-        # For cylindrical mode, right/up depend on each billboard's position,
-        # so we can only cache the spherical right/up here as a fallback.
-        # We build verts per-bb in a fast Python loop, then batch by tex_id.
 
         # Groups: tex_id → flat list of float vertex data (x,y,z,r,g,b,u,v)*6
         groups: dict[int, list] = {}
 
         # Precompute UV corner sets for 0/90/180/270 once
-        _base_uvs = [(0,1),(1,1),(0,0),(1,0)]  # tl,tr,bl,br
+        # Base: tl=(0,1) tr=(1,1) bl=(0,0) br=(1,0) — v=1 is top of texture
+        _base_uvs = [(0,1),(1,1),(0,0),(1,0)]  # [tl, tr, bl, br]
         _rot_uvs  = [None] * 4
         for rot in range(4):
             uvs = list(_base_uvs)
             for _ in range(rot):
-                uvs = [uvs[2], uvs[0], uvs[3], uvs[1]]  # bl→tl, tl→tr, br→bl, tr→br (CW)
+                # CW 90°: tl←bl, tr←tl, br←tr, bl←br
+                uvs = [uvs[2], uvs[0], uvs[3], uvs[1]]
             _rot_uvs[rot] = uvs   # [tl, tr, bl, br]
 
         for bb in bbs:
@@ -2058,36 +2058,46 @@ void main() {
             mode = getattr(bb, "bb_mode", "cylindrical")
 
             if mode == "fixed":
+                # Always faces world +Z, right = +X, up = +Y — never rotates.
                 rx, ry, rz = 1.0, 0.0, 0.0
                 ux, uy, uz = 0.0, 1.0, 0.0
-            elif mode == "spherical":
-                fx = bx - ecx; fy = by - ecy; fz = bz - ecz
-                flen = math.sqrt(fx*fx + fy*fy + fz*fz) + 1e-9
-                fx /= flen; fy /= flen; fz /= flen
-                # right = forward × world_up
-                rx = fy*0 - fz*1;  ry = fz*0 - fx*0;  rz = fx*1 - fy*0
-                rlen = math.sqrt(rx*rx + ry*ry + rz*rz) + 1e-9
-                rx /= rlen; ry /= rlen; rz /= rlen
-                # up = right × (-forward)
-                ux = ry*(-fz) - rz*(-fy)
-                uy = rz*(-fx) - rx*(-fz)
-                uz = rx*(-fy) - ry*(-fx)
-                ulen = math.sqrt(ux*ux + uy*uy + uz*uz) + 1e-9
-                ux /= ulen; uy /= ulen; uz /= ulen
-            else:  # cylindrical
-                fwdX = bx - ecx; fwdZ = bz - ecz
-                flen = math.sqrt(fwdX*fwdX + fwdZ*fwdZ) + 1e-9
-                fwdX /= flen; fwdZ /= flen
-                rx, ry, rz = -fwdZ, 0.0, fwdX
-                ux, uy, uz =  0.0,  1.0, 0.0
 
-            # Four corners: bl/br at anchor, tl/tr at anchor+height
-            blx = bx - rx*hw;  bly = by;      blz = bz - rz*hw
-            brx = bx + rx*hw;  bry = by;      brz = bz + rz*hw
+            elif mode == "spherical":
+                # fwd = camera → billboard direction (face normal points at cam).
+                fx = ecx - bx;  fy = ecy - by;  fz = ecz - bz
+                flen = math.sqrt(fx*fx + fy*fy + fz*fz) + 1e-9
+                fx /= flen;  fy /= flen;  fz /= flen
+                # right = world_up × fwd  (gives screen-right when facing cam)
+                # world_up = (0,1,0): cross product simplifies to:
+                rx = 1.0*fz - 0.0*fy   # = fz
+                ry = 0.0*fx - 0.0*fz   # = 0
+                rz = 0.0*fy - 1.0*fx   # = -fx
+                rlen = math.sqrt(rx*rx + rz*rz) + 1e-9
+                rx /= rlen;  rz /= rlen
+                # up = fwd × right  (points screen-up)
+                ux = fy*rz - fz*ry
+                uy = fz*rx - fx*rz
+                uz = fx*ry - fy*rx
+                ulen = math.sqrt(ux*ux + uy*uy + uz*uz) + 1e-9
+                ux /= ulen;  uy /= ulen;  uz /= ulen
+
+            else:  # cylindrical — billboard stays vertical, rotates around Y only
+                # Project camera→billboard vector onto XZ plane only.
+                # fwd_xz = normalize(cam_xz - bb_xz), then right = fwd_xz rotated 90° CW.
+                dX = ecx - bx;  dZ = ecz - bz
+                dlen = math.sqrt(dX*dX + dZ*dZ) + 1e-9
+                dX /= dlen;  dZ /= dlen
+                # Rotate 90° CW around Y: (x,z) → (z, -x)
+                rx, ry, rz = dZ, 0.0, -dX
+                ux, uy, uz = 0.0, 1.0,  0.0
+
+            # Four corners: bottom edge at anchor Y, top at anchor Y + height
+            blx = bx - rx*hw;  bly = by;          blz = bz - rz*hw
+            brx = bx + rx*hw;  bry = by;          brz = bz + rz*hw
             tlx = blx + ux*hh; tly = bly + uy*hh; tlz = blz + uz*hh
             trx = brx + ux*hh; try_ = bry + uy*hh; trz = brz + uz*hh
 
-            rc = bb.r / 255.0; gc = bb.g / 255.0; bc2 = bb.b / 255.0
+            rc = bb.r / 255.0;  gc = bb.g / 255.0;  bc2 = bb.b / 255.0
             rot_idx = (bb.rotation // 90) % 4
             utl, utr, ubl, ubr = _rot_uvs[rot_idx]
 
@@ -2095,7 +2105,7 @@ void main() {
             if tid not in groups:
                 groups[tid] = []
             g = groups[tid]
-            # Two triangles: tl,bl,tr and tr,bl,br
+            # Two CCW triangles forming a quad: tl,bl,tr  +  tr,bl,br
             g += [tlx, tly, tlz, rc, gc, bc2, *utl,
                   blx, bly, blz, rc, gc, bc2, *ubl,
                   trx, try_, trz, rc, gc, bc2, *utr,
@@ -2115,44 +2125,57 @@ void main() {
         glEnable(GL_CULL_FACE)
 
     def _draw_billboard(self, bb: "DSBillboard", selected=False):
-        """Draw billboard matching the runtime mode (cylindrical/spherical/fixed)."""
+        """Draw billboard matching the runtime mode (cylindrical/spherical/fixed).
+
+        Convention (same as _draw_billboards_batched):
+          fwd   = normalize(camera - billboard)  — face normal, points toward cam
+          right = perpendicular in the relevant plane
+          up    = world Y (cylindrical/fixed) or fwd × right (spherical)
+        """
         yaw   = math.radians(self.cam_yaw)
         pitch = math.radians(self.cam_pitch)
-        ecy = self.cam_target[1] + self.cam_dist * math.sin(math.radians(self.cam_pitch))
-        ecx = self.cam_target[0] + self.cam_dist * math.cos(math.radians(self.cam_pitch)) * math.sin(yaw)
-        ecz = self.cam_target[2] + self.cam_dist * math.cos(math.radians(self.cam_pitch)) * math.cos(yaw)
+        ecx = self.cam_target[0] + self.cam_dist * math.cos(pitch) * math.sin(yaw)
+        ecy = self.cam_target[1] + self.cam_dist * math.sin(pitch)
+        ecz = self.cam_target[2] + self.cam_dist * math.cos(pitch) * math.cos(yaw)
 
         hw  = bb.width  / 2.0
         hh  = bb.height
         cx  = np.array([bb.world_x, bb.world_y, bb.world_z], dtype=np.float64)
-        world_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         mode = getattr(bb, "bb_mode", "cylindrical")
 
         if mode == "fixed":
-            right = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            up    = world_up
+            right = np.array([1.0, 0.0, 0.0])
+            up    = np.array([0.0, 1.0, 0.0])
 
         elif mode == "spherical":
-            fwd = cx - np.array([ecx, ecy, ecz])
-            flen = np.linalg.norm(fwd) + 1e-9
-            fwd /= flen
-            right = np.cross(fwd, world_up)
-            rlen = np.linalg.norm(right) + 1e-9
-            right /= rlen
-            up = np.cross(right, fwd)
-            ulen = np.linalg.norm(up) + 1e-9
-            up /= ulen
+            # fwd = camera - billboard (face normal toward cam)
+            fwd = np.array([ecx - bb.world_x,
+                            ecy - bb.world_y,
+                            ecz - bb.world_z], dtype=np.float64)
+            fwd /= np.linalg.norm(fwd) + 1e-9
+            world_up = np.array([0.0, 1.0, 0.0])
+            # right = world_up × fwd
+            right = np.cross(world_up, fwd)
+            rn = np.linalg.norm(right)
+            if rn < 1e-6:          # camera directly above/below — use +X fallback
+                right = np.array([1.0, 0.0, 0.0])
+            else:
+                right /= rn
+            # up = fwd × right  (screen-up)
+            up = np.cross(fwd, right)
+            up /= np.linalg.norm(up) + 1e-9
 
-        else:  # cylindrical — per-billboard right from eye to anchor (XZ only)
-            fwdX = bb.world_x - ecx
-            fwdZ = bb.world_z - ecz
-            flen = math.sqrt(fwdX*fwdX + fwdZ*fwdZ) + 1e-9
-            fwdX /= flen; fwdZ /= flen
-            # right = forward rotated 90 CW around Y: (-fwdZ, 0, fwdX)
-            right = np.array([-fwdZ, 0.0, fwdX], dtype=np.float64)
-            up    = world_up
+        else:  # cylindrical — stays vertical, rotates around Y only
+            # Project onto XZ plane: right = normalize(cam_xz - bb_xz) rotated 90° CW
+            dX = ecx - bb.world_x
+            dZ = ecz - bb.world_z
+            dlen = math.sqrt(dX*dX + dZ*dZ) + 1e-9
+            dX /= dlen;  dZ /= dlen
+            # 90° CW around Y: (x, z) → (z, -x)
+            right = np.array([dZ, 0.0, -dX])
+            up    = np.array([0.0, 1.0,  0.0])
 
-        # Four corners: bottom edge at anchor Y, top edge at anchor Y + height
+        # Four corners: bottom edge at anchor Y, top at anchor Y + height
         bl = cx - right * hw
         br = cx + right * hw
         tl = bl + up * hh
