@@ -19,71 +19,81 @@ static inline bool isBillboardNx(s16 nx) {
 }
 
 // ---------------------------------------------------------------------------
-// Cylindrical billboard orientation
+// Camera state — set every frame via ChunkLibrary::setCamera()
 // ---------------------------------------------------------------------------
-// Billboard vertex layout (nx == BILLBOARD_SENTINEL):
-//   v.x, v.y, v.z  = chunk-local anchor (base of sprite, same for all 6 verts)
-//   v.ny            = camera-RIGHT offset in NDS f32 (+/-half-width)
-//   v.nz            = world-UP offset in NDS f32 (0=bottom edge, height=top)
+// All values are in world space.  Must be kept in sync with the OpenGL
+// view matrix (call setCamera right after gluLookAt / applyCamera).
 //
-// Final world pos = translate(chunk_origin) + anchor
-//                 + right * ny   (horizontal spread, faces camera)
-//                 + up    * nz   (vertical rise, always Y-up)
+// Cylindrical mode uses s_camEyeX/Z to compute a per-billboard right
+// vector so each sprite independently faces the camera around the Y axis.
 //
-// "Cylindrical" = sprite always stands vertically, only rotates around Y.
+// Spherical and fixed modes use the pre-computed s_bbRightX/Y/Z and
+// s_bbUpX/Y/Z that are consistent with the camera orientation.
 
-static float s_bbRightX = 1.0f;  // global right (spherical/fallback only)
-static float s_bbRightZ = 0.0f;
-// Up vector for spherical billboards (camera-derived); cylindrical always uses world Y.
-static float s_bbUpX = 0.0f;
-static float s_bbUpY = 1.0f;
-static float s_bbUpZ = 0.0f;
-// Camera eye position — used to compute per-billboard right vector for cylindrical mode.
 static float s_camEyeX = 0.0f;
 static float s_camEyeY = 0.0f;
 static float s_camEyeZ = 0.0f;
 
+// Camera-space right vector (full 3-D, used for spherical billboards).
+static float s_bbRightX = 1.0f;
+static float s_bbRightY = 0.0f;
+static float s_bbRightZ = 0.0f;
+
+// Camera-space up vector (used for spherical billboards).
+static float s_bbUpX = 0.0f;
+static float s_bbUpY = 1.0f;
+static float s_bbUpZ = 0.0f;
+
+// ---------------------------------------------------------------------------
+// updateCameraVectors — derived from eye & target, stored for the render pass
+// ---------------------------------------------------------------------------
 static void updateCameraVectors(float eyeX, float eyeY, float eyeZ,
                                  float tgtX, float tgtY, float tgtZ)
 {
-    // Full 3-D forward (eye -> target).
+    s_camEyeX = eyeX;
+    s_camEyeY = eyeY;
+    s_camEyeZ = eyeZ;
+
+    // Forward vector: camera looks from eye toward target.
     float fwdX = tgtX - eyeX;
     float fwdY = tgtY - eyeY;
     float fwdZ = tgtZ - eyeZ;
     float flen = sqrtf(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ);
-    s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
     if (flen < 0.0001f) {
-        s_bbRightX = 1.0f; s_bbRightZ = 0.0f;
-        s_bbUpX = 0.0f; s_bbUpY = 1.0f; s_bbUpZ = 0.0f;
+        // Degenerate: eye == target.  Keep existing vectors.
         return;
     }
-    fwdX /= flen; fwdY /= flen; fwdZ /= flen;
+    fwdX /= flen;  fwdY /= flen;  fwdZ /= flen;
 
-    // right = forward x world-up(0,1,0)  =>  (-fwd.z, 0, fwd.x)
-    float rx = -fwdZ;
-    float rz =  fwdX;
+    // Camera-right = world_up × forward = (0,1,0) × fwd
+    //              = (1*fwdZ - 0*fwdY,  0*fwdX - 0*fwdZ,  0*fwdY - 1*fwdX)
+    //              = (fwdZ, 0, -fwdX)   (always horizontal)
+    float rx = fwdZ;
+    float rz = -fwdX;
     float rlen = sqrtf(rx*rx + rz*rz);
     if (rlen < 0.0001f) {
-        // Camera pointing straight down/up; use world +X as fallback
-        s_bbRightX = 1.0f; s_bbRightZ = 0.0f;
-        s_bbUpX = 0.0f; s_bbUpY = 0.0f; s_bbUpZ = -1.0f;
+        // Camera pointing straight up or down — use world +X as fallback right.
+        s_bbRightX = 1.0f;  s_bbRightY = 0.0f;  s_bbRightZ = 0.0f;
+        // Up is forward rotated 90° around right: just use -Z or +Z.
+        s_bbUpX = 0.0f;  s_bbUpY = 0.0f;  s_bbUpZ = (fwdY > 0.0f) ? -1.0f : 1.0f;
         return;
     }
     s_bbRightX = rx / rlen;
+    s_bbRightY = 0.0f;        // right is always horizontal (world_up × fwd)
     s_bbRightZ = rz / rlen;
 
-    // Store eye for per-billboard cylindrical right computation
-    s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
-
-    // Spherical camera-derived up = right x forward
-    // right = (s_bbRightX, 0, s_bbRightZ)
-    float ux = 0.0f   * fwdZ - s_bbRightZ * fwdY;
-    float uy = s_bbRightZ * fwdX - s_bbRightX * fwdZ;
-    float uz = s_bbRightX * fwdY - 0.0f   * fwdX;
+    // Camera-up = forward × right  (points screen-upward for spherical billboards)
+    float ux = fwdY * s_bbRightZ - fwdZ * 0.0f;
+    float uy = fwdZ * s_bbRightX - fwdX * s_bbRightZ;
+    float uz = fwdX * 0.0f       - fwdY * s_bbRightX;
     float ulen = sqrtf(ux*ux + uy*uy + uz*uz);
-    if (ulen > 0.0001f) { ux/=ulen; uy/=ulen; uz/=ulen; }
-    else                 { ux=0.0f; uy=1.0f; uz=0.0f; }
-    s_bbUpX = ux; s_bbUpY = uy; s_bbUpZ = uz;
+    if (ulen > 0.0001f) {
+        s_bbUpX = ux / ulen;
+        s_bbUpY = uy / ulen;
+        s_bbUpZ = uz / ulen;
+    } else {
+        s_bbUpX = 0.0f;  s_bbUpY = 1.0f;  s_bbUpZ = 0.0f;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,60 +236,68 @@ void ChunkLibrary::update(float camX, float camZ)
 }
 
 // ---------------------------------------------------------------------------
-// Render — two passes so translucent billboards sort correctly.
-//
-// NDS transparency rule: translucent polys (POLY_ALPHA 1-30) must have a
-// POLY_ID different from all opaque polys, and must be drawn AFTER opaque
-// geometry so the depth buffer is already populated.
-//
-// Pass 1: opaque geometry only (POLY_ID 1, POLY_ALPHA 31)
-// Pass 2: billboard geometry only (POLY_ID 2, POLY_ALPHA 31 for opaque
-//         pixels; the texture's A1 bit handles per-pixel cutout)
+// setCamera — MUST be called every frame before render(), right after the
+// OpenGL view matrix is set (i.e. right after applyCamera / gluLookAt).
 // ---------------------------------------------------------------------------
-void ChunkLibrary::render()
-{
-    framePolyCount = 0;
-
-    // Pass 1 — terrain / opaque objects
-    for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
-        Chunk* c = &activeChunks[i];
-        if (!c->verts) continue;
-        renderChunk(c, i, false);
-        framePolyCount += c->polyCount;
-    }
-
-    // Pass 2 — billboard quads (drawn after depth buffer is settled)
-    for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
-        Chunk* c = &activeChunks[i];
-        if (!c->verts) continue;
-        renderChunk(c, i, true);
-    }
-}
-
 void ChunkLibrary::setCamera(float eyeX, float eyeY, float eyeZ,
                               float tgtX, float tgtY, float tgtZ)
 {
     updateCameraVectors(eyeX, eyeY, eyeZ, tgtX, tgtY, tgtZ);
 }
 
-void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
+// ---------------------------------------------------------------------------
+// Render — two passes so billboard transparency composites correctly.
+//
+// NDS transparency note:
+//   Translucent polys (POLY_ALPHA 1-30) require a POLY_ID different from
+//   all opaque polys AND must be submitted AFTER opaque geometry so the
+//   depth buffer is already populated.  We use POLY_ID 1 for terrain and
+//   POLY_ID 2 for billboard quads (even though they use alpha-test / fully
+//   opaque pixels here; the separate pass future-proofs cutout transparency).
+// ---------------------------------------------------------------------------
+void ChunkLibrary::render()
 {
-    // Translate by chunk origin so local verts stay in [-8, 8] (NDS 4.12 range)
-    glPushMatrix();
-    glTranslatef(
-        (float)(c->gridX * CHUNK_WORLD_UNIT),
-        0.0f,
-        (float)(c->gridZ * CHUNK_WORLD_UNIT)
-    );
+    framePolyCount = 0;
 
-    // Pass 1 uses POLY_ID 1 (opaque terrain).
-    // Pass 2 uses POLY_ID 2 (billboard quads, drawn after depth buffer is settled).
-    // Using a different POLY_ID for translucent polys is required by the NDS GPU.
+    // Pass 1 — terrain / opaque geometry
+    for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
+        Chunk* c = &activeChunks[i];
+        if (!c->verts) continue;
+        renderChunk(c, false);
+        framePolyCount += c->polyCount;
+    }
+
+    // Pass 2 — billboard quads (after depth buffer is settled)
+    for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
+        Chunk* c = &activeChunks[i];
+        if (!c->verts) continue;
+        renderChunk(c, true);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// renderChunk
+//
+// billboardsOnly = false  → render normal geometry verts (nx not a sentinel)
+// billboardsOnly = true   → render billboard verts only  (nx is a sentinel)
+//
+// Billboard vertex layout (set by editor export):
+//   v.x, v.y, v.z  = chunk-local anchor in NDS f32 (same for all 6 verts)
+//   v.nx           = mode sentinel (BILLBOARD_SENTINEL / SPH / FIX)
+//   v.ny           = camera-RIGHT offset in NDS f32 (+/-half-width)
+//   v.nz           = world-UP offset in NDS f32 (0 = bottom edge, height = top)
+//
+// Final world position of each vertex:
+//   world_pos = chunk_origin + anchor + right_vec*ny + up_vec*nz
+// ---------------------------------------------------------------------------
+void ChunkLibrary::renderChunk(Chunk* c, bool billboardsOnly)
+{
+    float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
+    float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
+
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(billboardsOnly ? 2 : 1));
 
-    u8   lastTexId   = 0xFE;
-    bool inBillboard = false;
-    bool anyDrawn    = false;
+    u8 lastTexId = 0xFE;
 
     glBegin(GL_TRIANGLES);
 
@@ -287,80 +305,101 @@ void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
         ChunkVertex& v = c->verts[vi];
 
         bool isBB = isBillboardNx(v.nx);
-
-        // Skip vertices that don't belong to this pass
         if (isBB != billboardsOnly) continue;
 
+        // ---- Texture change ----
         if (v.texId != lastTexId) {
             glEnd();
             bindTexture(v.texId);
             glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(billboardsOnly ? 2 : 1));
             glBegin(GL_TRIANGLES);
-            lastTexId   = v.texId;
+            lastTexId = v.texId;
         }
-        anyDrawn = true;
-        inBillboard = isBB;
 
         if (isBB) {
-            // Billboard vertex:
-            //   v.x/y/z = chunk-local anchor in NDS f32 (same for all 6 verts)
-            //   v.ny    = camera-right offset in NDS f32 (+/-half-width)
-            //   v.nz    = world-up offset in NDS f32 (0=bottom, height=top)
-            //   v.nx    = sentinel encoding the mode
+            // ------------------------------------------------------------------
+            // Billboard vertex
+            // ------------------------------------------------------------------
             float anchorX = f32tofloat(v.x);
             float anchorY = f32tofloat(v.y);
             float anchorZ = f32tofloat(v.z);
-            float offR    = f32tofloat(v.ny);   // spread along right
-            float offU    = f32tofloat(v.nz);   // rise along up
+            float offR    = f32tofloat(v.ny);   // offset along right
+            float offU    = f32tofloat(v.nz);   // offset along up
 
             float lx, ly, lz;
             float lightNX, lightNY, lightNZ;
 
             if (v.nx == (s16)BILLBOARD_SENTINEL_FIX) {
-                // Fixed: always spread along world +X, rise along world +Y
-                lx = anchorX + offR;
-                ly = anchorY + offU;
-                lz = anchorZ;
-                lightNX = 0.0f; lightNY = 0.5f; lightNZ = 1.0f;
+                // ---- Fixed mode ----
+                // Always spread along world +X, rise along world +Y.
+                // Face normal points along world +Z.
+                lx = chunkOX + anchorX + offR;
+                ly =           anchorY + offU;
+                lz = chunkOZ + anchorZ;
+                lightNX = 0.0f;  lightNY = 0.0f;  lightNZ = 1.0f;
 
             } else if (v.nx == (s16)BILLBOARD_SENTINEL_SPH) {
-                // Spherical: spread along camera right, rise along camera up
-                lx = anchorX + offR * s_bbRightX + offU * s_bbUpX;
-                ly = anchorY + offR * 0.0f        + offU * s_bbUpY;
-                lz = anchorZ + offR * s_bbRightZ  + offU * s_bbUpZ;
-                lightNX = s_bbUpZ; lightNY = s_bbUpY; lightNZ = -s_bbUpX;
+                // ---- Spherical mode ----
+                // Spread along camera right, rise along camera up.
+                // s_bbRightX/Y/Z and s_bbUpX/Y/Z are set by setCamera().
+                lx = chunkOX + anchorX + offR * s_bbRightX + offU * s_bbUpX;
+                ly =           anchorY + offR * s_bbRightY + offU * s_bbUpY;
+                lz = chunkOZ + anchorZ + offR * s_bbRightZ + offU * s_bbUpZ;
+                // Light normal = camera forward (face points at camera).
+                // Use camera up as a reasonable approximation for diffuse.
+                lightNX = -s_bbUpZ;
+                lightNY =  s_bbUpY;
+                lightNZ =  s_bbUpX;
 
             } else {
-                // Cylindrical (default 0x7FFF): per-billboard right from eye -> anchor.
-                // Compute world-space anchor so the right vector is correct for THIS
-                // billboard regardless of camera yaw (which never changes in a fixed
-                // top-down camera).
-                float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
-                float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
+                // ---- Cylindrical mode (default 0x7FFF) ----
+                //
+                // The billboard stays vertical (up = world Y).
+                // It rotates around the Y axis so its face always points
+                // toward the camera eye position projected onto the XZ plane.
+                //
+                // Compute the per-billboard right vector:
+                //   dX = s_camEyeX - world_anchor_X   (camera → anchor, XZ only)
+                //   dZ = s_camEyeZ - world_anchor_Z
+                //   right = normalize(dX, dZ) rotated 90° CW around Y:
+                //           (x, z) → (z, -x)
+                //
+                // This gives a smooth, continuous rotation with no sudden flips
+                // because (dZ, -dX) is the perpendicular to the camera→anchor
+                // direction, and it varies continuously as the camera orbits.
+                //
+                // Requires setCamera() to have been called this frame so that
+                // s_camEyeX/Z hold the correct world-space eye position.
+
                 float wax = chunkOX + anchorX;
                 float waz = chunkOZ + anchorZ;
+                float dX  = s_camEyeX - wax;
+                float dZ  = s_camEyeZ - waz;
+                float dlen = sqrtf(dX*dX + dZ*dZ);
 
-                // Forward from camera eye to billboard anchor (XZ only — cylindrical)
-                float cfx = wax - s_camEyeX;
-                float cfz = waz - s_camEyeZ;
-                float cflen = sqrtf(cfx*cfx + cfz*cfz);
                 float crx, crz;
-                if (cflen > 0.0001f) {
-                    cfx /= cflen; cfz /= cflen;
-                    // right = forward rotated 90 CW around Y: (-fwdZ, 0, fwdX)
-                    crx = -cfz;
-                    crz =  cfx;
+                if (dlen > 0.0001f) {
+                    dX /= dlen;  dZ /= dlen;
+                    // 90° CW rotation: (x, z) → (z, -x)
+                    crx =  dZ;
+                    crz = -dX;
                 } else {
+                    // Camera eye is directly above this billboard anchor.
+                    // Fall back to the global camera right vector.
                     crx = s_bbRightX;
                     crz = s_bbRightZ;
                 }
 
-                lx = anchorX + offR * crx;
-                ly = anchorY + offU;
-                lz = anchorZ + offR * crz;
-                lightNX = crz; lightNY = 0.5f; lightNZ = -crx;
+                lx = chunkOX + anchorX + offR * crx;
+                ly =           anchorY + offU;          // world Y always vertical
+                lz = chunkOZ + anchorZ + offR * crz;
+                // Face normal is perpendicular to right, pointing toward camera.
+                lightNX = -crz;
+                lightNY =  0.5f;    // slight upward bias for nicer ambient shading
+                lightNZ =  crx;
             }
 
+            // Apply diffuse lighting using the face normal we computed.
             float scale = lightScale(lightNX, lightNY, lightNZ);
             glColorLit(v.r, v.g, v.b, scale);
             if (v.texId != 0xFF)
@@ -368,7 +407,9 @@ void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
             glVertex3f(lx, ly, lz);
 
         } else {
+            // ------------------------------------------------------------------
             // Normal geometry vertex
+            // ------------------------------------------------------------------
             if (v.nx || v.ny || v.nz) {
                 float scale = lightScale(f32tofloat(v.nx),
                                          f32tofloat(v.ny),
@@ -379,12 +420,15 @@ void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
             }
             if (v.texId != 0xFF)
                 glTexCoord2t16(v.u, v.v);
-            glVertex3f(f32tofloat(v.x), f32tofloat(v.y), f32tofloat(v.z));
+            glVertex3f(
+                chunkOX + f32tofloat(v.x),
+                          f32tofloat(v.y),
+                chunkOZ + f32tofloat(v.z)
+            );
         }
     }
 
     glEnd();
-    glPopMatrix(1);
 }
 
 void ChunkLibrary::bindTexture(u8 texId)
