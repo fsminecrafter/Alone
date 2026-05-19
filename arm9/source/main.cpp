@@ -128,6 +128,9 @@ static void setup3D()
     glClearDepth(GL_MAX_DEPTH);
     glClearPolyID(63);
     glEnable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND);        // enable alpha blending
+    glEnable(GL_ALPHA_TEST);   // enable alpha test for 1-bit cutout (A1RGB5 textures)
+    glAlphaFunc(1);            // discard pixels with alpha == 0 (threshold = 1 out of 15)
     glViewport(0, 0, 255, 191);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -305,7 +308,7 @@ int main()
             drawTestFloor(px, pz);
         }
 
-        glFlush(0);
+        glFlush(0);  // 0 = default Y-sorting of translucent polygons
         swiWaitForVBlank();
 
         if (frame % 20 == 0) {

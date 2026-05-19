@@ -209,11 +209,19 @@ class DSTexture:
     def height_log2(self): return int(math.log2(self.height))
 
     def pack_header(self):
-        return struct.pack("<BBBBL",
-            self.tex_id,
-            self.width_log2(), self.height_log2(),
-            self.fmt,
-            len(self.data))
+        for tex in tex_list:
+            pil = tex.get_pil()
+            if pil and tex.fmt in (GL_RGBA, GL_RGB, GL_RGB32_A3, GL_RGB8_A5):
+                packed = nds_pack_texture(pil, tex.fmt)
+            else:
+                packed = tex.data  # palette formats already correct
+            # Write header with correct byte count
+            f.write(struct.pack("<BBBBL",
+                tex.tex_id,
+                tex.width_log2(), tex.height_log2(),
+                tex.fmt,
+                len(packed)))
+            f.write(packed)
 
     def get_pil(self) -> Image.Image | None:
         """Return (cached) PIL Image in RGBA mode."""
@@ -652,15 +660,15 @@ class WorldFile:
         """
         # --- Build NDS texture list ---
         tex_list = []
-        for tex in self.textures:
-            img = tex.get_pil()
-            if img:
-                dsimg, _, nw, nh = dsify_image(img, DS_MAX_TEX_SIZE, tex.fmt)
-                nds_raw = nds_pack_texture(dsimg, tex.fmt)
-                etex = DSTexture(tex.tex_id, nw, nh, tex.fmt, nds_raw, tex.name)
+        for tex in tex_list:
+            f.write(tex.pack_header())
+            # Convert RGBA8 editor data → packed NDS format for the .world file
+            pil = tex.get_pil()
+            if pil and tex.fmt in (GL_RGBA, GL_RGB, GL_RGB32_A3, GL_RGB8_A5):
+                packed = nds_pack_texture(pil, tex.fmt)
+                f.write(packed)
             else:
-                etex = tex
-            tex_list.append(etex)
+                f.write(tex.data)
 
         # --- Merge chunks with identical grid coords ---
         # Floor chunks use their grid_x/z directly.

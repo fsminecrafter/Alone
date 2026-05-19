@@ -5,141 +5,85 @@
 extern float g_lightX, g_lightY, g_lightZ;
 
 // Billboard mode sentinels stored in nx (must match editor.py):
-//   0x7FFF  cylindrical
-//   0x7FFE  spherical
-//   0x7FFD  fixed
+//   0x7FFF  cylindrical -- rotates around Y only, stays vertical
+//   0x7FFE  spherical   -- fully faces camera (tilts too)
+//   0x7FFD  fixed       -- no rotation, always faces world +Z
 #define BILLBOARD_SENTINEL      0x7FFF
 #define BILLBOARD_SENTINEL_SPH  0x7FFE
 #define BILLBOARD_SENTINEL_FIX  0x7FFD
 
-inline bool ChunkLibrary::isBillboardNx(s16 nx) {
-    return nx == (s16)BILLBOARD_SENTINEL  ||
+static inline bool isBillboardNx(s16 nx) {
+    return nx == (s16)BILLBOARD_SENTINEL ||
            nx == (s16)BILLBOARD_SENTINEL_SPH ||
            nx == (s16)BILLBOARD_SENTINEL_FIX;
 }
 
 // ---------------------------------------------------------------------------
-// Camera / frustum state
+// Cylindrical billboard orientation
 // ---------------------------------------------------------------------------
+// Billboard vertex layout (nx == BILLBOARD_SENTINEL):
+//   v.x, v.y, v.z  = chunk-local anchor (base of sprite, same for all 6 verts)
+//   v.ny            = camera-RIGHT offset in NDS f32 (+/-half-width)
+//   v.nz            = world-UP offset in NDS f32 (0=bottom edge, height=top)
+//
+// Final world pos = translate(chunk_origin) + anchor
+//                 + right * ny   (horizontal spread, faces camera)
+//                 + up    * nz   (vertical rise, always Y-up)
+//
+// "Cylindrical" = sprite always stands vertically, only rotates around Y.
+
+static float s_bbRightX = 1.0f;  // global right (spherical/fallback only)
+static float s_bbRightZ = 0.0f;
+// Up vector for spherical billboards (camera-derived); cylindrical always uses world Y.
+static float s_bbUpX = 0.0f;
+static float s_bbUpY = 1.0f;
+static float s_bbUpZ = 0.0f;
+// Camera eye position — used to compute per-billboard right vector for cylindrical mode.
 static float s_camEyeX = 0.0f;
 static float s_camEyeY = 0.0f;
 static float s_camEyeZ = 0.0f;
 
-static float s_bbRightX = 1.0f, s_bbRightY = 0.0f, s_bbRightZ = 0.0f;
-static float s_bbUpX    = 0.0f, s_bbUpY    = 1.0f, s_bbUpZ    = 0.0f;
-
-// ---------------------------------------------------------------------------
-// setCamera — builds billboard vectors AND the 4-plane XZ frustum.
-//
-// Frustum construction (view-space, projected onto XZ):
-//   We derive left / right / near / far planes from the camera orientation
-//   and a hard-coded horizontal FOV that matches the NDS perspective setup
-//   (45° vertical FOV, 256/192 aspect → ~58° horizontal FOV).
-//   A small margin (+1 chunk half-diagonal) is added to each plane so
-//   chunks that overlap the edge are never popped out prematurely.
-// ---------------------------------------------------------------------------
-void ChunkLibrary::setCamera(float eyeX, float eyeY, float eyeZ,
-                              float tgtX, float tgtY, float tgtZ)
+static void updateCameraVectors(float eyeX, float eyeY, float eyeZ,
+                                 float tgtX, float tgtY, float tgtZ)
 {
-    s_camEyeX = eyeX;
-    s_camEyeY = eyeY;
-    s_camEyeZ = eyeZ;
-
-    // Forward (XZ only)
+    // Full 3-D forward (eye -> target).
     float fwdX = tgtX - eyeX;
+    float fwdY = tgtY - eyeY;
     float fwdZ = tgtZ - eyeZ;
-    float flen = sqrtf(fwdX*fwdX + fwdZ*fwdZ);
-    if (flen < 0.0001f) return;
-    fwdX /= flen;  fwdZ /= flen;
-
-    // Right (perpendicular in XZ, 90° CW: (x,z) → (z,-x))
-    float rx =  fwdZ;
-    float rz = -fwdX;
-
-    // Billboard right/up (full 3-D)
-    s_bbRightX = rx;  s_bbRightY = 0.0f;  s_bbRightZ = rz;
-
-    float fwdY  = tgtY - eyeY;
-    float flen3 = sqrtf(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ);
-    if (flen3 > 0.0001f) {
-        float fx3 = fwdX/flen3, fy3 = fwdY/flen3, fz3 = fwdZ/flen3;
-        float ux = fy3*rz - fz3*0.0f;
-        float uy = fz3*rx - fx3*rz;
-        float uz = fx3*0.0f - fy3*rx;
-        float ulen = sqrtf(ux*ux + uy*uy + uz*uz);
-        if (ulen > 0.0001f) {
-            s_bbUpX = ux/ulen; s_bbUpY = uy/ulen; s_bbUpZ = uz/ulen;
-        } else {
-            s_bbUpX = 0.0f; s_bbUpY = 1.0f; s_bbUpZ = 0.0f;
-        }
-    } else {
+    float flen = sqrtf(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ);
+    s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
+    if (flen < 0.0001f) {
+        s_bbRightX = 1.0f; s_bbRightZ = 0.0f;
         s_bbUpX = 0.0f; s_bbUpY = 1.0f; s_bbUpZ = 0.0f;
+        return;
     }
+    fwdX /= flen; fwdY /= flen; fwdZ /= flen;
 
-    // ---- Build frustum planes ----
-    // NDS: 45° vertical FOV, 256/192 aspect → hFOV ≈ 58.7°
-    // half-angle tangent for horizontal: tan(29.35°) ≈ 0.561
-    // Add CHUNK_HALF_DIAG margin so edge chunks aren't culled mid-tile.
-    const float MARGIN  = CHUNK_HALF_DIAG;
-    const float NEAR_D  = 0.5f;   // near plane distance along fwd
-    const float FAR_D   = 320.0f; // far plane distance (2x render distance)
-    const float H_TAN   = 0.561f; // tan(hFOV/2) ≈ 0.561 for ~58.7° hFOV
+    // right = forward x world-up(0,1,0)  =>  (-fwd.z, 0, fwd.x)
+    float rx = -fwdZ;
+    float rz =  fwdX;
+    float rlen = sqrtf(rx*rx + rz*rz);
+    if (rlen < 0.0001f) {
+        // Camera pointing straight down/up; use world +X as fallback
+        s_bbRightX = 1.0f; s_bbRightZ = 0.0f;
+        s_bbUpX = 0.0f; s_bbUpY = 0.0f; s_bbUpZ = -1.0f;
+        return;
+    }
+    s_bbRightX = rx / rlen;
+    s_bbRightZ = rz / rlen;
 
-    // Left plane: rotated (fwdX,fwdZ) by +hFOV/2, inward normal points right
-    {
-        float c =  H_TAN, s_v = 1.0f; // plane normal in view: n = fwd*cos + right*sin
-        float mag = sqrtf(c*c + s_v*s_v);
-        c /= mag; s_v /= mag;
-        float nx =  fwdX * c - rx * s_v; // rotate fwd toward right
-        float nz =  fwdZ * c - rz * s_v;
-        // Inward normal for left plane (points right)
-        frustum[0].nx =  nz;  frustum[0].nz = -nx;
-        frustum[0].d  = -(frustum[0].nx * eyeX + frustum[0].nz * eyeZ) - MARGIN;
-    }
-    // Right plane
-    {
-        float c =  H_TAN, s_v = 1.0f;
-        float mag = sqrtf(c*c + s_v*s_v);
-        c /= mag; s_v /= mag;
-        float nx =  fwdX * c + rx * s_v;
-        float nz =  fwdZ * c + rz * s_v;
-        // Inward normal for right plane (points left)
-        frustum[1].nx = -nz;  frustum[1].nz = nx;
-        frustum[1].d  = -(frustum[1].nx * eyeX + frustum[1].nz * eyeZ) - MARGIN;
-    }
-    // Near plane (inward normal = fwd direction)
-    {
-        frustum[2].nx = fwdX;  frustum[2].nz = fwdZ;
-        float px = eyeX + fwdX * NEAR_D;
-        float pz = eyeZ + fwdZ * NEAR_D;
-        frustum[2].d = -(frustum[2].nx * px + frustum[2].nz * pz) - MARGIN;
-    }
-    // Far plane (inward normal = -fwd)
-    {
-        frustum[3].nx = -fwdX;  frustum[3].nz = -fwdZ;
-        float px = eyeX + fwdX * FAR_D;
-        float pz = eyeZ + fwdZ * FAR_D;
-        frustum[3].d = -(frustum[3].nx * px + frustum[3].nz * pz) - MARGIN;
-    }
-}
+    // Store eye for per-billboard cylindrical right computation
+    s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
 
-// ---------------------------------------------------------------------------
-// Frustum test — sphere in XZ (fast, no sqrt)
-// Tests the chunk centre against all 4 planes.  Returns false (cull) only
-// if the sphere is fully outside at least one plane.
-// ---------------------------------------------------------------------------
-bool ChunkLibrary::chunkInFrustum(s16 gx, s16 gz) const
-{
-    // Chunk centre in world space
-    float cx = (gx + 0.5f) * CHUNK_WORLD_UNIT;
-    float cz = (gz + 0.5f) * CHUNK_WORLD_UNIT;
-    const float R = CHUNK_HALF_DIAG;
-
-    for (int i = 0; i < 4; i++) {
-        float dist = frustum[i].nx * cx + frustum[i].nz * cz + frustum[i].d;
-        if (dist < -R) return false;  // sphere fully outside this plane
-    }
-    return true;
+    // Spherical camera-derived up = right x forward
+    // right = (s_bbRightX, 0, s_bbRightZ)
+    float ux = 0.0f   * fwdZ - s_bbRightZ * fwdY;
+    float uy = s_bbRightZ * fwdX - s_bbRightX * fwdZ;
+    float uz = s_bbRightX * fwdY - 0.0f   * fwdX;
+    float ulen = sqrtf(ux*ux + uy*uy + uz*uz);
+    if (ulen > 0.0001f) { ux/=ulen; uy/=ulen; uz/=ulen; }
+    else                 { ux=0.0f; uy=1.0f; uz=0.0f; }
+    s_bbUpX = ux; s_bbUpY = uy; s_bbUpZ = uz;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,15 +91,13 @@ bool ChunkLibrary::chunkInFrustum(s16 gx, s16 gz) const
 // ---------------------------------------------------------------------------
 ChunkLibrary::ChunkLibrary(MemoryManager* mem)
     : memMgr(mem), worldFd(nullptr),
-      textureCount(0), worldChunkCount(0), framePolyCount(0),
-      lastBoundTexId(0xFE)
+      textureCount(0), worldChunkCount(0), framePolyCount(0)
 {
     memset(textures,     0, sizeof(textures));
     memset(chunkDesc,    0, sizeof(chunkDesc));
     memset(activeChunks, 0, sizeof(activeChunks));
     for (int i = 0; i < CHUNK_MAX_TEXTURES; i++)
         textures[i].glTexId = -1;
-    memset(frustum, 0, sizeof(frustum));
 }
 
 ChunkLibrary::~ChunkLibrary() { unloadWorld(); }
@@ -170,9 +112,9 @@ bool ChunkLibrary::loadWorld(const char* path)
     setvbuf(worldFd, nullptr, _IONBF, 0);
 
     WorldHeader hdr;
-    if (fread(&hdr, sizeof(hdr), 1, worldFd) != 1) return false;
-    if (memcmp(hdr.magic, "ALWF", 4) != 0)          return false;
-    if (hdr.version != 1)                           return false;
+    if (fread(&hdr, sizeof(hdr), 1, worldFd) != 1)  return false;
+    if (memcmp(hdr.magic, "ALWF", 4) != 0)           return false;
+    if (hdr.version != 1)                            return false;
 
     textureCount    = hdr.textureCount;
     worldChunkCount = hdr.chunkCount;
@@ -187,7 +129,7 @@ void ChunkLibrary::unloadWorld()
     for (int i = 0; i < CHUNK_GRID_SIZE; i++)
         unloadChunk(&activeChunks[i]);
     for (int i = 0; i < CHUNK_MAX_TEXTURES; i++) {
-        if (textures[i].data)    { free(textures[i].data);  textures[i].data = nullptr; }
+        if (textures[i].data) { free(textures[i].data); textures[i].data = nullptr; }
         if (textures[i].glTexId >= 0) {
             glDeleteTextures(1, &textures[i].glTexId);
             textures[i].glTexId = -1;
@@ -204,6 +146,7 @@ bool ChunkLibrary::loadTextures()
     for (u16 i = 0; i < textureCount && i < CHUNK_MAX_TEXTURES; i++) {
         TextureEntry te;
         if (fread(&te, sizeof(te), 1, worldFd) != 1) return false;
+
         textures[i].id         = te.id;
         textures[i].widthLog2  = te.widthLog2;
         textures[i].heightLog2 = te.heightLog2;
@@ -212,7 +155,8 @@ bool ChunkLibrary::loadTextures()
         textures[i].glTexId    = -1;
         textures[i].data       = (u8*)malloc(te.dataBytes);
         if (!textures[i].data) return false;
-        if (fread(textures[i].data, 1, te.dataBytes, worldFd) != te.dataBytes) return false;
+        if (fread(textures[i].data, 1, te.dataBytes, worldFd) != te.dataBytes)
+            return false;
         uploadTexture(i);
     }
     return true;
@@ -257,7 +201,6 @@ void ChunkLibrary::update(float camX, float camZ)
     s16 camGX = toGrid(camX);
     s16 camGZ = toGrid(camZ);
 
-    // Evict chunks outside streaming radius
     for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
         Chunk& c = activeChunks[i];
         if (!c.verts) continue;
@@ -268,7 +211,6 @@ void ChunkLibrary::update(float camX, float camZ)
             unloadChunk(&c);
     }
 
-    // Load missing chunks within streaming radius
     for (s16 dz = -CHUNK_GRID_RADIUS; dz <= CHUNK_GRID_RADIUS; dz++) {
         for (s16 dx = -CHUNK_GRID_RADIUS; dx <= CHUNK_GRID_RADIUS; dx++) {
             s16 gx = camGX + dx;
@@ -278,182 +220,186 @@ void ChunkLibrary::update(float camX, float camZ)
             if (!desc) continue;
             Chunk* slot = findFreeSlot();
             if (!slot) return;
-            loadChunk(desc, slot);
+            if (loadChunk(desc, slot)) return;
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// render — frustum-culled, two-pass (opaque then billboards).
+// Render — two passes so transparent billboards sort correctly.
 //
-// Optimisations vs the original:
-//  1. chunkInFrustum() early-outs invisible chunks entirely.
-//  2. opaqueCount/bbStart/bbCount are pre-computed at load time — no
-//     per-vertex branch to separate passes at render time.
-//  3. lastBoundTexId tracks the current texture so bindTexture() is
-//     a no-op when the same texture is used for adjacent verts.
-//  4. glBegin/glEnd are only called once per pass per chunk instead of
-//     once per texture-group (we re-bind mid-batch instead).
+// NDS transparency rules:
+//   • POLY_ALPHA 31  = fully opaque.  GPU ignores the texture's alpha channel
+//     entirely — A1RGB5 bit-15 is discarded, so sprites render as solid quads.
+//   • POLY_ALPHA 1-30 = translucent.  GPU honours the texture alpha channel
+//     (bit-15 for A1RGB5 cutout; 3-bit or 5-bit alpha for RGB32_A3/RGB8_A5).
+//     Translucent polys MUST be drawn AFTER all opaque polys so the depth
+//     buffer is already settled, and MUST use a POLY_ID different from all
+//     opaque polys so edge-marking doesn't bleed across the boundary.
+//
+// Pass 1: opaque terrain/objects — POLY_ID 1, POLY_ALPHA 31
+// Pass 2: billboard quads        — POLY_ID 2, POLY_ALPHA 30
+//   POLY_ALPHA 30 (one step below opaque) activates blending while looking
+//   visually identical to fully opaque where the texture is solid.
+//   For A1RGB5 textures this gives clean 1-bit cutout edges.
+//   For A3/A5 textures this gives smooth partial transparency.
 // ---------------------------------------------------------------------------
 void ChunkLibrary::render()
 {
-    framePolyCount   = 0;
-    lastBoundTexId   = 0xFE;  // invalid → forces first bind
+    framePolyCount = 0;
 
-    // ---- Pass 1: opaque geometry ----
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_ID(1));
-
+    // Pass 1 — terrain / opaque objects
     for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
         Chunk* c = &activeChunks[i];
-        if (!c->verts || c->opaqueCount == 0) continue;
-        if (!chunkInFrustum(c->gridX, c->gridZ)) continue;
-        renderChunkOpaque(c);
+        if (!c->verts) continue;
+        renderChunk(c, i, false);
         framePolyCount += c->polyCount;
     }
 
-    // ---- Pass 2: billboard quads (submitted after depth buffer is settled) ----
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(2));
-
+    // Pass 2 — billboard quads (drawn after depth buffer is settled)
     for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
         Chunk* c = &activeChunks[i];
-        if (!c->verts || c->bbCount == 0) continue;
-        if (!chunkInFrustum(c->gridX, c->gridZ)) continue;
-        renderChunkBillboard(c);
+        if (!c->verts) continue;
+        renderChunk(c, i, true);
     }
 }
 
-// ---------------------------------------------------------------------------
-// renderChunkOpaque
-//
-// Renders the leading opaqueCount verts.  The verts were sorted by texId
-// at load time (see loadChunk) so texture binds are minimised.
-// ---------------------------------------------------------------------------
-void ChunkLibrary::renderChunkOpaque(Chunk* c)
+void ChunkLibrary::setCamera(float eyeX, float eyeY, float eyeZ,
+                              float tgtX, float tgtY, float tgtZ)
 {
-    float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
-    float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
-
-    glBegin(GL_TRIANGLES);
-
-    for (u16 vi = 0; vi < c->opaqueCount; vi++) {
-        ChunkVertex& v = c->verts[vi];
-
-        if (v.texId != lastBoundTexId) {
-            glEnd();
-            bindTexture(v.texId);
-            glBegin(GL_TRIANGLES);
-        }
-
-        if (v.nx | v.ny | v.nz) {
-            float scale = lightScale(f32tofloat(v.nx),
-                                     f32tofloat(v.ny),
-                                     f32tofloat(v.nz));
-            glColorLit(v.r, v.g, v.b, scale);
-        } else {
-            glColor3b(v.r, v.g, v.b);
-        }
-
-        if (v.texId != 0xFF) glTexCoord2t16(v.u, v.v);
-
-        glVertex3f(
-            chunkOX + f32tofloat(v.x),
-                      f32tofloat(v.y),
-            chunkOZ + f32tofloat(v.z)
-        );
-    }
-
-    glEnd();
+    updateCameraVectors(eyeX, eyeY, eyeZ, tgtX, tgtY, tgtZ);
 }
 
-// ---------------------------------------------------------------------------
-// renderChunkBillboard
-//
-// Renders only the billboard verts (bbStart..bbStart+bbCount-1).
-// Orientation is computed per-billboard anchor (same logic as before).
-// ---------------------------------------------------------------------------
-void ChunkLibrary::renderChunkBillboard(Chunk* c)
+void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
 {
-    float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
-    float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
+    // Translate by chunk origin so local verts stay in [-8, 8] (NDS 4.12 range)
+    glPushMatrix();
+    glTranslatef(
+        (float)(c->gridX * CHUNK_WORLD_UNIT),
+        0.0f,
+        (float)(c->gridZ * CHUNK_WORLD_UNIT)
+    );
+
+    // Pass 1: opaque terrain — POLY_ID 1, POLY_ALPHA 31 (fully opaque, no blending).
+    // Pass 2: billboard quads — POLY_ID 2, POLY_ALPHA 30.
+    //
+    // NOTE:
+    // This libnds setup does not provide POLY_ALPHA_TEST, so we keep the
+    // billboard pass translucent via POLY_ALPHA 30 and rely on the texture
+    // alpha channel as supported by the current build.
+    const int polyId    = billboardsOnly ? 2 : 1;
+    const int polyAlpha = billboardsOnly ? 30 : 31;
+
+    glPolyFmt(POLY_ALPHA(polyAlpha) | POLY_CULL_NONE | POLY_ID(polyId));
+
+    u8   lastTexId   = 0xFE;
+    bool inBillboard = false;
+    bool anyDrawn    = false;
 
     glBegin(GL_TRIANGLES);
 
-    u16 end = c->bbStart + c->bbCount;
-    for (u16 vi = c->bbStart; vi < end; vi++) {
+    for (u16 vi = 0; vi < c->vertCount; vi++) {
         ChunkVertex& v = c->verts[vi];
 
-        if (v.texId != lastBoundTexId) {
+        bool isBB = isBillboardNx(v.nx);
+
+        // Skip vertices that don't belong to this pass
+        if (isBB != billboardsOnly) continue;
+
+        if (v.texId != lastTexId) {
             glEnd();
             bindTexture(v.texId);
+            glPolyFmt(POLY_ALPHA(polyAlpha) | POLY_CULL_NONE | POLY_ID(polyId));
             glBegin(GL_TRIANGLES);
+            lastTexId = v.texId;
         }
 
-        float anchorX = f32tofloat(v.x);
-        float anchorY = f32tofloat(v.y);
-        float anchorZ = f32tofloat(v.z);
-        float offR    = f32tofloat(v.ny);
-        float offU    = f32tofloat(v.nz);
+        anyDrawn    = true;
+        inBillboard = isBB;
 
-        float lx, ly, lz;
-        float lightNX, lightNY, lightNZ;
+        if (isBB) {
+            // Billboard vertex:
+            //   v.x/y/z = chunk-local anchor in NDS f32 (same for all 6 verts)
+            //   v.ny    = camera-right offset in NDS f32 (+/-half-width)
+            //   v.nz    = world-up offset in NDS f32 (0=bottom, height=top)
+            //   v.nx    = sentinel encoding the mode
+            float anchorX = f32tofloat(v.x);
+            float anchorY = f32tofloat(v.y);
+            float anchorZ = f32tofloat(v.z);
+            float offR    = f32tofloat(v.ny);   // spread along right
+            float offU    = f32tofloat(v.nz);   // rise along up
 
-        if (v.nx == (s16)BILLBOARD_SENTINEL_FIX) {
-            lx = chunkOX + anchorX + offR;
-            ly =           anchorY + offU;
-            lz = chunkOZ + anchorZ;
-            lightNX = 0.0f;  lightNY = 0.0f;  lightNZ = 1.0f;
+            float lx, ly, lz;
+            float lightNX, lightNY, lightNZ;
 
-        } else if (v.nx == (s16)BILLBOARD_SENTINEL_SPH) {
-            lx = chunkOX + anchorX + offR * s_bbRightX + offU * s_bbUpX;
-            ly =           anchorY + offR * s_bbRightY + offU * s_bbUpY;
-            lz = chunkOZ + anchorZ + offR * s_bbRightZ + offU * s_bbUpZ;
-            lightNX = -s_bbUpZ;
-            lightNY =  s_bbUpY;
-            lightNZ =  s_bbUpX;
+            if (v.nx == (s16)BILLBOARD_SENTINEL_FIX) {
+                // Fixed: always spread along world +X, rise along world +Y
+                lx = anchorX + offR;
+                ly = anchorY + offU;
+                lz = anchorZ;
+                lightNX = 0.0f; lightNY = 0.5f; lightNZ = 1.0f;
 
-        } else {
-            // Cylindrical
-            float wax = chunkOX + anchorX;
-            float waz = chunkOZ + anchorZ;
-            float dX  = s_camEyeX - wax;
-            float dZ  = s_camEyeZ - waz;
-            float dlen = sqrtf(dX*dX + dZ*dZ);
-            float crx, crz;
-            if (dlen > 0.0001f) {
-                dX /= dlen;  dZ /= dlen;
-                crx =  dZ;  crz = -dX;
+            } else if (v.nx == (s16)BILLBOARD_SENTINEL_SPH) {
+                // Spherical: spread along camera right, rise along camera up
+                lx = anchorX + offR * s_bbRightX + offU * s_bbUpX;
+                ly = anchorY + offR * 0.0f        + offU * s_bbUpY;
+                lz = anchorZ + offR * s_bbRightZ  + offU * s_bbUpZ;
+                lightNX = s_bbUpZ; lightNY = s_bbUpY; lightNZ = -s_bbUpX;
+
             } else {
-                crx = s_bbRightX;  crz = s_bbRightZ;
-            }
-            lx = chunkOX + anchorX + offR * crx;
-            ly =           anchorY + offU;
-            lz = chunkOZ + anchorZ + offR * crz;
-            lightNX = -crz;
-            lightNY =  0.5f;
-            lightNZ =  crx;
-        }
+                // Cylindrical (default 0x7FFF): per-billboard right vector.
+                //
+                // We want: right = cross(anchor_to_cam, world_up)
+                //   anchor_to_cam = (dx, 0, dz)  where dx = camX - anchorX
+                //   cross((dx,0,dz), (0,1,0)) = (-dz, 0, dx)
+                float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
+                float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
+                float wax = chunkOX + anchorX;
+                float waz = chunkOZ + anchorZ;
 
-        float scale = lightScale(lightNX, lightNY, lightNZ);
-        glColorLit(v.r, v.g, v.b, scale);
-        if (v.texId != 0xFF) glTexCoord2t16(v.u, v.v);
-        glVertex3f(lx, ly, lz);
+                float dx = s_camEyeX - wax;   // anchor -> camera (XZ)
+                float dz = s_camEyeZ - waz;
+                float crx = -dz;              // cross(anchor_to_cam, world_up)
+                float crz =  dx;
+                float clen = sqrtf(crx*crx + crz*crz);
+                if (clen > 0.0001f) { crx /= clen; crz /= clen; }
+                else                { crx = s_bbRightX; crz = s_bbRightZ; }
+
+                lx = anchorX + offR * crx;
+                ly = anchorY + offU;
+                lz = anchorZ + offR * crz;
+                lightNX = -crz; lightNY = 0.5f; lightNZ = crx;
+            }
+
+            float scale = lightScale(lightNX, lightNY, lightNZ);
+            glColorLit(v.r, v.g, v.b, scale);
+            if (v.texId != 0xFF)
+                glTexCoord2t16(v.u, v.v);
+            glVertex3f(lx, ly, lz);
+
+        } else {
+            // Normal geometry vertex
+            if (v.nx || v.ny || v.nz) {
+                float scale = lightScale(f32tofloat(v.nx),
+                                         f32tofloat(v.ny),
+                                         f32tofloat(v.nz));
+                glColorLit(v.r, v.g, v.b, scale);
+            } else {
+                glColor3b(v.r, v.g, v.b);
+            }
+            if (v.texId != 0xFF)
+                glTexCoord2t16(v.u, v.v);
+            glVertex3f(f32tofloat(v.x), f32tofloat(v.y), f32tofloat(v.z));
+        }
     }
 
     glEnd();
+    glPopMatrix(1);
 }
 
-// ---------------------------------------------------------------------------
-// bindTexture — only issues GL call when the texture actually changes.
-// ---------------------------------------------------------------------------
 void ChunkLibrary::bindTexture(u8 texId)
 {
-    if (texId == lastBoundTexId) return;
-    lastBoundTexId = texId;
-
-    if (texId == 0xFF) {
-        glBindTexture(0, 0);
-        return;
-    }
+    if (texId == 0xFF) { glBindTexture(0, 0); return; }
     for (u16 i = 0; i < textureCount; i++) {
         if (textures[i].id == texId && textures[i].glTexId >= 0) {
             glBindTexture(0, textures[i].glTexId);
@@ -490,86 +436,18 @@ Chunk* ChunkLibrary::findFreeSlot()
     return nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// loadChunk
-//
-// After reading verts from disk we do two things that save work every frame:
-//
-//  1. Sort the vertex list so all opaque verts come first, then billboards.
-//     Within each group, sort by texId to minimise GL texture binds.
-//     This is O(n) using a stable counting sort on texId (256 buckets).
-//
-//  2. Record opaqueCount, bbStart, bbCount so the two render passes never
-//     need to scan the whole array.
-// ---------------------------------------------------------------------------
 bool ChunkLibrary::loadChunk(ChunkDesc* desc, Chunk* slot)
 {
     u32 byteSize = sizeof(ChunkVertex) * desc->vertCount;
     ChunkVertex* buf = (ChunkVertex*)malloc(byteSize);
     if (!buf) return false;
-
     fseek(worldFd, (long)(desc->fileOffset + sizeof(ChunkEntry)), SEEK_SET);
     size_t got = fread(buf, sizeof(ChunkVertex), desc->vertCount, worldFd);
     if (got != desc->vertCount) { free(buf); return false; }
-
-    // ---- Sort: opaque first (by texId), then billboards (by texId) ----
-    // We use a simple temp-buffer stable sort — vertex count is small (<2048).
-    u16 n = desc->vertCount;
-
-    if (n > 0) {
-        ChunkVertex* tmp = (ChunkVertex*)malloc(byteSize);
-        if (tmp) {
-            // Count opaque and billboard verts
-            u16 nOpaque = 0, nBB = 0;
-            for (u16 i = 0; i < n; i++) {
-                if (isBillboardNx(buf[i].nx)) nBB++;
-                else                          nOpaque++;
-            }
-
-            // Counting sort by texId within each group.
-            // 256 possible texId values (0x00..0xFF).
-            // Two-pass: first into opaque region, then billboard region.
-            u16 oCount[256] = {};
-            u16 bCount[256] = {};
-            for (u16 i = 0; i < n; i++) {
-                if (isBillboardNx(buf[i].nx)) bCount[(u8)buf[i].texId]++;
-                else                          oCount[(u8)buf[i].texId]++;
-            }
-            // Build prefix sums
-            u16 oOff[256], bOff[256];
-            u16 oRunning = 0, bRunning = nOpaque;
-            for (int t = 0; t < 256; t++) {
-                oOff[t] = oRunning;  oRunning += oCount[t];
-                bOff[t] = bRunning;  bRunning += bCount[t];
-            }
-            // Scatter
-            for (u16 i = 0; i < n; i++) {
-                u8 tid = (u8)buf[i].texId;
-                if (isBillboardNx(buf[i].nx)) tmp[bOff[tid]++] = buf[i];
-                else                          tmp[oOff[tid]++] = buf[i];
-            }
-            memcpy(buf, tmp, byteSize);
-            free(tmp);
-
-            slot->opaqueCount = nOpaque;
-            slot->bbStart     = nOpaque;
-            slot->bbCount     = nBB;
-        } else {
-            // malloc failed — fall back to unsorted, no split
-            slot->opaqueCount = n;
-            slot->bbStart     = n;
-            slot->bbCount     = 0;
-        }
-    } else {
-        slot->opaqueCount = 0;
-        slot->bbStart     = 0;
-        slot->bbCount     = 0;
-    }
-
     slot->verts      = buf;
     slot->gridX      = desc->gridX;
     slot->gridZ      = desc->gridZ;
-    slot->vertCount  = n;
+    slot->vertCount  = desc->vertCount;
     slot->polyCount  = desc->polyCount;
     slot->usedMemMgr = false;
     return true;
@@ -580,13 +458,10 @@ void ChunkLibrary::unloadChunk(Chunk* slot)
     if (!slot->verts) return;
     if (slot->usedMemMgr) memMgr->freePage(slot->verts);
     else                  free(slot->verts);
-    slot->verts        = nullptr;
-    slot->vertCount    = 0;
-    slot->polyCount    = 0;
-    slot->opaqueCount  = 0;
-    slot->bbStart      = 0;
-    slot->bbCount      = 0;
-    slot->usedMemMgr   = false;
+    slot->verts      = nullptr;
+    slot->vertCount  = 0;
+    slot->polyCount  = 0;
+    slot->usedMemMgr = false;
 }
 
 u32 ChunkLibrary::loadedChunkCount() const

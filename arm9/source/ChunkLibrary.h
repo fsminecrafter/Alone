@@ -13,16 +13,16 @@ class MemoryManager;  // forward — include MemoryManager.h before this header
 // Limits
 // ---------------------------------------------------------------------------
 #define CHUNK_MAX_TEXTURES  8
-#define CHUNK_GRID_RADIUS   3           // load 7x7=49 but only DRAW visible ones
+#define CHUNK_GRID_RADIUS   2
 #define CHUNK_GRID_SIZE     ((CHUNK_GRID_RADIUS*2+1)*(CHUNK_GRID_RADIUS*2+1))
-#define CHUNK_WORLD_UNIT    16          // world-space units per chunk side
-
-// Half-diagonal of a chunk's AABB on the XZ plane (used for frustum sphere test).
-// sqrt(2) * (CHUNK_WORLD_UNIT/2) ≈ 11.31 — keep a small margin.
-#define CHUNK_HALF_DIAG     12.0f
+#define CHUNK_WORLD_UNIT    16      // world-space units per chunk side
 
 // ---------------------------------------------------------------------------
 // .world binary layout  (all little-endian, packed)
+//
+//   WorldHeader
+//   TextureEntry[textureCount]   each immediately followed by raw texel bytes
+//   ChunkEntry  [chunkCount]     each immediately followed by ChunkVertex[]
 // ---------------------------------------------------------------------------
 #pragma pack(push, 1)
 
@@ -43,6 +43,13 @@ struct TextureEntry {
     // followed by dataBytes of raw texel data
 };
 
+// Vertex baked by the editor.
+// x, y, z  — local position in NDS f32 fixed-point (float * 4096), stored as
+//             s16. Range: +/-8.0 world units fits in +/-32768 fp units, exactly
+//             at the s16 limit. The editor clamps values before writing.
+// nx,ny,nz — surface normal in f32, zero = unused.
+// texId    — 0xFF = no texture.
+// u, v     — NDS t16 texture coordinates (texel * 16).
 struct ChunkVertex {
     s16   x, y, z;
     s16   nx, ny, nz;
@@ -54,7 +61,7 @@ struct ChunkVertex {
 struct ChunkEntry {
     s16   gridX, gridZ;
     u16   vertCount;
-    u16   polyCount;
+    u16   polyCount;     // triangle count
     // followed by vertCount * ChunkVertex
 };
 
@@ -76,15 +83,8 @@ struct Chunk {
     s16           gridX, gridZ;
     u16           vertCount;
     u16           polyCount;
-    ChunkVertex*  verts;          // nullptr = slot free
-    bool          usedMemMgr;
-    // Pre-computed split indices to avoid scanning verts twice each frame.
-    // opaqueCount  = number of leading verts that are NOT billboards.
-    // bbStart      = first billboard vert index (== opaqueCount).
-    // bbCount      = number of billboard verts.
-    u16           opaqueCount;
-    u16           bbStart;
-    u16           bbCount;
+    ChunkVertex*  verts;        // nullptr = slot free
+    bool          usedMemMgr;   // true = free via MemoryManager, false = free()
 };
 
 // ---------------------------------------------------------------------------
@@ -98,22 +98,24 @@ public:
     bool loadWorld(const char* path);
     void unloadWorld();
 
-    // Stream chunks in/out around the camera position.
+    // Call once per frame — streams chunks in or out as the player moves
     void update(float camX, float camZ);
 
-    // Submit visible geometry to NDS GL.  Must be called after setCamera().
+    // Call once per frame after update — submits geometry to NDS GL
     void render();
 
     u32  loadedChunkCount() const;
     u32  totalChunkCount()  const { return worldChunkCount; }
     u32  lastFramePolys()   const { return framePolyCount; }
 
+    // World-space centre of chunk 0 — use as a starting camera position.
     void getChunk0WorldPos(float& outX, float& outZ) const {
         if (worldChunkCount == 0) { outX = 0.0f; outZ = 0.0f; return; }
         outX = chunkDesc[0].gridX * (float)CHUNK_WORLD_UNIT;
         outZ = chunkDesc[0].gridZ * (float)CHUNK_WORLD_UNIT;
     }
 
+    // World-space centroid of all chunks — better starting camera position.
     void getWorldCenter(float& outX, float& outZ) const {
         if (worldChunkCount == 0) { outX = 0.0f; outZ = 0.0f; return; }
         float sumX = 0.0f, sumZ = 0.0f;
@@ -125,12 +127,12 @@ public:
         outZ = (sumZ / (float)worldChunkCount) * (float)CHUNK_WORLD_UNIT;
     }
 
-    // Must be called each frame before render() with the same eye/target as
-    // applyCamera().  Computes billboard orientation vectors AND the view
-    // frustum planes used for culling.
+    // Must be called each frame before render(), with the same eye/target used
+    // by applyCamera(). Updates the camera right/up vectors used to orient billboards.
     void setCamera(float eyeX, float eyeY, float eyeZ,
                    float tgtX, float tgtY, float tgtZ);
 
+    // Debug: read back a chunk descriptor by index
     void getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const {
         if (idx < worldChunkCount) {
             gx = chunkDesc[idx].gridX;
@@ -143,14 +145,15 @@ public:
 
 private:
     MemoryManager* memMgr;
-    FILE*          worldFd;
+
+    FILE*  worldFd;
 
     WorldTexture  textures[CHUNK_MAX_TEXTURES];
     u16           textureCount;
 
     struct ChunkDesc {
         s16  gridX, gridZ;
-        u32  fileOffset;
+        u32  fileOffset;  // byte offset of ChunkEntry header
         u16  vertCount;
         u16  polyCount;
     };
@@ -162,15 +165,6 @@ private:
     Chunk  activeChunks[CHUNK_GRID_SIZE];
     u32    framePolyCount;
 
-    // ---- Frustum (4 vertical planes — left/right/near/far in XZ) ----
-    // Each plane: (nx, nz, d) where dot(point.xz, n) + d >= 0 = inside.
-    // We only need XZ planes because the NDS view distance is the real
-    // near/far limit; Y culling would rarely help on flat worlds.
-    struct FrustumPlane { float nx, nz, d; };
-    FrustumPlane frustum[4];   // left, right, near, far
-
-    bool chunkInFrustum(s16 gx, s16 gz) const;
-
     bool  loadTextures();
     bool  indexChunks();
     void  uploadTexture(u16 idx);
@@ -181,14 +175,12 @@ private:
     bool       loadChunk(ChunkDesc* desc, Chunk* slot);
     void       unloadChunk(Chunk* slot);
 
-    // Separate opaque and billboard rendering to minimise GL state changes.
-    void  renderChunkOpaque   (Chunk* c);
-    void  renderChunkBillboard(Chunk* c);
-
-    // Bind a texture by its world tex-id; no-op if already bound.
+    void  renderChunk(Chunk* c, int debugIdx, bool billboardsOnly);
     void  bindTexture(u8 texId);
-    u8    lastBoundTexId;
 
-    static inline bool isBillboardNx(s16 nx);
-    static s16 toGrid(float w) { return (s16)floorf(w / (float)CHUNK_WORLD_UNIT); }
+    // floorf ensures negative coords round toward -inf, not zero.
+    // Without this, toGrid(-0.1) returns 0 instead of -1.
+    static s16 toGrid(float w) {
+        return (s16)floorf(w / (float)CHUNK_WORLD_UNIT);
+    }
 };
