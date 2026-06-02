@@ -1,0 +1,99 @@
+#---------------------------------------------------------------------------------
+# Makefile.arm9  —  ARM9 sub-project for Alone
+#
+# This is the original Makefile, renamed so the top-level Makefile can invoke
+# both ARM9 and ARM7 builds independently.
+#
+# Source directory: arm9/source/
+# Output ELF:       arm9/Alone.elf   (ndstool picks it up as -9 input)
+#---------------------------------------------------------------------------------
+.SUFFIXES:
+
+ifeq ($(strip $(DEVKITARM)),)
+$(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
+endif
+
+include $(DEVKITARM)/ds_rules
+
+#---------------------------------------------------------------------------------
+TARGET		:= Alone
+BUILD		:= build_arm9
+SOURCES		:= arm9/source data
+INCLUDES	:= common/include $(BUILD)
+
+#---------------------------------------------------------------------------------
+# ARM9 uses armv5te / arm946e-s with Thumb interworking.
+# -mthumb here enables Thumb encoding for most functions (THUMB-2 not available
+# on ARM9E, but T1 Thumb gives roughly 25 % code-size reduction which matters on
+# the 4 MB EWRAM budget).
+#---------------------------------------------------------------------------------
+ARCH		:= -march=armv5te -mtune=arm946e-s -mthumb
+
+CFLAGS		:= -g -Wall -O2 -ffunction-sections -fdata-sections \
+		   $(ARCH)
+CFLAGS		+= $(INCLUDE) -DARM9
+
+CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
+
+ASFLAGS		:= -g $(ARCH)
+LDFLAGS		:= -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+
+LIBS		:= -lnds9 -lfat
+
+LIBDIRS		:= $(LIBNDS)
+
+#---------------------------------------------------------------------------------
+ifneq ($(BUILD),$(notdir $(CURDIR)))
+#---------------------------------------------------------------------------------
+
+export OUTPUT	:= $(CURDIR)/arm9/$(TARGET)
+
+export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
+export DEPSDIR	:= $(CURDIR)/$(BUILD)
+
+CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+BINFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.bin)))
+
+ifeq ($(strip $(CPPFILES)),)
+	export LD	:= $(CC)
+else
+	export LD	:= $(CXX)
+endif
+
+export OFILES	:= $(BINFILES:.bin=.o) \
+		   $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+
+export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+		   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+		   -I$(CURDIR)/$(BUILD)
+
+export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+
+.PHONY: $(BUILD) clean
+
+$(BUILD):
+	@[ -d $@ ] || mkdir -p $@
+	@[ -d arm9 ] || mkdir -p arm9
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile.arm9
+
+clean:
+	@echo clean arm9 ...
+	@rm -fr $(BUILD) arm9/$(TARGET).elf arm9/$(TARGET).ds.gba
+
+#---------------------------------------------------------------------------------
+else
+#---------------------------------------------------------------------------------
+
+DEPENDS		:= $(OFILES:.o=.d)
+
+$(OUTPUT).elf	: $(OFILES)
+
+%.o	: %.bin
+	@echo $(notdir $<)
+	$(bin2o)
+
+-include $(DEPENDS)
+
+endif

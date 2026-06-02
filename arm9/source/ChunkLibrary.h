@@ -16,6 +16,7 @@ class MemoryManager;  // forward — include MemoryManager.h before this header
 #define CHUNK_GRID_RADIUS   2
 #define CHUNK_GRID_SIZE     ((CHUNK_GRID_RADIUS*2+1)*(CHUNK_GRID_RADIUS*2+1))
 #define CHUNK_WORLD_UNIT    16      // world-space units per chunk side
+#define NO_TEX 0xFF
 
 // ---------------------------------------------------------------------------
 // .world binary layout  (all little-endian, packed)
@@ -133,15 +134,10 @@ public:
                    float tgtX, float tgtY, float tgtZ);
 
     // Debug: read back a chunk descriptor by index
-    void getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const {
-        if (idx < worldChunkCount) {
-            gx = chunkDesc[idx].gridX;
-            gz = chunkDesc[idx].gridZ;
-            vc = chunkDesc[idx].vertCount;
-        } else {
-            gx = gz = 0; vc = 0;
-        }
-    }
+    // Debug: read back a chunk descriptor by index
+    void getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const;
+
+    bool isTextureTransparent(u8 texId);
 
 private:
     MemoryManager* memMgr;

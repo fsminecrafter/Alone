@@ -4,6 +4,8 @@
 #include <math.h>
 #include "MemoryManager.h"
 #include "ChunkLibrary.h"
+#include "ObjectSystem.h"
+#include "AudioSystem.h"
 #include "lighting.h"
 
 float g_lightX, g_lightY, g_lightZ;
@@ -135,6 +137,7 @@ static void setup3D()
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     gluPerspective(45, 256.0f / 192.0f, 0.1f, 512.0f);
+    glDisable(GL_OUTLINE);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }
@@ -244,6 +247,9 @@ int main()
         while (1) swiWaitForVBlank();
     }
 
+    // Initialise audio IPC before any world loads (must run before ARM7 sends).
+    g_audio.init();
+
     static ChunkLibrary world(&mem);
     bool worldLoaded = world.loadWorld("fat:/Alone/world.world");
 
@@ -258,6 +264,41 @@ int main()
     } else {
         iprintf("No world.world -- test floor\n");
     }
+
+    // ObjectSystem: re-open world file to read v2 sections (OBJS/TAGS/AUDI).
+    // ChunkLibrary::loadWorld() reads textures + chunks then leaves the fd open;
+    // here we call loadFromWorld() which reads the sections that follow.
+    if (worldLoaded) {
+        FILE* wfd = fopen("fat:/Alone/world.world", "rb");
+        if (wfd) {
+            // Seek past the v1 content to the v2 sections.
+            // The simplest approach: ObjectSystem::loadFromWorld() reads magic bytes
+            // and silently succeeds on pre-v2 files, so it's safe to call regardless.
+            // We need to position the fd after the last ChunkEntry + vertex block.
+            // ChunkLibrary has already indexed all chunks; skip to end-of-v1 data.
+            WorldHeader whdr;
+            fread(&whdr, sizeof(whdr), 1, wfd);
+            // Skip textures
+            for (u16 ti = 0; ti < whdr.textureCount; ti++) {
+                u8 tid, wl, hl, fmt; u32 dbytes;
+                struct { u8 id, wl, hl, fmt; u32 bytes; } te;
+                fread(&te, sizeof(te), 1, wfd);
+                fseek(wfd, te.bytes, SEEK_CUR);
+            }
+            // Skip chunks
+            for (u32 ci = 0; ci < whdr.chunkCount; ci++) {
+                s16 gx, gz; u16 vc, pc;
+                fread(&gx, 2, 1, wfd); fread(&gz, 2, 1, wfd);
+                fread(&vc, 2, 1, wfd); fread(&pc, 2, 1, wfd);
+                fseek(wfd, (long)(vc * 20), SEEK_CUR); // sizeof(ChunkVertex) = 20
+            }
+            g_objects.loadFromWorld(wfd);
+            fclose(wfd);
+        }
+        g_objects.fireStart();
+        g_audio.startPlaylist();
+    }
+
     for (int i = 0; i < 180; i++) swiWaitForVBlank();
     consoleClear();
 
@@ -304,6 +345,9 @@ int main()
             world.setCamera(px, eyeY, eyeZ, px, 0.0f, pz);
             world.update(px, pz);
             world.render();
+            // Per-frame script and audio updates
+            g_objects.update(frame, px, eyeY, eyeZ);
+            g_audio.update(px, eyeY, eyeZ);
         } else {
             drawTestFloor(px, pz);
         }

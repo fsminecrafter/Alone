@@ -1,120 +1,72 @@
 #---------------------------------------------------------------------------------
-.SUFFIXES:
+# Makefile  —  Alone NDS project
+#
+# Builds both ARM9 and ARM7 sub-projects then combines them into a .nds ROM
+# using ndstool.
+#
+# Usage
+#   make          build everything → Alone.nds
+#   make arm9     build/rebuild the ARM9 ELF only
+#   make arm7     build/rebuild the ARM7 ELF only
+#   make clean    remove all build artefacts and the ROM
+#
+# Required environment variable
+#   DEVKITARM     path to devkitARM installation
+#                 e.g. export DEVKITARM=/opt/devkitpro/devkitARM
+#
+# Directory layout expected by this Makefile
+#   arm9/source/  — all ARM9 .cpp/.c files (main.cpp, AudioSystem.cpp, …)
+#   arm7/source/  — ARM7 .cpp/.c files (AudioArm7.cpp only)
+#   common/include/ — headers shared by both CPUs (if any)
+#   data/         — binary assets embedded as .o (optional)
 #---------------------------------------------------------------------------------
+.SUFFIXES:
 
 ifeq ($(strip $(DEVKITARM)),)
 $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
 endif
 
-include $(DEVKITARM)/ds_rules
+# ndstool is in devkitPro's tools directory
+export PATH := $(DEVKITARM)/bin:$(DEVKITPRO)/tools/bin:$(PATH)
+
+TARGET := Alone
 
 #---------------------------------------------------------------------------------
-# TARGET is the name of the output
-# BUILD is the directory where object files & intermediate files will be placed
-# SOURCES is a list of directories containing source code
-# INCLUDES is a list of directories containing extra header files
+# Top-level phony targets
 #---------------------------------------------------------------------------------
-TARGET		:= $(shell basename $(CURDIR))
-BUILD		:= build
-SOURCES		:= arm9/source data
-INCLUDES	:= common/include build
+.PHONY: all arm9 arm7 clean
+
+# Default: build everything then pack the ROM
+all: $(TARGET).nds
 
 #---------------------------------------------------------------------------------
-# options for code generation
+# ROM assembly
+# ndstool packs an ARM9 ELF + ARM7 ELF into a .nds ROM.
+# The -7 flag provides the ARM7 ELF; -9 provides the ARM9 ELF.
 #---------------------------------------------------------------------------------
-ARCH		:= -march=armv5te -mtune=arm946e-s -mthumb
-
-CFLAGS		:= -g -Wall -O2 -ffunction-sections -fdata-sections \
-		   $(ARCH)
-
-CFLAGS		+= $(INCLUDE) -DARM9
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
-
-ASFLAGS		:= -g $(ARCH)
-LDFLAGS		:= -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+$(TARGET).nds: arm9/$(TARGET).elf arm7/arm7.elf
+	@echo "  PACK    $@"
+	ndstool -c $@ -9 arm9/$(TARGET).elf -7 arm7/arm7.elf
 
 #---------------------------------------------------------------------------------
-# any extra libraries we wish to link with the project
+# ARM9 sub-project
+# Delegates to Makefile.arm9 (renamed from the original Makefile).
 #---------------------------------------------------------------------------------
-LIBS		:= -lnds9 -lfat
+arm9/$(TARGET).elf: arm9
+arm9:
+	@$(MAKE) -f Makefile.arm9
 
 #---------------------------------------------------------------------------------
-# list of directories containing libraries, this must be the top level containing
-# include and lib
+# ARM7 sub-project
+# Delegates to Makefile.arm7.
 #---------------------------------------------------------------------------------
-LIBDIRS		:= $(LIBNDS)
-
-#---------------------------------------------------------------------------------
-# no real need to edit anything past this point unless you need to add additional
-# rules for different file extensions
-#---------------------------------------------------------------------------------
-ifneq ($(BUILD),$(notdir $(CURDIR)))
-#---------------------------------------------------------------------------------
-
-export OUTPUT	:= $(CURDIR)/$(TARGET)
-
-export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
-export DEPSDIR	:= $(CURDIR)/$(BUILD)
-
-CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-BINFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.bin)))
-
-#---------------------------------------------------------------------------------
-# use CXX for linking C++ projects, CC for standard C
-#---------------------------------------------------------------------------------
-ifeq ($(strip $(CPPFILES)),)
-#---------------------------------------------------------------------------------
-	export LD	:= $(CC)
-#---------------------------------------------------------------------------------
-else
-#---------------------------------------------------------------------------------
-	export LD	:= $(CXX)
-#---------------------------------------------------------------------------------
-endif
-#---------------------------------------------------------------------------------
-
-export OFILES	:= $(BINFILES:.bin=.o) \
-		   $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-
-export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-		   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-		   -I$(CURDIR)/$(BUILD)
-
-export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
-
-.PHONY: $(BUILD) clean
-
-#---------------------------------------------------------------------------------
-$(BUILD):
-	@[ -d $@ ] || mkdir -p $@
-	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+arm7/arm7.elf: arm7
+arm7:
+	@$(MAKE) -f Makefile.arm7
 
 #---------------------------------------------------------------------------------
 clean:
-	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nds $(TARGET).ds.gba
-
-#---------------------------------------------------------------------------------
-else
-
-DEPENDS		:= $(OFILES:.o=.d)
-
-#---------------------------------------------------------------------------------
-# main targets
-#---------------------------------------------------------------------------------
-$(OUTPUT).nds	: $(OUTPUT).elf
-$(OUTPUT).elf	: $(OFILES)
-
-#---------------------------------------------------------------------------------
-%.o	: %.bin
-#---------------------------------------------------------------------------------
-	@echo $(notdir $<)
-	$(bin2o)
-
--include $(DEPENDS)
-
-#---------------------------------------------------------------------------------------
-endif
-#---------------------------------------------------------------------------------------
+	@echo "  CLEAN"
+	@$(MAKE) -f Makefile.arm9 clean
+	@$(MAKE) -f Makefile.arm7 clean
+	@rm -f $(TARGET).nds

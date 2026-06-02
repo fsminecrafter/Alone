@@ -38,10 +38,17 @@ static float s_bbRightZ = 0.0f;
 static float s_bbUpX = 0.0f;
 static float s_bbUpY = 1.0f;
 static float s_bbUpZ = 0.0f;
-// Camera eye position — used to compute per-billboard right vector for cylindrical mode.
+// Camera eye position and forward vector — used for visibility culling and per-billboard rotation.
 static float s_camEyeX = 0.0f;
 static float s_camEyeY = 0.0f;
 static float s_camEyeZ = 0.0f;
+static float s_camFwdX = 0.0f;
+static float s_camFwdY = 0.0f;
+static float s_camFwdZ = 1.0f;
+// Ground-level camera target — used for cylindrical billboard facing.
+// Unlike s_camEye, this is NOT elevated by the camera rig offset.
+static float s_camTgtX = 0.0f;
+static float s_camTgtZ = 0.0f;
 
 static void updateCameraVectors(float eyeX, float eyeY, float eyeZ,
                                  float tgtX, float tgtY, float tgtZ)
@@ -51,13 +58,14 @@ static void updateCameraVectors(float eyeX, float eyeY, float eyeZ,
     float fwdY = tgtY - eyeY;
     float fwdZ = tgtZ - eyeZ;
     float flen = sqrtf(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ);
-    s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
     if (flen < 0.0001f) {
         s_bbRightX = 1.0f; s_bbRightZ = 0.0f;
         s_bbUpX = 0.0f; s_bbUpY = 1.0f; s_bbUpZ = 0.0f;
+        s_camFwdX = 0.0f; s_camFwdY = 0.0f; s_camFwdZ = 1.0f;
         return;
     }
     fwdX /= flen; fwdY /= flen; fwdZ /= flen;
+    s_camFwdX = fwdX; s_camFwdY = fwdY; s_camFwdZ = fwdZ;
 
     // right = forward x world-up(0,1,0)  =>  (-fwd.z, 0, fwd.x)
     float rx = -fwdZ;
@@ -66,7 +74,8 @@ static void updateCameraVectors(float eyeX, float eyeY, float eyeZ,
     if (rlen < 0.0001f) {
         // Camera pointing straight down/up; use world +X as fallback
         s_bbRightX = 1.0f; s_bbRightZ = 0.0f;
-        s_bbUpX = 0.0f; s_bbUpY = 0.0f; s_bbUpZ = -1.0f;
+        s_bbUpX = 0.0f; s_bbUpY = 1.0f; s_bbUpZ = 0.0f;
+        s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
         return;
     }
     s_bbRightX = rx / rlen;
@@ -74,6 +83,7 @@ static void updateCameraVectors(float eyeX, float eyeY, float eyeZ,
 
     // Store eye for per-billboard cylindrical right computation
     s_camEyeX = eyeX; s_camEyeY = eyeY; s_camEyeZ = eyeZ;
+    s_camTgtX = tgtX; s_camTgtZ = tgtZ;  // ground target for cylindrical billboard facing
 
     // Spherical camera-derived up = right x forward
     // right = (s_bbRightX, 0, s_bbRightZ)
@@ -252,6 +262,19 @@ void ChunkLibrary::render()
     for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
         Chunk* c = &activeChunks[i];
         if (!c->verts) continue;
+
+        // Chunk-level visibility culling
+        float cx = (float)(c->gridX * CHUNK_WORLD_UNIT);
+        float cz = (float)(c->gridZ * CHUNK_WORLD_UNIT);
+        float dx = cx - s_camEyeX;
+        float dz = cz - s_camEyeZ;
+        float dotFwd = dx * s_camFwdX + dz * s_camFwdZ;
+        float distSq = dx*dx + dz*dz;
+
+        // If chunk is too far or significantly behind camera, skip it
+        if (distSq > 300.0f * 300.0f) continue;
+        if (dotFwd < -50.0f && distSq > 50.0f * 50.0f) continue;
+
         renderChunk(c, i, false);
         framePolyCount += c->polyCount;
     }
@@ -260,41 +283,74 @@ void ChunkLibrary::render()
     for (int i = 0; i < CHUNK_GRID_SIZE; i++) {
         Chunk* c = &activeChunks[i];
         if (!c->verts) continue;
+
+        float cx = (float)(c->gridX * CHUNK_WORLD_UNIT);
+        float cz = (float)(c->gridZ * CHUNK_WORLD_UNIT);
+        float dx = cx - s_camEyeX;
+        float dz = cz - s_camEyeZ;
+        float dotFwd = dx * s_camFwdX + dz * s_camFwdZ;
+        float distSq = dx*dx + dz*dz;
+
+        if (distSq > 300.0f * 300.0f) continue;
+        if (dotFwd < -50.0f && distSq > 50.0f * 50.0f) continue;
+
         renderChunk(c, i, true);
     }
 }
 
-void ChunkLibrary::setCamera(float eyeX, float eyeY, float eyeZ,
-                              float tgtX, float tgtY, float tgtZ)
+
+// Helper function to check if a texture is transparent based on its format.
+// NDS formats with alpha support are considered potentially transparent.
+bool ChunkLibrary::isTextureTransparent(u8 texId)
 {
-    updateCameraVectors(eyeX, eyeY, eyeZ, tgtX, tgtY, tgtZ);
+    if (texId == NO_TEX) return false;
+
+    for (u16 i = 0; i < textureCount; i++) {
+        if (textures[i].id == texId) {
+            u8 format = textures[i].format;
+            // GL_RGBA (8) is never written to .world files because the NDS hardware
+            // texture format field is 3 bits; 8 & 7 = 0 = no texture.
+            // Direct-color textures are exported as GL_RGB (7) = A1BGR5.
+            // GL_RGB (7), GL_RGB32_A3 (1), and GL_RGB8_A5 (6) all carry alpha bits.
+            return (format == GL_RGB   ||   // direct color A1BGR5 (was GL_RGBA, now stored as 7)
+                    format == GL_RGBA  ||   // kept for files exported before this fix
+                    format == GL_RGB32_A3 ||
+                    format == GL_RGB8_A5);
+        }
+    }
+    return false;  // unknown texId — treat as opaque, not transparent
 }
 
-void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
+void ChunkLibrary::renderChunk(Chunk* c, int debugIdx, bool billboardsOnly)
 {
-    // Translate by chunk origin so local verts stay in [-8, 8] (NDS 4.12 range)
-    glPushMatrix();
-    glTranslatef(
-        (float)(c->gridX * CHUNK_WORLD_UNIT),
-        0.0f,
-        (float)(c->gridZ * CHUNK_WORLD_UNIT)
-    );
+    // Chunk origin in world space.
+    float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
+    float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
 
-    // Pass 1: opaque terrain — POLY_ID 1, POLY_ALPHA 31 (fully opaque, no blending).
-    // Pass 2: billboard quads — POLY_ID 2, POLY_ALPHA 30.
-    //
-    // NOTE:
-    // This libnds setup does not provide POLY_ALPHA_TEST, so we keep the
-    // billboard pass translucent via POLY_ALPHA 30 and rely on the texture
-    // alpha channel as supported by the current build.
-    const int polyId    = billboardsOnly ? 2 : 1;
+    // ALWAYS translate by chunk origin for both passes.
+    // This keeps local verts in the NDS 4.12 fixed-point range [-8, 8].
+    // Using different matrices doesn't break depth sorting on NDS; the hardware
+    // sorts translucent polygons based on their final clip-space depth and POLY_ID.
+    glPushMatrix();
+    glTranslatef(chunkOX, 0.0f, chunkOZ);
+
+    // Pass 1: opaque terrain — POLY_ID 1, POLY_ALPHA 31.
+    // Pass 2: billboard quads — UNIQUE POLY_ID per chunk (2-26), POLY_ALPHA 30.
+    // Assigning a unique POLY_ID per chunk for translucent geometry allows the
+    // NDS hardware to sort them correctly by depth across different chunks.
+    const int polyId    = billboardsOnly ? (debugIdx + 2) : 1;
     const int polyAlpha = billboardsOnly ? 30 : 31;
 
     glPolyFmt(POLY_ALPHA(polyAlpha) | POLY_CULL_NONE | POLY_ID(polyId));
 
     u8   lastTexId   = 0xFE;
-    bool inBillboard = false;
-    bool anyDrawn    = false;
+
+    // Triangle-alignment tracking for degenerate-vertex fix.
+    // When a vertex is skipped mid-triangle we must still emit a placeholder
+    // so the GPU's vertex counter stays aligned.  We collapse the degenerate
+    // triangle to a zero-area point by repeating the first vertex of that tri.
+    u16  triVert  = 0;   // 0, 1, 2 within the current triangle
+    float degX = 0.0f, degY = 0.0f, degZ = 0.0f; // first vertex of current tri
 
     glBegin(GL_TRIANGLES);
 
@@ -302,20 +358,37 @@ void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
         ChunkVertex& v = c->verts[vi];
 
         bool isBB = isBillboardNx(v.nx);
+        bool isTexTransparent = isTextureTransparent(v.texId);
 
-        // Skip vertices that don't belong to this pass
-        if (isBB != billboardsOnly) continue;
+        // Determine if this vertex belongs to the current rendering pass.
+        bool wantsTransparentPass = isBB || isTexTransparent;
+        bool renderInThisPass     = (billboardsOnly == wantsTransparentPass);
 
-        if (v.texId != lastTexId) {
+        if (!renderInThisPass) {
+            // Emit a degenerate vertex to keep tri alignment intact.
+            // The first vert of the tri saves its position; subsequent skipped
+            // verts repeat it, collapsing the triangle to a zero-area point.
+            if (triVert == 0) {
+                // Will be filled by the first real vertex below, but this tri
+                // started with a skip — save a neutral position and emit it.
+                glVertex3f(degX, degY, degZ);
+            } else {
+                glVertex3f(degX, degY, degZ);
+            }
+            triVert = (triVert + 1) % 3;
+            continue;
+        }
+
+        // Texture-change flush must NOT split a triangle mid-way.
+        // Only flush at a triangle boundary (triVert == 0).
+        if (v.texId != lastTexId && triVert == 0) {
             glEnd();
             bindTexture(v.texId);
+            // Re-apply poly format with the same polyId/polyAlpha.
             glPolyFmt(POLY_ALPHA(polyAlpha) | POLY_CULL_NONE | POLY_ID(polyId));
             glBegin(GL_TRIANGLES);
             lastTexId = v.texId;
         }
-
-        anyDrawn    = true;
-        inBillboard = isBB;
 
         if (isBB) {
             // Billboard vertex:
@@ -326,70 +399,108 @@ void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
             float anchorX = f32tofloat(v.x);
             float anchorY = f32tofloat(v.y);
             float anchorZ = f32tofloat(v.z);
-            float offR    = f32tofloat(v.ny);   // spread along right
-            float offU    = f32tofloat(v.nz);   // rise along up
+
+            // World-space anchor for per-billboard rotation calculation.
+            // chunkOX/OZ are already applied by the glTranslatef matrix above,
+            // so we only add them here for the facing-direction math, NOT for
+            // the final vertex position (which stays in chunk-local space).
+            float worldX = anchorX + chunkOX;
+            float worldZ = anchorZ + chunkOZ;
+
+            float offR = f32tofloat(v.ny);   // spread along right
+            float offU = f32tofloat(v.nz);   // rise along up
 
             float lx, ly, lz;
             float lightNX, lightNY, lightNZ;
 
             if (v.nx == (s16)BILLBOARD_SENTINEL_FIX) {
-                // Fixed: always spread along world +X, rise along world +Y
+                // Fixed: always spread along world +X, rise along world +Y.
                 lx = anchorX + offR;
                 ly = anchorY + offU;
                 lz = anchorZ;
                 lightNX = 0.0f; lightNY = 0.5f; lightNZ = 1.0f;
 
             } else if (v.nx == (s16)BILLBOARD_SENTINEL_SPH) {
-                // Spherical: spread along camera right, rise along camera up
-                lx = anchorX + offR * s_bbRightX + offU * s_bbUpX;
-                ly = anchorY + offR * 0.0f        + offU * s_bbUpY;
-                lz = anchorZ + offR * s_bbRightZ  + offU * s_bbUpZ;
-                lightNX = s_bbUpZ; lightNY = s_bbUpY; lightNZ = -s_bbUpX;
+                // Spherical (0x7FFE): face camera fully.
+                float vdx = s_camEyeX - worldX;
+                float vdy = s_camEyeY - anchorY;
+                float vdz = s_camEyeZ - worldZ;
+                float vlen = sqrtf(vdx*vdx + vdy*vdy + vdz*vdz);
+                float rx, ry, rz, ux, uy, uz;
+                if (vlen > 0.001f) {
+                    vdx /= vlen; vdy /= vlen; vdz /= vlen;
+                    // right = cross((0,1,0), forward)
+                    rx = -vdz; ry = 0; rz = vdx;
+                    float rlen = sqrtf(rx*rx + rz*rz);
+                    if (rlen > 0.001f) { rx /= rlen; rz /= rlen; }
+                    else { rx = 1; rz = 0; }
+                    // up = cross(forward, right)
+                    ux = vdy * rz - vdz * ry;
+                    uy = vdz * rx - vdx * rz;
+                    uz = vdx * ry - vdy * rx;
+                } else {
+                    rx = s_bbRightX; ry = 0; rz = s_bbRightZ;
+                    ux = s_bbUpX; uy = s_bbUpY; uz = s_bbUpZ;
+                }
+                lx = anchorX + offR * rx + offU * ux;
+                ly = anchorY + offR * ry + offU * uy;
+                lz = anchorZ + offR * rz + offU * uz;
+                lightNX = vdx; lightNY = vdy; lightNZ = vdz;
 
             } else {
-                // Cylindrical (default 0x7FFF): per-billboard right vector.
-                //
-                // We want: right = cross(anchor_to_cam, world_up)
-                //   anchor_to_cam = (dx, 0, dz)  where dx = camX - anchorX
-                //   cross((dx,0,dz), (0,1,0)) = (-dz, 0, dx)
-                float chunkOX = (float)(c->gridX * CHUNK_WORLD_UNIT);
-                float chunkOZ = (float)(c->gridZ * CHUNK_WORLD_UNIT);
-                float wax = chunkOX + anchorX;
-                float waz = chunkOZ + anchorZ;
-
-                float dx = s_camEyeX - wax;   // anchor -> camera (XZ)
-                float dz = s_camEyeZ - waz;
-                float crx = -dz;              // cross(anchor_to_cam, world_up)
-                float crz =  dx;
-                float clen = sqrtf(crx*crx + crz*crz);
-                if (clen > 0.0001f) { crx /= clen; crz /= clen; }
-                else                { crx = s_bbRightX; crz = s_bbRightZ; }
+                // Cylindrical (default 0x7FFF): rotate around world Y only.
+                // Faces the camera eye directly for correct look at any X position.
+                float toEyeX = s_camTgtX - worldX;
+                float toEyeZ = s_camTgtZ - worldZ;
+                float tlen = sqrtf(toEyeX*toEyeX + toEyeZ*toEyeZ);
+                float crx, crz;
+                if (tlen > 0.01f) {
+                    crx = -toEyeZ / tlen;
+                    crz =  toEyeX / tlen;
+                } else {
+                    crx = s_bbRightX;
+                    crz = s_bbRightZ;
+                }
 
                 lx = anchorX + offR * crx;
                 ly = anchorY + offU;
                 lz = anchorZ + offR * crz;
-                lightNX = -crz; lightNY = 0.5f; lightNZ = crx;
+                lightNX = -crx; lightNY = 0.5f; lightNZ = -crz;
             }
 
             float scale = lightScale(lightNX, lightNY, lightNZ);
             glColorLit(v.r, v.g, v.b, scale);
-            if (v.texId != 0xFF)
+            if (v.texId != NO_TEX && textureCount > 0) {
                 glTexCoord2t16(v.u, v.v);
+            }
+            // Save first-vert position so skipped verts can degenerate to it.
+            if (triVert == 0) { degX = lx; degY = ly; degZ = lz; }
             glVertex3f(lx, ly, lz);
+            triVert = (triVert + 1) % 3;
 
         } else {
             // Normal geometry vertex
+            float lx = f32tofloat(v.x);
+            float ly = f32tofloat(v.y);
+            float lz = f32tofloat(v.z);
             if (v.nx || v.ny || v.nz) {
                 float scale = lightScale(f32tofloat(v.nx),
                                          f32tofloat(v.ny),
                                          f32tofloat(v.nz));
-                glColorLit(v.r, v.g, v.b, scale);
+                if (isTexTransparent) {
+                    glColor3b(255, 255, 255);
+                } else {
+                    glColorLit(v.r, v.g, v.b, scale);
+                }
             } else {
                 glColor3b(v.r, v.g, v.b);
             }
             if (v.texId != 0xFF)
                 glTexCoord2t16(v.u, v.v);
-            glVertex3f(f32tofloat(v.x), f32tofloat(v.y), f32tofloat(v.z));
+            // Save first-vert position so skipped verts can degenerate to it.
+            if (triVert == 0) { degX = lx; degY = ly; degZ = lz; }
+            glVertex3f(lx, ly, lz);
+            triVert = (triVert + 1) % 3;
         }
     }
 
@@ -399,13 +510,32 @@ void ChunkLibrary::renderChunk(Chunk* c, int /*debugIdx*/, bool billboardsOnly)
 
 void ChunkLibrary::bindTexture(u8 texId)
 {
-    if (texId == 0xFF) { glBindTexture(0, 0); return; }
+    if (texId == NO_TEX) { glBindTexture(0, 0); return; }
     for (u16 i = 0; i < textureCount; i++) {
         if (textures[i].id == texId && textures[i].glTexId >= 0) {
             glBindTexture(0, textures[i].glTexId);
             return;
         }
     }
+    // Texture not found/uploaded — unbind so we don't render garbage
+    glBindTexture(0, 0);
+}
+
+void ChunkLibrary::setCamera(float eyeX, float eyeY, float eyeZ,
+                           float tgtX, float tgtY, float tgtZ)
+{
+    updateCameraVectors(eyeX, eyeY, eyeZ, tgtX, tgtY, tgtZ);
+}
+
+void ChunkLibrary::getChunkInfo(u32 idx, s16& gx, s16& gz, u16& vc) const
+{
+    if (idx >= worldChunkCount) {
+        gx = 0; gz = 0; vc = 0;
+        return;
+    }
+    gx = chunkDesc[idx].gridX;
+    gz = chunkDesc[idx].gridZ;
+    vc = chunkDesc[idx].vertCount;
 }
 
 // ---------------------------------------------------------------------------

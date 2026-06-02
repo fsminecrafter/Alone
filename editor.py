@@ -3,14 +3,6 @@
 Alone World Editor
 Native format: .svworld (JSON) — what Save/Open uses.
 Export format: .world  (binary, ChunkLibrary.cpp compatible) — via File > Export.
-
-Changes vs original:
- - Save/Open uses .svworld (lossless JSON editor format)
- - Export writes .world binary (floor + objects merged, bottom faces stripped,
-   all vertex values clamped to s16 range -32768..32767, textures DS-ified)
- - Floor and imported object geometry unified into one vertex list per chunk
- - Texture can be applied to imported models at import time
- - UV coords use actual texture dimensions (width*16, height*16 for full tile)
 """
 
 import copy
@@ -85,6 +77,66 @@ DS_MAX_POLYS     = 2048
 DS_VRAM_BYTES    = 512 * 1024
 
 NO_TEX = 0xFF   # tex_id sentinel for "no texture"
+
+# ObjectSystem flag constants (mirrors ObjectSystem.h)
+OBJ_FLAG_ACTIVE      = 1 << 0
+OBJ_FLAG_FLOOR_CHUNK = 1 << 1
+OBJ_FLAG_BILLBOARD   = 1 << 2
+OBJ_FLAG_MODEL_OBJ   = 1 << 3
+OBJ_CHUNK_TARGET     = 0xFFFF
+
+# Audio flag constants
+TRACK_FLAG_LOOP   = 1 << 0
+EMITTER_FLAG_LOOP = 1 << 0
+
+# .dsnd header magic
+DSND_MAGIC_BYTES = b"DSND"
+
+def _convert_audio_to_dsnd(src_path: str, dst_path: str,
+                             rate_div: int = 1, stereo: bool = False,
+                             bits: int = 8) -> None:
+    """Convert any audio file to .dsnd using ffmpeg + struct packing.
+
+    rate_div: 0=32768 Hz, 1=16384 Hz, 2=8192 Hz, 3=5512 Hz
+    Writes a DsndHeader then raw PCM samples.
+    Raises RuntimeError when ffmpeg is missing or fails.
+    """
+    import subprocess, tempfile, os as _os
+    sample_rates = {0: 32768, 1: 16384, 2: 8192, 3: 5512}
+    sr = sample_rates.get(rate_div, 16384)
+    channels = 2 if stereo else 1
+    sample_fmt = "s16le" if bits == 16 else "u8"
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".raw")
+    _os.close(fd)
+    try:
+        cmd = ["ffmpeg", "-y", "-i", src_path,
+               "-ar", str(sr), "-ac", str(channels),
+               "-f", sample_fmt, tmp_path]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed:\n{result.stderr.decode(errors='replace')}")
+        with open(tmp_path, "rb") as f:
+            pcm = f.read()
+    finally:
+        try:
+            _os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    sample_count = len(pcm) // (2 if bits == 16 else 1)
+    flags = 0
+    if stereo:   flags |= 1   # DSND_FLAG_STEREO
+    if bits == 16: flags |= 4 # DSND_FLAG_16BIT
+
+    # DsndHeader: magic(4), rateDiv(1), flags(1), loopStart(2u), sampleCount(4u)
+    header = struct.pack("<4sBBHL", DSND_MAGIC_BYTES, rate_div, flags, 0, sample_count)
+
+    _os.makedirs(_os.path.dirname(_os.path.abspath(dst_path)), exist_ok=True)
+    with open(dst_path, "wb") as f:
+        f.write(header)
+        f.write(pcm)
 
 # Billboard mode sentinels stored in nx.
 # Impossible for a real normalised normal in f32 (max s16 = 0x7FFF).
@@ -208,20 +260,13 @@ class DSTexture:
     def width_log2(self):  return int(math.log2(self.width))
     def height_log2(self): return int(math.log2(self.height))
 
-    def pack_header(self):
-        for tex in tex_list:
-            pil = tex.get_pil()
-            if pil and tex.fmt in (GL_RGBA, GL_RGB, GL_RGB32_A3, GL_RGB8_A5):
-                packed = nds_pack_texture(pil, tex.fmt)
-            else:
-                packed = tex.data  # palette formats already correct
-            # Write header with correct byte count
-            f.write(struct.pack("<BBBBL",
-                tex.tex_id,
-                tex.width_log2(), tex.height_log2(),
-                tex.fmt,
-                len(packed)))
-            f.write(packed)
+    def pack_header(self, packed_data: bytes):
+        """Return the 8-byte texture header for the .world format."""
+        return struct.pack("<BBBBL",
+            self.tex_id,
+            self.width_log2(), self.height_log2(),
+            self.fmt,
+            len(packed_data))
 
     def get_pil(self) -> Image.Image | None:
         """Return (cached) PIL Image in RGBA mode."""
@@ -389,6 +434,111 @@ class DSFoliageInstance:
         bb.tex_id   = self.tex_id
         bb.r = self.r; bb.g = self.g; bb.b = self.b
         return bb
+
+
+class DSObject:
+    """An interactive object instance in the world."""
+    __slots__ = ("id", "name", "world_x", "world_y", "world_z", "tag_mask", "flags")
+
+    def __init__(self, obj_id=0, name="object", world_x=0.0, world_y=0.0, world_z=0.0,
+                 tag_mask=0, flags=0):
+        self.id         = obj_id
+        self.name       = name[:31]  # 32-byte field
+        self.world_x    = world_x
+        self.world_y    = world_y
+        self.world_z    = world_z
+        self.tag_mask   = tag_mask
+        self.flags      = flags
+
+    def pack(self) -> bytes:
+        name_bytes = self.name.encode("utf-8")
+        name_padded = name_bytes + b'\0' * (32 - len(name_bytes))
+        return struct.pack("<L32s3lHH",
+                           self.id, name_padded,
+                           clamp_s16(to_fp(self.world_x)),
+                           clamp_s16(to_fp(self.world_y)),
+                           clamp_s16(to_fp(self.world_z)),
+                           self.tag_mask, self.flags)
+    @staticmethod
+    def size(): return struct.calcsize("<L32s3lHH")
+
+
+class DSTag:
+    """A tag that groups objects."""
+    __slots__ = ("tag_index", "name", "member_ids")
+
+    def __init__(self, tag_index=0, name="tag", member_ids: list[int] | None = None):
+        self.tag_index  = tag_index
+        self.name       = name[:23]  # 24-byte field
+        self.member_ids = member_ids if member_ids is not None else []
+
+    def pack(self) -> bytes:
+        name_bytes = self.name.encode("utf-8")
+        name_padded = name_bytes + b'\0' * (24 - len(name_bytes))
+        # tagIndex, name[24], memberCount, u16[memberCount]
+        hdr = struct.pack("<H24sH", self.tag_index, name_padded, len(self.member_ids))
+        members = b"".join(struct.pack("<H", mid) for mid in self.member_ids)
+        return hdr + members
+
+    @staticmethod
+    def header_size(): return struct.calcsize("<H24sH")
+
+
+class DSAudioTrack:
+    """A background music track."""
+    __slots__ = ("filename", "volume", "flags")
+
+    def __init__(self, filename="", volume=100, flags=0):
+        self.filename = filename[:47] # 48-byte field
+        self.volume   = volume
+        self.flags    = flags
+
+    def pack(self) -> bytes:
+        filename_bytes = self.filename.encode("utf-8")
+        filename_padded = filename_bytes + b'\0' * (48 - len(filename_bytes))
+        return struct.pack("<48sBH", filename_padded, self.volume, self.flags)
+
+    @staticmethod
+    def size(): return struct.calcsize("<48sBH")
+
+
+class DSAudioEmitter:
+    """A positional audio emitter."""
+    __slots__ = ("object_id", "chunk_grid_x", "chunk_grid_z",
+                 "world_x", "world_y", "world_z",
+                 "filename", "volume", "flags", "radius_inner", "radius_outer")
+
+    def __init__(self, object_id=0, chunk_grid_x=0, chunk_grid_z=0,
+                 world_x=0.0, world_y=0.0, world_z=0.0,
+                 filename="", volume=100, flags=0,
+                 radius_inner=1.0, radius_outer=10.0):
+        self.object_id    = object_id
+        self.chunk_grid_x = chunk_grid_x
+        self.chunk_grid_z = chunk_grid_z
+        self.world_x      = world_x
+        self.world_y      = world_y
+        self.world_z      = world_z
+        self.filename     = filename[:47] # 48-byte field
+        self.volume       = volume
+        self.flags        = flags
+        self.radius_inner = radius_inner
+        self.radius_outer = radius_outer
+
+    def pack(self) -> bytes:
+        filename_bytes = self.filename.encode("utf-8")
+        filename_padded = filename_bytes + b'\0' * (48 - len(filename_bytes))
+        return struct.pack("<L2h3l48sBHH",
+                           self.object_id,
+                           self.chunk_grid_x, self.chunk_grid_z,
+                           clamp_s16(to_fp(self.world_x)),
+                           clamp_s16(to_fp(self.world_y)),
+                           clamp_s16(to_fp(self.world_z)),
+                           filename_padded, self.volume, self.flags,
+                           clamp_s16(to_fp(self.radius_inner * 16.0)), # NDS f32 * 16 (for 16.12 vs 0.12)
+                           clamp_s16(to_fp(self.radius_outer * 16.0)))
+
+    @staticmethod
+    def size(): return struct.calcsize("<L2h3l48sBHH")
 
 
 class FloorTile:
@@ -566,10 +716,14 @@ class DSChunk:
 
 class WorldFile:
     def __init__(self):
-        self.textures:   list[DSTexture]   = []
-        self.chunks:     list[DSChunk]     = []
-        self.billboards: list[DSBillboard] = []
-        self.foliage:    list[DSFoliageInstance] = []
+        self.textures:     list[DSTexture]     = []
+        self.chunks:       list[DSChunk]       = []
+        self.billboards:   list[DSBillboard]   = []
+        self.foliage:      list[DSFoliageInstance] = []
+        self.objects:      list[DSObject]      = []
+        self.tags:         list[DSTag]         = []
+        self.audio_tracks: list[DSAudioTrack]  = []
+        self.audio_emitters: list[DSAudioEmitter] = []
         self.path = None
 
     def save(self, path):
@@ -580,6 +734,13 @@ class WorldFile:
             "textures": [],
             "chunks": [],
         }
+        def _tex_bytes(t):
+            if t.data:
+                return t.data
+            if t.pil_img:
+                return np.array(t.pil_img.convert("RGBA"), dtype=np.uint8).tobytes()
+            return b""
+
         for tex in self.textures:
             doc["textures"].append({
                 "tex_id": tex.tex_id,
@@ -587,7 +748,7 @@ class WorldFile:
                 "height": tex.height,
                 "fmt": tex.fmt,
                 "name": tex.name,
-                "data_b64": base64.b64encode(tex.data).decode(),
+                "data_b64": base64.b64encode(_tex_bytes(tex)).decode(),
             })
         for chunk in self.chunks:
             floor_rows = []
@@ -643,6 +804,46 @@ class WorldFile:
                 "rotation": fi.rotation, "bb_mode": fi.bb_mode,
                 "tex_id": fi.tex_id, "r": fi.r, "g": fi.g, "b": fi.b,
             })
+        doc["objects"] = []
+        for obj in self.objects:
+            doc["objects"].append({
+                "id":       obj.id,
+                "name":     obj.name,
+                "world_x":  obj.world_x,
+                "world_y":  obj.world_y,
+                "world_z":  obj.world_z,
+                "tag_mask": obj.tag_mask,
+                "flags":    obj.flags,
+            })
+        doc["tags"] = []
+        for tag in self.tags:
+            doc["tags"].append({
+                "tag_index":  tag.tag_index,
+                "name":       tag.name,
+                "member_ids": tag.member_ids,
+            })
+        doc["audio_tracks"] = []
+        for track in self.audio_tracks:
+            doc["audio_tracks"].append({
+                "filename": track.filename,
+                "volume":   track.volume,
+                "flags":    track.flags,
+            })
+        doc["audio_emitters"] = []
+        for emitter in self.audio_emitters:
+            doc["audio_emitters"].append({
+                "object_id":    emitter.object_id,
+                "chunk_grid_x": emitter.chunk_grid_x,
+                "chunk_grid_z": emitter.chunk_grid_z,
+                "world_x":      emitter.world_x,
+                "world_y":      emitter.world_y,
+                "world_z":      emitter.world_z,
+                "filename":     emitter.filename,
+                "volume":       emitter.volume,
+                "flags":        emitter.flags,
+                "radius_inner": emitter.radius_inner,
+                "radius_outer": emitter.radius_outer,
+            })
         with open(path, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2)
         self.path = path
@@ -660,15 +861,31 @@ class WorldFile:
         """
         # --- Build NDS texture list ---
         tex_list = []
-        for tex in tex_list:
-            f.write(tex.pack_header())
-            # Convert RGBA8 editor data → packed NDS format for the .world file
+        packed_textures = []  # list of (header, data)
+        for tex in self.textures:
             pil = tex.get_pil()
             if pil and tex.fmt in (GL_RGBA, GL_RGB, GL_RGB32_A3, GL_RGB8_A5):
                 packed = nds_pack_texture(pil, tex.fmt)
-                f.write(packed)
             else:
-                f.write(tex.data)
+                packed = tex.data  # palette formats or already packed
+                if not packed and tex.pil_img:
+                    packed = nds_pack_texture(tex.pil_img, tex.fmt)
+                if not packed:
+                    raise ValueError(
+                        f"Texture id={tex.tex_id} ('{tex.name}') has no pixel data. "
+                        f"Re-import or DS-ify this texture before exporting.")
+            # NDS hardware texture format field is 3 bits (values 0-7).
+            # GL_RGBA = 8 would map to hardware format 0 (= no texture) via 8 & 0x7 = 0.
+            # Both GL_RGB (7) and GL_RGBA (8) pack as A1BGR5; the hardware only understands 7.
+            # Write GL_RGB (7) for any direct-color format so textures actually appear.
+            export_fmt = GL_RGB if tex.fmt in (GL_RGBA, GL_RGB) else tex.fmt
+            header = struct.pack("<BBBBL",
+                tex.tex_id,
+                tex.width_log2(), tex.height_log2(),
+                export_fmt,
+                len(packed))
+            packed_textures.append((header, packed))
+            tex_list.append(tex)
 
         # --- Merge chunks with identical grid coords ---
         # Floor chunks use their grid_x/z directly.
@@ -714,8 +931,13 @@ class WorldFile:
         # relative to the target chunk origin.  nx=BILLBOARD_SENTINEL tells
         # ChunkLibrary.cpp to apply a camera-facing transform.
         def _bake_bb_into_chunks(bb_obj):
-            gx = int(math.floor(bb_obj.world_x / CHUNK_WORLD_UNIT))
-            gz = int(math.floor(bb_obj.world_z / CHUNK_WORLD_UNIT))
+            # Use round() not floor() for chunk assignment so the billboard's
+            # local offset stays in [-8, +8) — the safe range for NDS s16 f32.
+            # floor() puts billboards in the right half of their chunk (local=[8,16))
+            # which overflows s16 fixed-point and corrupts the anchor position,
+            # causing the cylindrical right-vector to point the wrong way → flipping.
+            gx = int(round(bb_obj.world_x / CHUNK_WORLD_UNIT))
+            gz = int(round(bb_obj.world_z / CHUNK_WORLD_UNIT))
             key = (gx, gz)
             bb_verts = bb_obj.bake_vertices_with_tex(self)
             local_x = bb_obj.world_x - gx * CHUNK_WORLD_UNIT
@@ -742,17 +964,38 @@ class WorldFile:
         with open(path, "wb") as f:
             f.write(struct.pack("<4sHHLh",
                 WORLD_MAGIC, WORLD_VERSION,
-                len(tex_list), len(merged_chunks),
+                len(packed_textures), len(merged_chunks),
                 CHUNK_WORLD_UNIT))
-            for tex in tex_list:
-                f.write(tex.pack_header())
-                f.write(tex.data)
+            for header, data in packed_textures:
+                f.write(header)
+                f.write(data)
             for (gx, gz), verts in merged_chunks.items():
                 poly_count = len(verts) // 3
                 hdr = struct.pack("<2h2H", gx, gz, len(verts), poly_count)
                 f.write(hdr)
                 for v in verts:
                     f.write(v.pack())
+
+            # --- V2 extensions ---
+            # Object Table
+            if self.objects:
+                f.write(struct.pack("<4sH", b"OBJS", len(self.objects)))
+                for obj in self.objects:
+                    f.write(obj.pack())
+
+            # Tag Table
+            if self.tags:
+                f.write(struct.pack("<4sH", b"TAGS", len(self.tags)))
+                for tag in self.tags:
+                    f.write(tag.pack())
+
+            # Audio Table
+            if self.audio_tracks or self.audio_emitters:
+                f.write(struct.pack("<4sBB", b"AUDI", len(self.audio_tracks), len(self.audio_emitters)))
+                for track in self.audio_tracks:
+                    f.write(track.pack())
+                for emitter in self.audio_emitters:
+                    f.write(emitter.pack())
 
     @staticmethod
     def load(path):
@@ -831,6 +1074,51 @@ class WorldFile:
                 fi.g        = fd.get("g",        255)
                 fi.b        = fd.get("b",        255)
                 w.foliage.append(fi)
+
+            for od in doc.get("objects", []):
+                obj = DSObject(
+                    obj_id=od.get("id", 0),
+                    name=od.get("name", "object"),
+                    world_x=od.get("world_x", 0.0),
+                    world_y=od.get("world_y", 0.0),
+                    world_z=od.get("world_z", 0.0),
+                    tag_mask=od.get("tag_mask", 0),
+                    flags=od.get("flags", 0),
+                )
+                w.objects.append(obj)
+
+            for td in doc.get("tags", []):
+                tag = DSTag(
+                    tag_index=td.get("tag_index", 0),
+                    name=td.get("name", "tag"),
+                    member_ids=td.get("member_ids", []),
+                )
+                w.tags.append(tag)
+
+            for atd in doc.get("audio_tracks", []):
+                track = DSAudioTrack(
+                    filename=atd.get("filename", ""),
+                    volume=atd.get("volume", 100),
+                    flags=atd.get("flags", 0),
+                )
+                w.audio_tracks.append(track)
+
+            for aed in doc.get("audio_emitters", []):
+                emitter = DSAudioEmitter(
+                    object_id=aed.get("object_id", 0),
+                    chunk_grid_x=aed.get("chunk_grid_x", 0),
+                    chunk_grid_z=aed.get("chunk_grid_z", 0),
+                    world_x=aed.get("world_x", 0.0),
+                    world_y=aed.get("world_y", 0.0),
+                    world_z=aed.get("world_z", 0.0),
+                    filename=aed.get("filename", ""),
+                    volume=aed.get("volume", 100),
+                    flags=aed.get("flags", 0),
+                    radius_inner=aed.get("radius_inner", 1.0),
+                    radius_outer=aed.get("radius_outer", 10.0),
+                )
+                w.audio_emitters.append(emitter)
+
             return w
 
         # Legacy binary .world
@@ -863,6 +1151,65 @@ class WorldFile:
             _reconstruct_floor(chunk)
             w.chunks.append(chunk)
 
+        # --- v2 extensions ---
+        # Read Object Table (if present)
+        if offset + 4 <= len(data) and data[offset:offset+4] == b"OBJS":
+            obj_magic, obj_count = struct.unpack_from("<4sH", data, offset)
+            offset += struct.calcsize("<4sH")
+            for _ in range(obj_count):
+                # id, name[32], worldX/Y/Z s32 fp12, tagMask, flags
+                obj_id, name_bytes, wx_fp, wy_fp, wz_fp, tag_mask, flags = \
+                    struct.unpack_from("<L32s3lHH", data, offset)
+                offset += DSObject.size()
+                name = name_bytes.split(b'\0')[0].decode("utf-8")
+                obj = DSObject(obj_id, name,
+                               from_fp(wx_fp), from_fp(wy_fp), from_fp(wz_fp),
+                               tag_mask, flags)
+                w.objects.append(obj)
+
+        # Read Tag Table (if present)
+        if offset + 4 <= len(data) and data[offset:offset+4] == b"TAGS":
+            tag_magic, tag_count = struct.unpack_from("<4sH", data, offset)
+            offset += struct.calcsize("<4sH")
+            for _ in range(tag_count):
+                # tagIndex, name[24], memberCount, u16[memberCount]
+                tag_idx, name_bytes, member_count = \
+                    struct.unpack_from("<H24sH", data, offset)
+                offset += DSTag.header_size()
+                name = name_bytes.split(b'\0')[0].decode("utf-8")
+                member_ids = []
+                for _ in range(member_count):
+                    member_ids.append(struct.unpack_from("<H", data, offset)[0])
+                    offset += struct.calcsize("<H")
+                tag = DSTag(tag_idx, name, member_ids)
+                w.tags.append(tag)
+
+        # Read Audio Table (if present)
+        if offset + 4 <= len(data) and data[offset:offset+4] == b"AUDI":
+            audio_magic, track_count, emitter_count = \
+                struct.unpack_from("<4sBB", data, offset)
+            offset += struct.calcsize("<4sBB")
+            for _ in range(track_count):
+                # filename[48], volume, flags
+                filename_bytes, volume, flags = \
+                    struct.unpack_from("<48sBH", data, offset)
+                offset += DSAudioTrack.size()
+                filename = filename_bytes.split(b'\0')[0].decode("utf-8")
+                track = DSAudioTrack(filename, volume, flags)
+                w.audio_tracks.append(track)
+            for _ in range(emitter_count):
+                # objectId, chunkGridX/Z, worldX/Y/Z, filename, volume, flags, radiusInner, radiusOuter
+                obj_id, cgx, cgz, wx_fp, wy_fp, wz_fp, filename_bytes, volume, flags, ri_fp, ro_fp = \
+                    struct.unpack_from("<L2h3l48sBHH", data, offset)
+                offset += DSAudioEmitter.size()
+                filename = filename_bytes.split(b'\0')[0].decode("utf-8")
+                emitter = DSAudioEmitter(
+                    obj_id, cgx, cgz,
+                    from_fp(wx_fp), from_fp(wy_fp), from_fp(wz_fp),
+                    filename, volume, flags,
+                    from_fp(ri_fp) / 16.0, from_fp(ro_fp) / 16.0)
+                w.audio_emitters.append(emitter)
+
         return w
 
     def new_tex_id(self):
@@ -879,6 +1226,21 @@ class WorldFile:
         for t in self.textures:
             if int(t.tex_id) == tid:
                 return t
+        return None
+
+    def new_object_id(self):
+        used = {o.id for o in self.objects}
+        for i in range(1, 65536):
+            if i not in used:
+                return i
+        return 0
+
+    def object_by_id(self, oid) -> DSObject | None:
+        if oid is None: return None
+        oid = int(oid)
+        for o in self.objects:
+            if int(o.id) == oid:
+                return o
         return None
 
 
@@ -1122,6 +1484,13 @@ class Viewport(QOpenGLWidget):
         self._lmb_down            = False
         self._foliage_paint_timer = None   # QTimer for continuous painting
 
+        # DSObject selection & gizmo
+        self._selected_object     = -1     # index into world.objects or -1
+        self._obj_drag_axis       = None   # 'x' | 'y' | 'z' | None
+        self._obj_drag_start_w    = None   # world hit at drag start
+        self._obj_origin          = None   # (wx, wy, wz) at drag start
+        self._obj_drag_start_screen = None
+
     def set_world(self, world):
         self.world = world
         self._gl_textures.clear()
@@ -1137,6 +1506,13 @@ class Viewport(QOpenGLWidget):
         self._selected_billboard = bi
         self.selected_chunks = set()
         self.selected_chunk  = -1
+        self.update()
+
+    def set_selected_object(self, oi: int):
+        self._selected_object = oi
+        self.selected_chunks  = set()
+        self.selected_chunk   = -1
+        self._selected_billboard = -1
         self.update()
 
     # ------------------------------------------------------------------
@@ -1355,6 +1731,10 @@ void main() {
                 self._selected_billboard < len(self.world.billboards)):
             bb = self.world.billboards[self._selected_billboard]
             self._draw_billboard_gizmo(mvp, bb)
+
+        # DSObject markers + selected object gizmo
+        if self.world and self.world.objects:
+            self._draw_objects(mvp)
 
         # Foliage brush circle
         if self.foliage_tool_active and self._foliage_brush_pos:
@@ -1869,6 +2249,16 @@ void main() {
                 self._bb_origin            = (bb.world_x, bb.world_y, bb.world_z)
                 return
 
+            # Object gizmo — second priority
+            obj_axis = self._hit_object_gizmo(sx, sy)
+            if obj_axis and self._selected_object >= 0 and self.world:
+                obj = self.world.objects[self._selected_object]
+                self._obj_drag_axis         = obj_axis
+                self._obj_drag_start_screen = (sx, sy)
+                self._obj_drag_start_w      = self._ray_y_plane(sx, sy, y=obj.world_y)
+                self._obj_origin            = (obj.world_x, obj.world_y, obj.world_z)
+                return
+
             axis = self._hit_gizmo(sx, sy)
             if axis and self.selected_chunks and self.world:
                 self._gizmo_drag_axis = axis
@@ -1908,6 +2298,12 @@ void main() {
                 self._bb_drag_start_w  = None
                 self._bb_origin        = None
                 self.chunks_moved.emit()   # reuse signal to refresh inspector
+            elif self._obj_drag_axis:
+                self._obj_drag_axis        = None
+                self._obj_drag_start_w     = None
+                self._obj_origin           = None
+                self._obj_drag_start_screen = None
+                self.chunks_moved.emit()
             elif self._gizmo_drag_axis:
                 self._gizmo_drag_axis     = None
                 self._gizmo_drag_start_w  = None
@@ -1961,6 +2357,29 @@ void main() {
                 elif self._bb_drag_axis == 'y':
                     total_dy = sy - sy0
                     bb.world_y = owy - total_dy * (self.cam_dist * 0.01)
+            self.update()
+            return
+
+        # Object drag
+        if self._obj_drag_axis and self.world and self._obj_origin:
+            oi = self._selected_object
+            if 0 <= oi < len(self.world.objects):
+                obj = self.world.objects[oi]
+                owx, owy, owz = self._obj_origin
+                sx0, sy0 = self._obj_drag_start_screen
+                if self._obj_drag_axis in ('x', 'z'):
+                    hit = self._ray_y_plane(sx, sy, y=owy)
+                    if hit and self._obj_drag_start_w:
+                        dwx = hit[0] - self._obj_drag_start_w[0]
+                        dwz = hit[1] - self._obj_drag_start_w[1]
+                        if self._obj_drag_axis == 'x': obj.world_x = owx + dwx
+                        else:                          obj.world_z = owz + dwz
+                elif self._obj_drag_axis == 'y':
+                    total_dy = sy - sy0
+                    obj.world_y = owy - total_dy * (self.cam_dist * 0.01)
+                elif self._obj_drag_axis == 'ry':
+                    total_dx = sx - sx0
+                    obj._rot_y = getattr(obj, '_rot_y', 0.0) + total_dx * 0.5
             self.update()
             return
 
@@ -2299,6 +2718,130 @@ void main() {
             if 0 <= proj <= L:
                 return axis
         return None
+
+    def _draw_objects(self, mvp):
+        """Draw small diamond markers for all DSObjects; draw gizmo for selected one."""
+        if not self.world:
+            return
+        D = CHUNK_WORLD_UNIT * 0.18   # half-diagonal of the marker diamond
+        sel_oi = self._selected_object
+        pts = []
+        for oi, obj in enumerate(self.world.objects):
+            ox, oy, oz = obj.world_x, obj.world_y, obj.world_z
+            if oi == sel_oi:
+                col = (1.0, 0.85, 0.1)   # gold for selected
+            else:
+                col = (0.4, 0.7, 1.0)    # blue-grey for unselected
+            # Diamond: 6 lines forming a 3D cross
+            pts += [ox-D, oy, oz, *col,  ox+D, oy, oz, *col,
+                    ox, oy-D, oz, *col,  ox, oy+D, oz, *col,
+                    ox, oy, oz-D, *col,  ox, oy, oz+D, *col]
+        if pts:
+            arr = np.array(pts, dtype=np.float32).reshape(-1, 6)
+            glDisable(GL_DEPTH_TEST)
+            self._draw_lines(mvp, arr, line_width=2.0)
+            glEnable(GL_DEPTH_TEST)
+
+        if 0 <= sel_oi < len(self.world.objects):
+            self._draw_object_gizmo(mvp, self.world.objects[sel_oi])
+
+    def _draw_object_gizmo(self, mvp, obj: "DSObject"):
+        """XYZ translate + Y-rotate gizmo for a DSObject."""
+        cx, cy, cz = obj.world_x, obj.world_y, obj.world_z
+        L  = CHUNK_WORLD_UNIT * 0.7
+        HW = CHUNK_WORLD_UNIT * 0.10
+        HL = CHUNK_WORLD_UNIT * 0.18
+        ORG = (1.0, 0.6, 0.1)
+
+        def arrow(dx, dy, dz, col):
+            ex, ey, ez = cx+dx*L, cy+dy*L, cz+dz*L
+            if abs(dy) < 0.9: perp = np.cross([dx,dy,dz],[0,1,0])
+            else:              perp = np.cross([dx,dy,dz],[1,0,0])
+            perp = perp / (np.linalg.norm(perp) + 1e-9) * HW
+            bx, by, bz = ex-dx*HL, ey-dy*HL, ez-dz*HL
+            return [cx,cy,cz,*col, ex,ey,ez,*col,
+                    ex,ey,ez,*col, bx+perp[0],by+perp[1],bz+perp[2],*col,
+                    ex,ey,ez,*col, bx-perp[0],by-perp[1],bz-perp[2],*col]
+
+        pts  = arrow(1,0,0,(1.,.2,.2))
+        pts += arrow(0,1,0,(.2,.9,.2))
+        pts += arrow(0,0,1,(.2,.5,1.))
+
+        # Y-rotation ring
+        R2 = L * 0.65; segs = 24; ry = cy + L * 0.15
+        for si in range(segs):
+            a0 = 2*math.pi*si/segs
+            a1 = 2*math.pi*(si+1)/segs
+            pts += [cx+R2*math.cos(a0), ry, cz+R2*math.sin(a0), *ORG,
+                    cx+R2*math.cos(a1), ry, cz+R2*math.sin(a1), *ORG]
+
+        d = HW * 0.5
+        pts += [cx-d,cy,cz,1.,1.,1.,  cx+d,cy,cz,1.,1.,1.,
+                cx,cy,cz-d,1.,1.,1.,  cx,cy,cz+d,1.,1.,1.]
+
+        arr = np.array(pts, dtype=np.float32).reshape(-1, 6)
+        glDisable(GL_DEPTH_TEST)
+        self._draw_lines(mvp, arr, line_width=2.5)
+        glEnable(GL_DEPTH_TEST)
+
+    def _hit_object_gizmo(self, sx, sy):
+        """Return 'x','y','z','ry' if object gizmo arrow/ring hit, else None."""
+        if self._selected_object < 0 or not self.world:
+            return None
+        if self._selected_object >= len(self.world.objects):
+            return None
+        obj = self.world.objects[self._selected_object]
+        cx, cy, cz = obj.world_x, obj.world_y, obj.world_z
+        L  = CHUNK_WORLD_UNIT * 0.7
+        HW = CHUNK_WORLD_UNIT * 0.18
+        orig, direction = self._screen_ray(sx, sy)
+
+        for axis, ddx, ddy, ddz in [('x',1,0,0),('y',0,1,0),('z',0,0,1)]:
+            p0 = np.array([cx,cy,cz], dtype=np.float64)
+            d  = np.array([ddx,ddy,ddz], dtype=np.float64)
+            w  = orig - p0
+            a  = np.dot(direction,direction) - np.dot(direction,d)**2
+            b  = 2*(np.dot(direction,w) - np.dot(direction,d)*np.dot(w,d))
+            c_ = np.dot(w,w) - np.dot(w,d)**2 - HW**2
+            disc = b*b - 4*a*c_
+            if disc < 0 or abs(a) < 1e-10: continue
+            t = (-b - math.sqrt(disc))/(2*a)
+            if t < 0: continue
+            hit = orig + direction*t
+            proj = float(np.dot(hit - p0, d))
+            if 0 <= proj <= L:
+                return axis
+
+        # Y-rotation ring test
+        R2 = L * 0.65; ry = cy + L * 0.15
+        n  = np.array([0.0, 1.0, 0.0])
+        denom = np.dot(direction, n)
+        if abs(denom) > 1e-6:
+            t = np.dot(np.array([cx, ry, cz]) - orig, n) / denom
+            if t > 0:
+                hit = orig + direction * t
+                dist = math.sqrt((hit[0]-cx)**2 + (hit[2]-cz)**2)
+                if abs(dist - R2) < HW * 1.5:
+                    return 'ry'
+        return None
+
+    def _pick_object(self, sx, sy):
+        """Return index of the nearest DSObject whose marker was clicked, or -1."""
+        if not self.world or not self.world.objects:
+            return -1
+        orig, direction = self._screen_ray(sx, sy)
+        thresh = CHUNK_WORLD_UNIT * 0.35
+        best_i, best_t = -1, float('inf')
+        for oi, obj in enumerate(self.world.objects):
+            pt = np.array([obj.world_x, obj.world_y, obj.world_z], dtype=np.float64)
+            w  = pt - orig
+            t  = float(np.dot(w, direction))
+            if t < 0:
+                continue
+            dist = float(np.linalg.norm(w - direction * t))
+            if dist < thresh and t < best_t:
+                best_t, best_i = t, oi
+        return best_i
 
     def _draw_foliage_cursor(self, mvp):
         """Draw a circle on the ground plane showing the foliage brush radius."""
@@ -4603,6 +5146,19 @@ class ObjectSelector(QWidget):
         bb.name = f"billboard_{len(self.world.billboards)}"
         # Place it at camera target if viewport is available
         self.world.billboards.append(bb)
+
+        # Auto-create a linked DSObject so the runtime can reference this billboard.
+        if len(self.world.objects) < 256:
+            obj = DSObject(
+                obj_id=self.world.new_object_id(),
+                name=bb.name[:31],
+                world_x=bb.world_x,
+                world_y=bb.world_y,
+                world_z=bb.world_z,
+                flags=OBJ_FLAG_ACTIVE | OBJ_FLAG_BILLBOARD,
+            )
+            self.world.objects.append(obj)
+
         self.refresh()
         # Auto-select the new billboard
         for row in range(self.bb_list.count()):
@@ -4643,6 +5199,20 @@ class ObjectSelector(QWidget):
             chunk.name     = Path(path).stem
             chunk.is_model = True
             self.world.chunks.append(chunk)
+
+            # Auto-create a linked DSObject at the model's world position.
+            # The object name mirrors the chunk name so code can find it by string.
+            if len(self.world.objects) < 256:
+                obj = DSObject(
+                    obj_id=self.world.new_object_id(),
+                    name=chunk.name[:31],
+                    world_x=chunk.world_x,
+                    world_y=chunk.world_y,
+                    world_z=chunk.world_z,
+                    flags=OBJ_FLAG_ACTIVE | OBJ_FLAG_MODEL_OBJ,
+                )
+                self.world.objects.append(obj)
+
             self.refresh()
             self.chunk_list.setCurrentRow(len(self.world.chunks)-1)
         except Exception as ex:
@@ -4719,6 +5289,879 @@ class ObjectSelector(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Script Editor Dialog
+# ---------------------------------------------------------------------------
+_SCRIPT_TEMPLATE = """\
+// {class_name}.cpp
+// Attach via: objectSystem.attachScript(objectId, "{class_name}");
+// Or set as script in the world editor Objects panel.
+#include "ObjectSystem.h"
+
+class {class_name} : public ScriptComponent {{
+public:
+    void start() override {{
+        // Called once after the world finishes loading.
+        // object->x, object->y, object->z hold the current position.
+    }}
+
+    void update() override {{
+        // Called every frame (60 fps).
+        // Use moveBy(), rotateY(), playSound(), etc.
+    }}
+
+    void lowerUpdate() override {{
+        // Called every other frame (30 fps).
+        // Useful for less-critical checks (distance tests, etc).
+    }}
+}};
+
+REGISTER_SCRIPT({class_name})
+"""
+
+class ScriptEditorDialog(QDialog):
+    """Simple inline C++ script template editor."""
+
+    def __init__(self, class_name: str, existing_code: str = "", parent=None):
+        super().__init__(parent)
+        self.class_name = class_name
+        self.setWindowTitle(f"Script — {class_name}.cpp")
+        self.resize(680, 520)
+        self._build_ui(existing_code or _SCRIPT_TEMPLATE.format(class_name=class_name))
+
+    def _build_ui(self, initial_code: str):
+        lay = QVBoxLayout(self)
+
+        info = QLabel(
+            "This is an in-editor draft. Copy it into your project's source tree and build.\n"
+            "The class name is used as the script key in REGISTER_SCRIPT.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#9ab; font-size:11px;")
+        lay.addWidget(info)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setFont(QFont("Courier", 10))
+        self.editor.setStyleSheet(
+            "QPlainTextEdit { background:#111318; color:#d4d8e0;"
+            " border:1px solid #2a2d35; }")
+        self.editor.setPlainText(initial_code)
+        lay.addWidget(self.editor, 1)
+
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy to Clipboard")
+        copy_btn.clicked.connect(self._copy)
+        open_btn = QPushButton("Open with System Editor…")
+        open_btn.clicked.connect(self._open_external)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(open_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+
+    def get_code(self) -> str:
+        return self.editor.toPlainText()
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.editor.toPlainText())
+
+    def _open_external(self):
+        import tempfile, subprocess, sys, os
+        suffix = f"_{self.class_name}.cpp"
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.editor.toPlainText())
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+
+# ---------------------------------------------------------------------------
+# Audio Panel  (playlist + positional emitters + import)
+# ---------------------------------------------------------------------------
+class AudioPanel(QWidget):
+    """Tab panel for editing the world's music playlist and positional emitters."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.world: WorldFile | None = None
+        self._world_path: str | None = None   # set from MainWindow when world is saved/opened
+        self._build_ui()
+
+    def set_world(self, world: WorldFile | None, world_path: str | None = None):
+        self.world = world
+        self._world_path = world_path or (world.path if world else None)
+        self.refresh()
+
+    def refresh(self):
+        self._refresh_tracks()
+        self._refresh_emitters()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
+
+        tabs = QTabWidget()
+        tabs.setTabPosition(QTabWidget.TabPosition.North)
+        tabs.addTab(self._build_playlist_tab(), "🎵 Playlist")
+        tabs.addTab(self._build_emitters_tab(), "📻 Emitters")
+        root.addWidget(tabs)
+
+    # ── Playlist tab ──
+    def _build_playlist_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(4)
+
+        lay.addWidget(QLabel(
+            "Tracks play in order with a cross-fade.\n"
+            "Path on DS FAT: fat:/Alone/music/<name>.dsnd",
+            wordWrap=True))
+
+        self.track_list = QListWidget()
+        self.track_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.track_list.currentRowChanged.connect(self._on_track_selected)
+        lay.addWidget(self.track_list)
+
+        btn_row = QHBoxLayout()
+        for label, slot in [("+ Add", self._add_track),
+                             ("Import Audio…", self._import_track),
+                             ("Remove", self._del_track)]:
+            b = QPushButton(label); b.clicked.connect(slot); btn_row.addWidget(b)
+        btn_row.addStretch()
+        for label, delta in [("▲", -1), ("▼", 1)]:
+            b = QPushButton(label); b.setFixedWidth(28)
+            b.clicked.connect(lambda _, d=delta: self._move_track(d))
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+        self._track_grp = QGroupBox("Track properties")
+        tf = QFormLayout(self._track_grp)
+        tf.setContentsMargins(4,4,4,4); tf.setSpacing(4)
+        self.track_filename = QLineEdit()
+        self.track_filename.setPlaceholderText("fat:/Alone/music/theme.dsnd")
+        self.track_volume = QSpinBox(); self.track_volume.setRange(0, 127); self.track_volume.setValue(100)
+        self.track_loop = QCheckBox("Loop"); self.track_loop.setChecked(True)
+        tf.addRow("File:", self.track_filename)
+        tf.addRow("Volume (0-127):", self.track_volume)
+        tf.addRow("", self.track_loop)
+        ab = QPushButton("Apply"); ab.clicked.connect(self._apply_track)
+        tf.addRow("", ab)
+        self._track_grp.setEnabled(False)
+        lay.addWidget(self._track_grp)
+        lay.addStretch(1)
+        return w
+
+    # ── Emitters tab ──
+    def _build_emitters_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(4)
+
+        lay.addWidget(QLabel(
+            "Positional emitters — volume falls off between inner and outer radius.",
+            wordWrap=True))
+
+        self.emitter_list = QListWidget()
+        self.emitter_list.currentRowChanged.connect(self._on_emitter_selected)
+        lay.addWidget(self.emitter_list)
+
+        btn_row2 = QHBoxLayout()
+        for label, slot in [("+ Add", self._add_emitter),
+                             ("Import Audio…", self._import_emitter),
+                             ("Remove", self._del_emitter)]:
+            b = QPushButton(label); b.clicked.connect(slot); btn_row2.addWidget(b)
+        btn_row2.addStretch()
+        lay.addLayout(btn_row2)
+
+        self._emitter_grp = QGroupBox("Emitter properties")
+        ef = QFormLayout(self._emitter_grp)
+        ef.setContentsMargins(4,4,4,4); ef.setSpacing(4)
+        self.emitter_filename = QLineEdit()
+        self.emitter_filename.setPlaceholderText("fat:/Alone/sfx/ambient.dsnd")
+        self.em_x = QDoubleSpinBox(); self.em_x.setRange(-9999,9999); self.em_x.setDecimals(2)
+        self.em_y = QDoubleSpinBox(); self.em_y.setRange(-9999,9999); self.em_y.setDecimals(2)
+        self.em_z = QDoubleSpinBox(); self.em_z.setRange(-9999,9999); self.em_z.setDecimals(2)
+        self.em_volume = QSpinBox(); self.em_volume.setRange(0,127); self.em_volume.setValue(100)
+        self.em_inner = QDoubleSpinBox(); self.em_inner.setRange(0,9999); self.em_inner.setDecimals(1); self.em_inner.setValue(4.0)
+        self.em_outer = QDoubleSpinBox(); self.em_outer.setRange(0,9999); self.em_outer.setDecimals(1); self.em_outer.setValue(32.0)
+        self.em_loop = QCheckBox("Loop"); self.em_loop.setChecked(True)
+        self.em_obj_id = QSpinBox(); self.em_obj_id.setRange(0, 65535)
+        self.em_obj_id.setSpecialValueText("(free position)")
+        ef.addRow("File:", self.emitter_filename)
+        ef.addRow("X:", self.em_x); ef.addRow("Y:", self.em_y); ef.addRow("Z:", self.em_z)
+        ef.addRow("Volume:", self.em_volume)
+        ef.addRow("Inner radius:", self.em_inner)
+        ef.addRow("Outer radius:", self.em_outer)
+        ef.addRow("", self.em_loop)
+        ef.addRow("Attach to obj ID:", self.em_obj_id)
+        ab2 = QPushButton("Apply"); ab2.clicked.connect(self._apply_emitter)
+        ef.addRow("", ab2)
+        self._emitter_grp.setEnabled(False)
+        lay.addWidget(self._emitter_grp)
+        lay.addStretch(1)
+        return w
+
+    # ------------------------------------------------------------------
+    # Import helpers
+    # ------------------------------------------------------------------
+    def _world_base_dir(self) -> str | None:
+        """Return the directory next to the saved .svworld file, or None."""
+        p = self._world_path or (self.world.path if self.world else None)
+        if p:
+            return str(Path(p).parent)
+        return None
+
+    def _import_audio_dialog(self, subfolder: str) -> tuple[str, str] | None:
+        """Pick an audio file, convert to .dsnd, return (fat_path, abs_path) or None."""
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Import Audio File", "",
+            "Audio (*.wav *.mp3 *.ogg *.flac *.aiff *.aif *.m4a);;All (*)")
+        if not src:
+            return None
+
+        # Ask for conversion settings
+        rate_items = ["32768 Hz (rate 0)", "16384 Hz (rate 1)",
+                      "8192 Hz (rate 2)", "5512 Hz (rate 3)"]
+        rate_str, ok = QInputDialog.getItem(self, "Sample rate", "Output rate:", rate_items, 1, False)
+        if not ok:
+            return None
+        rate_div = rate_items.index(rate_str)
+
+        bits_str, ok = QInputDialog.getItem(self, "Bit depth", "PCM depth:",
+                                             ["8-bit PCM", "16-bit PCM"], 0, False)
+        if not ok:
+            return None
+        bits = 16 if "16" in bits_str else 8
+
+        stem = Path(src).stem
+        base = self._world_base_dir()
+        if base:
+            abs_dst = str(Path(base) / subfolder / f"{stem}.dsnd")
+        else:
+            abs_dst, _ = QFileDialog.getSaveFileName(
+                self, "Save .dsnd to…", f"{stem}.dsnd",
+                "DSND Files (*.dsnd)")
+            if not abs_dst:
+                return None
+
+        try:
+            _convert_audio_to_dsnd(src, abs_dst, rate_div=rate_div, bits=bits)
+        except RuntimeError as e:
+            QMessageBox.critical(self, "Conversion failed", str(e))
+            return None
+
+        # Build the fat: path relative to base
+        if base:
+            rel = Path(abs_dst).relative_to(base)
+            fat_path = "fat:/Alone/" + str(rel).replace("\\", "/")
+        else:
+            fat_path = "fat:/Alone/" + subfolder + "/" + Path(abs_dst).name
+
+        QMessageBox.information(self, "Import OK",
+            f"Saved: {abs_dst}\nDS path: {fat_path}")
+        return fat_path, abs_dst
+
+    def _import_track(self):
+        result = self._import_audio_dialog("music")
+        if not result:
+            return
+        fat_path, _ = result
+        if not self.world:
+            return
+        if len(self.world.audio_tracks) >= 16:
+            QMessageBox.warning(self, "Limit", "Maximum 16 tracks.")
+            return
+        t = DSAudioTrack(filename=fat_path, volume=100, flags=TRACK_FLAG_LOOP)
+        self.world.audio_tracks.append(t)
+        self._refresh_tracks()
+        self.track_list.setCurrentRow(len(self.world.audio_tracks) - 1)
+        self.changed.emit()
+
+    def _import_emitter(self):
+        result = self._import_audio_dialog("sfx")
+        if not result:
+            return
+        fat_path, _ = result
+        if not self.world:
+            return
+        if len(self.world.audio_emitters) >= 32:
+            QMessageBox.warning(self, "Limit", "Maximum 32 emitters.")
+            return
+        em = DSAudioEmitter(filename=fat_path, volume=100,
+                            flags=EMITTER_FLAG_LOOP,
+                            radius_inner=4.0, radius_outer=32.0)
+        self.world.audio_emitters.append(em)
+        self._refresh_emitters()
+        self.emitter_list.setCurrentRow(len(self.world.audio_emitters) - 1)
+        self.changed.emit()
+
+    # ------------------------------------------------------------------
+    # Playlist
+    # ------------------------------------------------------------------
+    def _refresh_tracks(self):
+        self.track_list.clear()
+        if not self.world:
+            return
+        for i, t in enumerate(self.world.audio_tracks):
+            loop_s = " [loop]" if (t.flags & TRACK_FLAG_LOOP) else ""
+            name = t.filename.split("/")[-1] or "(no file)"
+            self.track_list.addItem(f"{i+1}.  {name}  vol={t.volume}{loop_s}")
+        self._track_grp.setEnabled(False)
+
+    def _on_track_selected(self, row):
+        if not self.world or row < 0 or row >= len(self.world.audio_tracks):
+            self._track_grp.setEnabled(False); return
+        t = self.world.audio_tracks[row]
+        self.track_filename.setText(t.filename)
+        self.track_volume.setValue(t.volume)
+        self.track_loop.setChecked(bool(t.flags & TRACK_FLAG_LOOP))
+        self._track_grp.setEnabled(True)
+
+    def _add_track(self):
+        if not self.world: return
+        if len(self.world.audio_tracks) >= 16:
+            QMessageBox.warning(self, "Limit", "Maximum 16 tracks."); return
+        self.world.audio_tracks.append(
+            DSAudioTrack(filename="fat:/Alone/music/track.dsnd", volume=100, flags=TRACK_FLAG_LOOP))
+        self._refresh_tracks()
+        self.track_list.setCurrentRow(len(self.world.audio_tracks) - 1)
+        self.changed.emit()
+
+    def _del_track(self):
+        if not self.world: return
+        row = self.track_list.currentRow()
+        if row < 0 or row >= len(self.world.audio_tracks): return
+        self.world.audio_tracks.pop(row)
+        self._refresh_tracks()
+        self.changed.emit()
+
+    def _move_track(self, delta):
+        if not self.world: return
+        row = self.track_list.currentRow()
+        new_row = row + delta
+        if new_row < 0 or new_row >= len(self.world.audio_tracks): return
+        lst = self.world.audio_tracks
+        lst[row], lst[new_row] = lst[new_row], lst[row]
+        self._refresh_tracks()
+        self.track_list.setCurrentRow(new_row)
+        self.changed.emit()
+
+    def _apply_track(self):
+        if not self.world: return
+        row = self.track_list.currentRow()
+        if row < 0 or row >= len(self.world.audio_tracks): return
+        t = self.world.audio_tracks[row]
+        t.filename = self.track_filename.text()[:47]
+        t.volume = self.track_volume.value()
+        t.flags = TRACK_FLAG_LOOP if self.track_loop.isChecked() else 0
+        self._refresh_tracks()
+        self.track_list.setCurrentRow(row)
+        self.changed.emit()
+
+    # ------------------------------------------------------------------
+    # Emitters
+    # ------------------------------------------------------------------
+    def _refresh_emitters(self):
+        self.emitter_list.clear()
+        if not self.world: return
+        for i, em in enumerate(self.world.audio_emitters):
+            name = em.filename.split("/")[-1] or "(no file)"
+            loop_s = " [loop]" if (em.flags & EMITTER_FLAG_LOOP) else ""
+            pos_s = (f" obj={em.object_id}" if em.object_id != 0
+                     else f" ({em.world_x:.1f},{em.world_y:.1f},{em.world_z:.1f})")
+            self.emitter_list.addItem(
+                f"{i}.  {name}{loop_s}  r={em.radius_inner:.0f}/{em.radius_outer:.0f}{pos_s}")
+        self._emitter_grp.setEnabled(False)
+
+    def _on_emitter_selected(self, row):
+        if not self.world or row < 0 or row >= len(self.world.audio_emitters):
+            self._emitter_grp.setEnabled(False); return
+        em = self.world.audio_emitters[row]
+        self.emitter_filename.setText(em.filename)
+        self.em_x.setValue(em.world_x); self.em_y.setValue(em.world_y); self.em_z.setValue(em.world_z)
+        self.em_volume.setValue(em.volume)
+        self.em_inner.setValue(em.radius_inner); self.em_outer.setValue(em.radius_outer)
+        self.em_loop.setChecked(bool(em.flags & EMITTER_FLAG_LOOP))
+        self.em_obj_id.setValue(em.object_id)
+        self._emitter_grp.setEnabled(True)
+
+    def _add_emitter(self):
+        if not self.world: return
+        if len(self.world.audio_emitters) >= 32:
+            QMessageBox.warning(self, "Limit", "Maximum 32 emitters."); return
+        self.world.audio_emitters.append(
+            DSAudioEmitter(filename="fat:/Alone/sfx/ambient.dsnd", volume=100,
+                           flags=EMITTER_FLAG_LOOP, radius_inner=4.0, radius_outer=32.0))
+        self._refresh_emitters()
+        self.emitter_list.setCurrentRow(len(self.world.audio_emitters) - 1)
+        self.changed.emit()
+
+    def _del_emitter(self):
+        if not self.world: return
+        row = self.emitter_list.currentRow()
+        if row < 0 or row >= len(self.world.audio_emitters): return
+        self.world.audio_emitters.pop(row)
+        self._refresh_emitters()
+        self.changed.emit()
+
+    def _apply_emitter(self):
+        if not self.world: return
+        row = self.emitter_list.currentRow()
+        if row < 0 or row >= len(self.world.audio_emitters): return
+        em = self.world.audio_emitters[row]
+        em.filename = self.emitter_filename.text()[:47]
+        em.world_x = self.em_x.value(); em.world_y = self.em_y.value(); em.world_z = self.em_z.value()
+        em.volume = self.em_volume.value()
+        em.radius_inner = self.em_inner.value(); em.radius_outer = self.em_outer.value()
+        em.flags = EMITTER_FLAG_LOOP if self.em_loop.isChecked() else 0
+        em.object_id = self.em_obj_id.value()
+        self._refresh_emitters()
+        self.emitter_list.setCurrentRow(row)
+        self.changed.emit()
+
+
+# ---------------------------------------------------------------------------
+# Objects Panel  (world objects, tags, script editor)
+# ---------------------------------------------------------------------------
+class ObjectsPanel(QWidget):
+    """Tab panel for editing DSObject instances, tags, and script assignments."""
+
+    changed = pyqtSignal()
+    # Signal emitted when user wants to select/focus an object in the viewport
+    object_focus_requested = pyqtSignal(int)   # object index
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.world: WorldFile | None = None
+        self._current_obj: DSObject | None = None
+        self._current_tag: DSTag | None = None
+        self._viewport = None   # set externally
+        # Per-object script code cache: {obj_id: str}
+        self._script_code: dict[int, str] = {}
+        self._build_ui()
+
+    def set_world(self, world: WorldFile | None):
+        self.world = world
+        self._script_code.clear()
+        self.refresh()
+
+    def set_viewport(self, vp):
+        self._viewport = vp
+
+    def refresh(self):
+        self._refresh_objects()
+        self._refresh_tags()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
+
+        tabs = QTabWidget()
+        tabs.setTabPosition(QTabWidget.TabPosition.North)
+        tabs.addTab(self._build_objects_tab(), "🧩 Objects")
+        tabs.addTab(self._build_tags_tab(),    "🏷 Tags")
+        root.addWidget(tabs)
+
+    # ── Objects tab ──
+    def _build_objects_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(4)
+
+        lay.addWidget(QLabel(
+            "Named, tagged world objects (max 256). Models and billboards "
+            "auto-create a linked object on import.",
+            wordWrap=True))
+
+        self.obj_list = QListWidget()
+        self.obj_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.obj_list.currentRowChanged.connect(self._on_obj_selected)
+        self.obj_list.itemDoubleClicked.connect(self._focus_selected)
+        lay.addWidget(self.obj_list, 2)
+
+        btn_row = QHBoxLayout()
+        for label, slot in [("+ Add", self._add_obj),
+                             ("Duplicate", self._dup_obj),
+                             ("Remove", self._del_obj),
+                             ("Focus", self._focus_selected)]:
+            b = QPushButton(label); b.clicked.connect(slot); btn_row.addWidget(b)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        # Object editor form
+        self._obj_grp = QGroupBox("Object properties")
+        of = QFormLayout(self._obj_grp)
+        of.setContentsMargins(4,4,4,4); of.setSpacing(4)
+
+        self.obj_id_lbl = QLabel("-")
+        self.obj_name   = QLineEdit(); self.obj_name.setMaxLength(24)
+        self.obj_name.setPlaceholderText("door_01")
+        self.obj_x = QDoubleSpinBox(); self.obj_x.setRange(-9999,9999); self.obj_x.setDecimals(3)
+        self.obj_y = QDoubleSpinBox(); self.obj_y.setRange(-9999,9999); self.obj_y.setDecimals(3)
+        self.obj_z = QDoubleSpinBox(); self.obj_z.setRange(-9999,9999); self.obj_z.setDecimals(3)
+        self.obj_rot_y = QDoubleSpinBox(); self.obj_rot_y.setRange(-360,360); self.obj_rot_y.setDecimals(1)
+
+        flag_row = QHBoxLayout()
+        self.flag_active = QCheckBox("Active"); self.flag_active.setChecked(True)
+        self.flag_floor  = QCheckBox("Floor/Chunk")
+        self.flag_bb_cb  = QCheckBox("Billboard")
+        self.flag_mdl_cb = QCheckBox("Model")
+        for cb in (self.flag_active, self.flag_floor, self.flag_bb_cb, self.flag_mdl_cb):
+            flag_row.addWidget(cb)
+
+        self.obj_script = QLineEdit()
+        self.obj_script.setPlaceholderText("MyScript  (C++ class name)")
+        self.obj_script.setMaxLength(48)
+
+        of.addRow("ID:", self.obj_id_lbl)
+        of.addRow("Name:", self.obj_name)
+        of.addRow("X:", self.obj_x)
+        of.addRow("Y:", self.obj_y)
+        of.addRow("Z:", self.obj_z)
+        of.addRow("Rot Y°:", self.obj_rot_y)
+        of.addRow("Flags:", flag_row)          # type: ignore[arg-type]
+        of.addRow("Script class:", self.obj_script)
+
+        script_btn_row = QHBoxLayout()
+        edit_script_btn = QPushButton("Edit / Create Script…")
+        edit_script_btn.clicked.connect(self._edit_script)
+        script_btn_row.addWidget(edit_script_btn); script_btn_row.addStretch()
+        of.addRow("", script_btn_row)  # type: ignore[arg-type]
+
+        apply_btn = QPushButton("Apply Object Changes")
+        apply_btn.clicked.connect(self._apply_obj)
+        of.addRow("", apply_btn)
+
+        self._obj_grp.setEnabled(False)
+        lay.addWidget(self._obj_grp, 3)
+        lay.addStretch(1)
+        return w
+
+    # ── Tags tab ──
+    def _build_tags_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(4)
+
+        lay.addWidget(QLabel(
+            "Tags group objects. Tag index 0-63 maps to a bitfield in each object.",
+            wordWrap=True))
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+
+        tag_side = QWidget()
+        tl = QVBoxLayout(tag_side); tl.setContentsMargins(0,0,0,0)
+        tl.addWidget(QLabel("Tags:"))
+        self.tag_list = QListWidget()
+        self.tag_list.currentRowChanged.connect(self._on_tag_selected)
+        tl.addWidget(self.tag_list)
+        tbr = QHBoxLayout()
+        for label, slot in [("+", self._add_tag), ("−", self._del_tag)]:
+            b = QPushButton(label); b.setFixedWidth(32); b.clicked.connect(slot); tbr.addWidget(b)
+        tbr.addStretch(); tl.addLayout(tbr)
+        split.addWidget(tag_side)
+
+        te_side = QWidget()
+        tel = QVBoxLayout(te_side); tel.setContentsMargins(0,0,0,0)
+        self._tag_grp = QGroupBox("Tag properties")
+        tef = QFormLayout(self._tag_grp)
+        tef.setContentsMargins(4,4,4,4); tef.setSpacing(3)
+        self.tag_name = QLineEdit(); self.tag_name.setMaxLength(23)
+        self.tag_index_spin = QSpinBox(); self.tag_index_spin.setRange(0,63)
+        tef.addRow("Name:", self.tag_name)
+        tef.addRow("Index (0-63):", self.tag_index_spin)
+        ab = QPushButton("Apply Tag"); ab.clicked.connect(self._apply_tag); tef.addRow("", ab)
+        tel.addWidget(self._tag_grp)
+        tel.addWidget(QLabel("Members:"))
+        self.tag_members_list = QListWidget()
+        self.tag_members_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        tel.addWidget(self.tag_members_list, 2)
+        mbr = QHBoxLayout()
+        am = QPushButton("Add Objects…"); am.clicked.connect(self._add_tag_members); mbr.addWidget(am)
+        rm = QPushButton("Remove Selected"); rm.clicked.connect(self._rem_tag_members); mbr.addWidget(rm)
+        mbr.addStretch(); tel.addLayout(mbr)
+        tel.addStretch(1)
+        self._tag_grp.setEnabled(False)
+        split.addWidget(te_side)
+        lay.addWidget(split, 1)
+        return w
+
+    # ------------------------------------------------------------------
+    # Object logic
+    # ------------------------------------------------------------------
+    def _obj_display_name(self, obj: DSObject) -> str:
+        """Strip the |script suffix for display."""
+        return obj.name.split("|")[0]
+
+    def _obj_script_name(self, obj: DSObject) -> str:
+        parts = obj.name.split("|", 1)
+        return parts[1] if len(parts) > 1 else ""
+
+    def _refresh_objects(self):
+        self.obj_list.clear()
+        if not self.world: return
+        for obj in self.world.objects:
+            flags_s = ""
+            if obj.flags & OBJ_FLAG_ACTIVE:      flags_s += "A"
+            if obj.flags & OBJ_FLAG_FLOOR_CHUNK:  flags_s += "F"
+            if obj.flags & OBJ_FLAG_BILLBOARD:    flags_s += "B"
+            if obj.flags & OBJ_FLAG_MODEL_OBJ:    flags_s += "M"
+            sc = self._obj_script_name(obj)
+            script_s = f"  [{sc}]" if sc else ""
+            self.obj_list.addItem(
+                f"[{obj.id}]  {self._obj_display_name(obj)}"
+                f"  ({obj.world_x:.1f},{obj.world_y:.1f},{obj.world_z:.1f})"
+                f"  {flags_s}{script_s}")
+        self._obj_grp.setEnabled(False)
+
+    def _on_obj_selected(self, row: int):
+        if not self.world or row < 0 or row >= len(self.world.objects):
+            self._obj_grp.setEnabled(False); self._current_obj = None; return
+        obj = self.world.objects[row]
+        self._current_obj = obj
+        self.obj_id_lbl.setText(str(obj.id))
+        self.obj_name.setText(self._obj_display_name(obj))
+        self.obj_x.setValue(obj.world_x)
+        self.obj_y.setValue(obj.world_y)
+        self.obj_z.setValue(obj.world_z)
+        self.obj_rot_y.setValue(getattr(obj, "_rot_y", 0.0))
+        self.flag_active.setChecked(bool(obj.flags & OBJ_FLAG_ACTIVE))
+        self.flag_floor.setChecked(bool(obj.flags & OBJ_FLAG_FLOOR_CHUNK))
+        self.flag_bb_cb.setChecked(bool(obj.flags & OBJ_FLAG_BILLBOARD))
+        self.flag_mdl_cb.setChecked(bool(obj.flags & OBJ_FLAG_MODEL_OBJ))
+        self.obj_script.setText(self._obj_script_name(obj))
+        self._obj_grp.setEnabled(True)
+
+    def _focus_selected(self, *_):
+        """Pan the viewport to the selected object."""
+        if not self.world or not self._current_obj: return
+        if self._viewport:
+            obj = self._current_obj
+            self._viewport.cam_target = [obj.world_x, 0.0, obj.world_z]
+            self._viewport.update()
+
+    def _add_obj(self):
+        if not self.world: return
+        if len(self.world.objects) >= 256:
+            QMessageBox.warning(self, "Limit", "Maximum 256 objects."); return
+        obj = DSObject(obj_id=self.world.new_object_id(),
+                       name=f"object_{len(self.world.objects)}",
+                       flags=OBJ_FLAG_ACTIVE)
+        self.world.objects.append(obj)
+        self._refresh_objects()
+        self.obj_list.setCurrentRow(len(self.world.objects) - 1)
+        self.changed.emit()
+
+    def _dup_obj(self):
+        if not self.world or not self._current_obj: return
+        import copy as _cp
+        new_obj = _cp.copy(self._current_obj)
+        new_obj.id = self.world.new_object_id()
+        base = self._obj_display_name(new_obj)
+        sc   = self._obj_script_name(new_obj)
+        new_obj.name = ((base + "_copy") + ("|" + sc if sc else ""))[:31]
+        new_obj.world_x += 1.0
+        self.world.objects.append(new_obj)
+        self._refresh_objects()
+        self.obj_list.setCurrentRow(len(self.world.objects) - 1)
+        self.changed.emit()
+
+    def _del_obj(self):
+        if not self.world: return
+        row = self.obj_list.currentRow()
+        if row < 0 or row >= len(self.world.objects): return
+        obj_id = self.world.objects[row].id
+        self.world.objects.pop(row)
+        for tag in self.world.tags:
+            if obj_id in tag.member_ids:
+                tag.member_ids.remove(obj_id)
+        self._refresh_objects()
+        self._refresh_tags()
+        if self._viewport: self._viewport.update()
+        self.changed.emit()
+
+    def _apply_obj(self):
+        if not self.world or not self._current_obj: return
+        row = self.obj_list.currentRow()
+        if row < 0: return
+        obj = self.world.objects[row]
+        sc = self.obj_script.text().strip()
+        base = self.obj_name.text().strip() or f"object_{row}"
+        obj.name = (base + "|" + sc if sc else base)[:31]
+        obj.world_x = self.obj_x.value()
+        obj.world_y = self.obj_y.value()
+        obj.world_z = self.obj_z.value()
+        obj._rot_y  = self.obj_rot_y.value()   # transient; not in binary
+        flags = 0
+        if self.flag_active.isChecked():   flags |= OBJ_FLAG_ACTIVE
+        if self.flag_floor.isChecked():    flags |= OBJ_FLAG_FLOOR_CHUNK
+        if self.flag_bb_cb.isChecked():    flags |= OBJ_FLAG_BILLBOARD
+        if self.flag_mdl_cb.isChecked():   flags |= OBJ_FLAG_MODEL_OBJ
+        obj.flags = flags
+        self._current_obj = obj
+        self._refresh_objects()
+        self.obj_list.setCurrentRow(row)
+        if self._viewport: self._viewport.update()
+        self.changed.emit()
+
+    def _edit_script(self):
+        """Open the inline script editor for the currently selected object."""
+        if not self._current_obj:
+            QMessageBox.information(self, "No selection", "Select an object first.")
+            return
+        sc_name = self.obj_script.text().strip()
+        if not sc_name:
+            sc_name, ok = QInputDialog.getText(self, "Script class name",
+                "Enter C++ class name for this script:", text="MyScript")
+            if not ok or not sc_name.strip():
+                return
+            sc_name = sc_name.strip()
+            self.obj_script.setText(sc_name)
+
+        obj_id = self._current_obj.id
+        existing = self._script_code.get(obj_id, "")
+        dlg = ScriptEditorDialog(sc_name, existing_code=existing, parent=self)
+        dlg.exec()
+        self._script_code[obj_id] = dlg.get_code()
+
+    # ------------------------------------------------------------------
+    # Tag logic
+    # ------------------------------------------------------------------
+    def _refresh_tags(self):
+        self.tag_list.clear()
+        if not self.world: return
+        for tag in self.world.tags:
+            self.tag_list.addItem(f"[{tag.tag_index}]  {tag.name}  ({len(tag.member_ids)} members)")
+        self.tag_members_list.clear()
+        self._tag_grp.setEnabled(False)
+
+    def _on_tag_selected(self, row):
+        if not self.world or row < 0 or row >= len(self.world.tags):
+            self._tag_grp.setEnabled(False); self._current_tag = None; return
+        tag = self.world.tags[row]
+        self._current_tag = tag
+        self.tag_name.setText(tag.name)
+        self.tag_index_spin.setValue(tag.tag_index)
+        self._tag_grp.setEnabled(True)
+        self._refresh_tag_members(tag)
+
+    def _refresh_tag_members(self, tag: DSTag):
+        self.tag_members_list.clear()
+        if not self.world: return
+        for oid in tag.member_ids:
+            obj = self.world.object_by_id(oid)
+            label = self._obj_display_name(obj) if obj else f"(missing id={oid})"
+            self.tag_members_list.addItem(f"[{oid}]  {label}")
+
+    def _add_tag(self):
+        if not self.world: return
+        if len(self.world.tags) >= 64:
+            QMessageBox.warning(self, "Limit", "Maximum 64 tags."); return
+        used = {t.tag_index for t in self.world.tags}
+        idx = next((i for i in range(64) if i not in used), 0)
+        self.world.tags.append(DSTag(tag_index=idx, name=f"tag_{len(self.world.tags)}"))
+        self._refresh_tags()
+        self.tag_list.setCurrentRow(len(self.world.tags) - 1)
+        self.changed.emit()
+
+    def _del_tag(self):
+        if not self.world: return
+        row = self.tag_list.currentRow()
+        if row < 0 or row >= len(self.world.tags): return
+        tag = self.world.tags[row]
+        bit = 1 << tag.tag_index
+        for obj in self.world.objects:
+            obj.tag_mask &= ~bit
+        self.world.tags.pop(row)
+        self._refresh_tags()
+        self.changed.emit()
+
+    def _apply_tag(self):
+        if not self.world or not self._current_tag: return
+        row = self.tag_list.currentRow()
+        if row < 0: return
+        old_idx = self._current_tag.tag_index
+        new_idx = self.tag_index_spin.value()
+        if new_idx != old_idx:
+            for t in self.world.tags:
+                if t is not self._current_tag and t.tag_index == new_idx:
+                    QMessageBox.warning(self, "Collision",
+                        f"Index {new_idx} already used by '{t.name}'."); return
+            old_bit = 1 << old_idx; new_bit = 1 << new_idx
+            for obj in self.world.objects:
+                if obj.tag_mask & old_bit:
+                    obj.tag_mask = (obj.tag_mask & ~old_bit) | new_bit
+            self._current_tag.tag_index = new_idx
+        self._current_tag.name = self.tag_name.text().strip()[:23] or "tag"
+        self._refresh_tags()
+        self.tag_list.setCurrentRow(row)
+        self.changed.emit()
+
+    def _add_tag_members(self):
+        if not self.world or not self._current_tag:
+            QMessageBox.information(self, "No tag", "Select a tag first."); return
+        if not self.world.objects:
+            QMessageBox.information(self, "No objects", "Add objects first."); return
+        dlg = QDialog(self); dlg.setWindowTitle("Add objects to tag")
+        vl = QVBoxLayout(dlg)
+        picker = QListWidget()
+        picker.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        already = set(self._current_tag.member_ids)
+        for obj in self.world.objects:
+            if obj.id not in already:
+                item = QListWidgetItem(f"[{obj.id}]  {self._obj_display_name(obj)}")
+                item.setData(Qt.ItemDataRole.UserRole, obj.id)
+                picker.addItem(item)
+        vl.addWidget(picker)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        vl.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        tag = self._current_tag; bit = 1 << tag.tag_index
+        for item in picker.selectedItems():
+            oid = item.data(Qt.ItemDataRole.UserRole)
+            if oid not in tag.member_ids:
+                tag.member_ids.append(oid)
+                obj = self.world.object_by_id(oid)
+                if obj: obj.tag_mask |= bit
+        self._refresh_tag_members(tag)
+        row = self.tag_list.currentRow()
+        self._refresh_tags(); self.tag_list.setCurrentRow(row)
+        self.changed.emit()
+
+    def _rem_tag_members(self):
+        if not self.world or not self._current_tag: return
+        tag = self._current_tag; bit = 1 << tag.tag_index
+        for item in self.tag_members_list.selectedItems():
+            oid_str = item.text().split("]")[0].lstrip("[")
+            try: oid = int(oid_str)
+            except ValueError: continue
+            if oid in tag.member_ids: tag.member_ids.remove(oid)
+            obj = self.world.object_by_id(oid)
+            if obj: obj.tag_mask &= ~bit
+        self._refresh_tag_members(tag)
+        row = self.tag_list.currentRow()
+        self._refresh_tags(); self.tag_list.setCurrentRow(row)
+        self.changed.emit()
+
+
+# ---------------------------------------------------------------------------
 # Main Window
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
@@ -4758,6 +6201,15 @@ class MainWindow(QMainWindow):
         self.foliage_panel = FoliageToolPanel()
         self.foliage_panel.set_viewport(self.viewport)
         right_tabs.addTab(self.foliage_panel, "🌿 Foliage")
+
+        self.objects_panel = ObjectsPanel()
+        self.objects_panel.set_viewport(self.viewport)
+        self.objects_panel.changed.connect(self._on_inspector_changed)
+        self.objects_panel.object_focus_requested.connect(self._on_object_focus)
+        right_tabs.addTab(self.objects_panel, "🧩 Objects")
+
+        self.audio_panel = AudioPanel()
+        right_tabs.addTab(self.audio_panel, "🎵 Audio")
 
         right_tabs.setMinimumWidth(180)
         h_split.addWidget(right_tabs)
@@ -4875,6 +6327,8 @@ class MainWindow(QMainWindow):
         self.inspector.set_chunks([])
         self.foliage_panel.set_world(self.world)
         self.foliage_panel.refresh_count()
+        self.objects_panel.set_world(self.world)
+        self.audio_panel.set_world(self.world)
         self.setWindowTitle("Alone — World Editor  [New World]")
         self.status.showMessage("New world created")
 
@@ -4891,6 +6345,8 @@ class MainWindow(QMainWindow):
             self.inspector.set_chunks([])
             self.foliage_panel.set_world(self.world)
             self.foliage_panel.refresh_count()
+            self.objects_panel.set_world(self.world)
+            self.audio_panel.set_world(self.world, world_path=path)
             self.setWindowTitle(f"Alone — World Editor  [{Path(path).name}]")
             self.status.showMessage(
                 f"Loaded {len(self.world.chunks)} chunks, "
@@ -5096,6 +6552,18 @@ class MainWindow(QMainWindow):
             self.inspector._refresh_model_tex_combo()
         # Object selector texture quick-view
         self.obj_selector.refresh(keep_selection=True)
+
+    def _on_object_focus(self, obj_index: int):
+        """Pan viewport to the focused object and select it in the viewport."""
+        if not self.world or obj_index < 0 or obj_index >= len(self.world.objects):
+            return
+        obj = self.world.objects[obj_index]
+        self.viewport.cam_target = [obj.world_x, 0.0, obj.world_z]
+        self.viewport.set_selected_object(obj_index)
+        self.viewport.update()
+        self.status.showMessage(
+            f"Object [{obj.id}]  '{obj.name}'  "
+            f"at ({obj.world_x:.2f}, {obj.world_y:.2f}, {obj.world_z:.2f})")
 
 
 # ---------------------------------------------------------------------------
