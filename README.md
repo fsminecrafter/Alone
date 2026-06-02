@@ -3,4 +3,5 @@ A game for the NDS about suriving when everybody else is gone, or atleast most o
 
 Lapsed Guardians (16-bit, 22050hz, mono)
 
-[LapsedGuardian.mp3](https://github.com/user-attachments/files/28521701/LapsedGuardian.mp3)
+https://github.com/user-attachments/assets/7f797fe2-57f5-40c3-9ddd-cc7703533384
+
