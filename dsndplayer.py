@@ -30,6 +30,7 @@ This is intentionally self-contained and does not depend on pygame / pyaudio.
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -46,6 +47,8 @@ from tkinter import filedialog, messagebox, ttk
 DSND_MAGIC = b"DSND"
 DSND_FLAG_STEREO = 1 << 0
 DSND_FLAG_16BIT = 1 << 2
+
+PLAYER_COMMANDS = ["ffplay", "avplay"]
 
 RATE_DIV_TO_HZ = {
     0: 32768,
@@ -172,6 +175,18 @@ class PlayerBackend:
         self._stop_event = threading.Event()
         self._loop = False
         self._lock = threading.Lock()
+        self.player_cmd = self._find_player_command()
+
+    def _find_player_command(self) -> Optional[str]:
+        for candidate in PLAYER_COMMANDS:
+            path = shutil.which(candidate)
+            if path:
+                return path
+        return None
+
+    @property
+    def available(self) -> bool:
+        return self.player_cmd is not None
 
     @property
     def playing(self) -> bool:
@@ -194,6 +209,10 @@ class PlayerBackend:
 
     def play(self, track: DsndTrack, volume: int, loop: bool) -> None:
         self.stop()
+        if not self.player_cmd:
+            raise RuntimeError(
+                "No compatible audio player found. Install ffplay or avplay to play DSND files."
+            )
         self._stop_event = threading.Event()
         self._loop = bool(loop)
 
@@ -216,7 +235,7 @@ class PlayerBackend:
 
                 while not stop_event.is_set():
                     cmd = [
-                        "ffplay",
+                        self.player_cmd,
                         "-nodisp",
                         "-autoexit",
                         "-loglevel",
@@ -259,6 +278,8 @@ class DsndBrowser(tk.Tk):
         self.root_dir = tk.StringVar(value=str(Path.cwd()))
         self.status = tk.StringVar(value="Ready.")
         self.info = tk.StringVar(value="No file loaded.")
+        if not self.backend.available:
+            self.status.set("No audio player found. Install ffplay or avplay.")
         self.loop_var = tk.BooleanVar(value=False)
         self.volume_var = tk.IntVar(value=100)
         self.search_var = tk.StringVar(value="")
@@ -308,14 +329,10 @@ class DsndBrowser(tk.Tk):
             to=100,
             orient="horizontal",
             variable=self.volume_var,
-            command=self._on_volume_changed
+            command=self._on_volume_changed,
         )
 
-        vol.pack(side="left", fill="x", expand=False, padx=(6, 8))
-
-        self.vol_label = ttk.Label(mid, text="100%")
-        self.vol_label.pack(side="left")
-        vol.pack(side="left", fill="x", expand=False, padx=(6, 8))
+        vol.pack(side="left", fill="x", expand=True, padx=(6, 8))
         self.vol_label = ttk.Label(mid, text="100%")
         self.vol_label.pack(side="left")
 
@@ -343,8 +360,9 @@ class DsndBrowser(tk.Tk):
 
         controls = ttk.LabelFrame(right, text="Playback", padding=10)
         controls.pack(fill="x", pady=(10, 0))
-        ttk.Button(controls, text="Play", command=self.open_selected).pack(fill="x")
+        ttk.Button(controls, text="Play / Open", command=self.open_selected).pack(fill="x")
         ttk.Button(controls, text="Stop", command=self.stop).pack(fill="x", pady=(6, 0))
+        ttk.Button(controls, text="Choose File…", command=self.choose_file).pack(fill="x", pady=(6, 0))
         ttk.Button(controls, text="Up folder", command=self.go_up).pack(fill="x", pady=(6, 0))
 
         status_box = ttk.LabelFrame(right, text="Status", padding=10)
@@ -370,6 +388,25 @@ class DsndBrowser(tk.Tk):
         if chosen:
             self.root_dir.set(chosen)
             self.refresh_dir()
+
+    def choose_file(self) -> None:
+        filetypes = [("DSND Files", "*.dsnd *.dsnds"), ("All Files", "*")]
+        chosen = filedialog.askopenfilename(
+            title="Open DSND File",
+            initialdir=self.root_dir.get() or str(Path.cwd()),
+            filetypes=filetypes,
+        )
+        if not chosen:
+            return
+        self.root_dir.set(str(Path(chosen).parent))
+        self.refresh_dir()
+        self.listbox.selection_clear(0, tk.END)
+        for idx, entry in enumerate(self._entries):
+            if entry == Path(chosen):
+                self.listbox.selection_set(idx)
+                self.listbox.see(idx)
+                break
+        self.open_selected()
 
     def _adjust_volume(self, delta: int) -> None:
         new_vol = max(0, min(100, self.volume_var.get() + delta))
@@ -415,6 +452,7 @@ class DsndBrowser(tk.Tk):
             self._selected_track = track
             self.info.set(
                 f"File: {path.name}\n"
+                f"Path: {path}\n"
                 f"Rate: {track.rate_hz} Hz\n"
                 f"Stereo: {'yes' if track.stereo else 'no'}\n"
                 f"16-bit: {'yes' if track.is_16bit else 'no'}\n"
@@ -422,6 +460,7 @@ class DsndBrowser(tk.Tk):
                 f"Loop start: {track.loop_start_frames}"
             )
         except Exception as exc:
+            self._selected_track = None
             self.info.set(f"File: {path.name}\nNot a valid DSND: {exc}")
 
     def refresh_dir(self) -> None:
