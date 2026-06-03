@@ -35,6 +35,10 @@
 // ---------------------------------------------------------------------------
 
 #include <nds/ipc.h>   // REG_IPC_FIFO_TX, REG_IPC_FIFO_RX, REG_IPC_FIFO_CR
+#include "logger.h"
+#ifndef ARM7
+#include <nds.h>
+#endif
                        // IPC_FIFO_ENABLE, IPC_FIFO_SEND_FULL,
                        // IPC_FIFO_RECV_EMPTY  — present in all libnds versions
 
@@ -55,7 +59,19 @@ static inline void fifoSendValue32(u32 /*channel*/, u32 value)
 
     // Spin while the send FIFO is full (16 entries; should never spin in practice
     // because the ARM7 drains entries faster than the ARM9 can fill them at 60 fps).
-    while (REG_IPC_FIFO_CR & IPC_FIFO_SEND_FULL);
+    unsigned int _spin = 0;
+    while (REG_IPC_FIFO_CR & IPC_FIFO_SEND_FULL) {
+        // Emit a periodic diagnostic message on ARM9 if the FIFO appears stuck.
+        // Keep the behavior identical on ARM7 (no prints) to avoid IRQ-side IO.
+#ifndef ARM7
+        if ((++_spin & 0x1FFFF) == 0) {
+            // Log to file and console
+            logger_printf("ipc_fifo: send FIFO full, spinning...");
+        }
+#else
+        ++_spin;
+#endif
+    }
 
     REG_IPC_FIFO_TX = value;
 }

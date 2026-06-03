@@ -47,6 +47,7 @@ from tkinter import filedialog, messagebox, ttk
 DSND_MAGIC = b"DSND"
 DSND_FLAG_STEREO = 1 << 0
 DSND_FLAG_16BIT = 1 << 2
+DSND_FLAG_ADPCM  = 1 << 3
 
 PLAYER_COMMANDS = ["ffplay", "avplay"]
 
@@ -86,12 +87,25 @@ def _read_dsnd(path: Path) -> DsndTrack:
     rate_hz = RATE_DIV_TO_HZ[rate_div]
     stereo = bool(flags & DSND_FLAG_STEREO)
     is_16bit = bool(flags & DSND_FLAG_16BIT)
+    is_adpcm  = bool(flags & DSND_FLAG_ADPCM)
 
-    pcm = raw[12:]
-    if not pcm:
-        raise ValueError("No PCM data in file.")
+    payload = raw[12:]
+    if not payload:
+        raise ValueError("No payload data in file.")
 
-    # Basic integrity checks against the format the editor writes.
+    # ADPCM handling: the DSND ADPCM payload uses a 4-byte preamble followed
+    # by 4-bit samples (nibbles). The byte-count is therefore 4 + ceil(nibbles/2).
+    if is_adpcm:
+        # For now we only detect ADPCM and report it; decoding not implemented.
+        data_bytes = 4 + (sample_count + 1) // 2
+        if len(payload) < data_bytes:
+            raise ValueError(
+                f"ADPCM payload is truncated: expected at least {data_bytes} bytes, got {len(payload)}."
+            )
+        raise ValueError("IMA-ADPCM payload detected — decoder not implemented in this player.")
+
+    # Basic integrity checks for PCM formats
+    pcm = payload
     bytes_per_sample = 2 if is_16bit else 1
     if stereo:
         expected_samples = sample_count

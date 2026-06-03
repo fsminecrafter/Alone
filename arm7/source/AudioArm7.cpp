@@ -17,6 +17,11 @@
 #include <calico.h>
 #include <nds.h>
 #include "ipc_fifo.h"
+#ifndef AUDIO_CMD_PING
+#define AUDIO_CMD_PING      0x10
+#define AUDIO_CMD_PING_ACK  0x11
+#define AUDIO_CMD_DEBUG     0x20  // ARM7 → ARM9 debug message
+#endif
 #include <string.h>
 
 // ---- shared constants (mirrored from AudioSystem.h) ----
@@ -134,6 +139,10 @@ static void audioFifoHandler(u32 value, void* /*userdata*/)
     u8  vol = (u8)(value & 0x7F);
 
     switch (cmd) {
+        case AUDIO_CMD_PING:
+            // Reply immediately so ARM9 can detect that ARM7's FIFO handler is alive.
+            fifoSendValue32(FIFO_USER_01, (u32)(AUDIO_CMD_PING_ACK << 24));
+            break;
         case AUDIO_CMD_PLAY:
             s_pendingChannel   = ch;
             s_awaitingPlayInfo = true;
@@ -159,6 +168,13 @@ static void arm7AudioInit()
     fifoSetValue32Handler(FIFO_USER_01, audioFifoHandler, nullptr);
 }
 
+// Send a debug message from ARM7 to ARM9 via FIFO (for early startup diagnostics).
+// msg is a single u16 status code that ARM9 can log.
+static void arm7DebugMsg(u16 msg)
+{
+    fifoSendValue32(FIFO_USER_01, (u32)(AUDIO_CMD_DEBUG << 24) | (u32)msg);
+}
+
 // ---------------------------------------------------------------------------
 // ARM7 main  —  calico build
 //
@@ -173,36 +189,47 @@ int main()
 {
     // Read NVRAM settings (firmware language, username, etc.)
     envReadNvramSettings();
+    arm7DebugMsg(0x0001);  // NVRAM OK
 
     // Extended keypad server (X, Y, hinge buttons via SPI)
     keypadStartExtServer();
+    arm7DebugMsg(0x0002);  // Keypad OK
 
     // VBlank IRQ — required by calico's scheduler
     lcdSetIrqMask(DISPSTAT_IE_ALL, DISPSTAT_IE_VBLANK);
     irqEnable(IRQ_VBLANK);
+    arm7DebugMsg(0x0003);  // VBlank IRQ OK
 
     // Real-time clock
     rtcInit();
     rtcSyncTime();
+    arm7DebugMsg(0x0004);  // RTC OK
 
     // Power management — pmMainLoop() returns false when the system shuts down
     pmInit();
+    arm7DebugMsg(0x0005);  // PM OK
 
     // Block device (SD / slot-2) — needed even if we don't use it on ARM7
     blkInit();
+    arm7DebugMsg(0x0006);  // Block device OK
 
     // Touch screen
     touchInit();
     touchStartServer(80, MAIN_THREAD_PRIO);
+    arm7DebugMsg(0x0007);  // Touch server OK
 
     // Our audio FIFO handler
     arm7AudioInit();
+    arm7DebugMsg(0x0008);  // Audio FIFO handler OK
+
+    arm7DebugMsg(0x0099);  // About to enter pmMainLoop
 
     // Calico idle loop — keeps the ARM7 alive and services all IRQs/threads
     while (pmMainLoop()) {
         threadWaitForVBlank();
     }
 
+    arm7DebugMsg(0xFFFF);  // ARM7 exiting main loop
     return 0;
 }
 

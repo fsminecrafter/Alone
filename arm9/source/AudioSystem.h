@@ -63,6 +63,9 @@
 #define AUDIO_CMD_STOP      0x02
 #define AUDIO_CMD_VOL       0x03
 #define AUDIO_CMD_STOP_ALL  0x04
+// Ping/ack for diagnostics
+#define AUDIO_CMD_PING      0x10
+#define AUDIO_CMD_PING_ACK  0x11
 
 #define AUDIO_PACK(cmd, ch, vol) \
     (u32)(((cmd)<<24) | ((ch)<<16) | ((vol)&0x7F))

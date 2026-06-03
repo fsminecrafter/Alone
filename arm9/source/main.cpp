@@ -7,6 +7,7 @@
 #include "ObjectSystem.h"
 #include "AudioSystem.h"
 #include "lighting.h"
+#include "ipc_fifo.h"
 
 float g_lightX, g_lightY, g_lightZ;
 float g_ambient, g_diffuse;
@@ -225,33 +226,55 @@ static bool runSwapCreation(MemoryManager& mem)
 // ---------------------------------------------------------------------------
 int main()
 {
-    setupScreens();
-    setup3D();
-    initLight();
-    applyTimeOfDay();
-
-    fatInitDefault();
+    // Initialize console FIRST before anything else so we can see output
+    // SKIP fatInitDefault for now to test if that's the hang
+    // fatInitDefault();
     consoleInit(&bottomConsole, 3, BgType_Text4bpp, BgSize_T_256x256,
                 31, 0, false, true);
     consoleSelect(&bottomConsole);
+    
+    iprintf("STAGE 0: Console init OK (FAT SKIPPED)\n");
+    
+    iprintf("STAGE 1: About to call setupScreens\n");
+    setupScreens();
+    iprintf("STAGE 1: setupScreens OK\n");
+    
+    iprintf("STAGE 2: About to call setup3D\n");
+    setup3D();
+    iprintf("STAGE 2: setup3D OK\n");
+    
+    // Skip initLight() and applyTimeOfDay() to isolate hang
+    // initLight();
+    // applyTimeOfDay();
+    
+    // Drain any debug messages from ARM7 startup before initializing logger.
+    // ARM7 sends 0x20 command with u16 status code.
+    for (int i = 0; i < 100; i++) {
+        if (fifoCheckValue32(FIFO_USER_01)) {
+            u32 v = fifoGetValue32(FIFO_USER_01);
+            u8 cmd = (u8)((v >> 24) & 0xFF);
+            u16 status = (u16)(v & 0xFFFF);
+            if (cmd == 0x20) {  // AUDIO_CMD_DEBUG
+                iprintf("ARM7 debug: 0x%04X\n", (unsigned)status);
+            }
+        } else {
+            break;  // No more messages waiting
+        }
+    }
+    
+    // Initialize persistent logger (writes to fat:/Alone/log.txt)
+    // logger_init();  // SKIP - depends on FAT
 
     static MemoryManager mem;
-    mem.setSwappiness(30);
+    // mem.setSwappiness(30);  // SKIP memory manager for now
 
-    if (!mem.checkIfSwapExists()) {
-        if (!runSwapCreation(mem)) return 0;
-    }
-    if (!mem.openSwap()) {
-        consoleClear();
-        iprintf("Swap open failed\n");
-        while (1) swiWaitForVBlank();
-    }
-
-    // Initialise audio IPC before any world loads (must run before ARM7 sends).
-    g_audio.init();
-
+    iprintf("STAGE 3: About to check world.loadWorld\n");
+    
     static ChunkLibrary world(&mem);
-    bool worldLoaded = world.loadWorld("fat:/Alone/world.world");
+    // bool worldLoaded = world.loadWorld("fat:/Alone/world.world");  // SKIP - depends on FAT
+    bool worldLoaded = false;
+    
+    iprintf("STAGE 4: Skipped world load, worldLoaded=%d\n", worldLoaded);
 
     consoleClear();
     if (worldLoaded) {
@@ -300,7 +323,8 @@ int main()
     }
 
     for (int i = 0; i < 180; i++) swiWaitForVBlank();
-    consoleClear();
+    // DON'T clear console - keep it visible for diagnostics
+    iprintf("\n=== Main loop starting ===\n");
 
     float px = 0.0f, pz = 0.0f;
     if (worldLoaded)
@@ -315,6 +339,12 @@ int main()
     while (1) {
         scanKeys();
         u32 held = keysHeld();
+        
+        // Diagnostic: print every 120 frames (~2 seconds)
+        if ((frame % 120) == 0) {
+            iprintf("Frame %d: cam=[%.1f, %.1f] vel=[%.2f, %.2f]\n",
+                    frame, px, pz, vx, vz);
+        }
         u32 down = keysDown();
         if (held & KEY_START) break;
 
