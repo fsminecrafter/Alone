@@ -1,56 +1,34 @@
-// ---------------------------------------------------------------------------
-// AudioArm7.cpp  —  ARM7 audio back-end  (calico build)
-// Compiled ONLY for the ARM7 sub-project (Makefile.arm7, -DARM7).
-//
-// Supports:
-//   • PCM8  (signed 8-bit)
-//   • PCM16 (signed 16-bit)
-//   • IMA-ADPCM (4-bit, decoded by NDS hardware — SOUND_FORMAT_ADPCM)
-//
-// For streaming channels the ARM9 keeps a ring buffer in EWRAM filled from SD.
-// The ARM7 plays it in SOUND_REPEAT mode; loopStart=0 wraps at buffer start.
-// No change needed here for streaming — the ARM7 just sees a looping buffer.
-// ---------------------------------------------------------------------------
-
 #ifdef ARM7
 
 #include <calico.h>
 #include <nds.h>
 #include "ipc_fifo.h"
-#ifndef AUDIO_CMD_PING
-#define AUDIO_CMD_PING      0x10
-#define AUDIO_CMD_PING_ACK  0x11
-#define AUDIO_CMD_DEBUG     0x20  // ARM7 → ARM9 debug message
-#endif
-#include <string.h>
 
-// ---- shared constants (mirrored from AudioSystem.h) ----
 #define AUDIO_CMD_PLAY      0x01
 #define AUDIO_CMD_STOP      0x02
 #define AUDIO_CMD_VOL       0x03
 #define AUDIO_CMD_STOP_ALL  0x04
+#define AUDIO_CMD_PING      0x10
+#define AUDIO_CMD_PING_ACK  0x11
+#define AUDIO_CMD_DEBUG     0x20
 #define AUDIO_MAX_CHANNELS  16
 
-// DSND flags (must match AudioSystem.h)
 #define DSND_FLAG_STEREO    (1<<0)
 #define DSND_FLAG_LOOP      (1<<1)
 #define DSND_FLAG_16BIT     (1<<2)
 #define DSND_FLAG_ADPCM     (1<<3)
 
-// NDS hardware SCHANNEL format bits (SCHANNEL_CR bits 29-30)
-// These may already be defined in nds/arm7/audio.h; guard against redefinition.
-#ifndef SOUND_FORMAT_PSG
-#define SOUND_FORMAT_PSG    (3 << 29)
-#endif
-// ADPCM = 0b10 in bits 29-30
 #define SOUND_FORMAT_ADPCM_NDS  (2 << 29)
+
+// Use PxiChannel_User0 for audio commands
+#define AUDIO_PXI_CHANNEL   PxiChannel_User0
 
 struct Arm7PlayInfo {
     u32  dataAddr;
     u32  sampleCount;
     u16  loopStart;
     u8   rateDiv;
-    u8   flags;     // DSND_FLAG_*
+    u8   flags;
     u8   volume;
     u8   channelId;
     u16  pad;
@@ -58,9 +36,6 @@ struct Arm7PlayInfo {
 
 static const u32 kRateHz[4] = { 32768, 16384, 8192, 5512 };
 
-// ---------------------------------------------------------------------------
-// Channel helpers
-// ---------------------------------------------------------------------------
 static void arm7StopChannel(int ch)
 {
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
@@ -77,12 +52,8 @@ static void arm7StartChannel(int ch, const Arm7PlayInfo* info)
     bool is16    = (!isAdpcm) && ((info->flags & DSND_FLAG_16BIT) != 0);
     bool loop    = (info->flags & DSND_FLAG_LOOP) != 0;
 
-    // For ADPCM the hardware counts nibbles as the sample unit, but
-    // SCHANNEL_LENGTH still takes 32-bit words covering the data.
-    // sampleCount in ADPCM = number of nibbles; bytes = sampleCount/2 (+4 preamble).
     u32 lengthWords;
     if (isAdpcm) {
-        // Byte count = 4 (preamble) + nibbles/2; round up to 32-bit words
         u32 dataBytes = 4 + (info->sampleCount + 1) / 2;
         lengthWords   = (dataBytes + 3) / 4;
     } else if (is16) {
@@ -96,15 +67,14 @@ static void arm7StartChannel(int ch, const Arm7PlayInfo* info)
     SCHANNEL_REPEAT_POINT(ch) = info->loopStart;
     SCHANNEL_LENGTH(ch)       = lengthWords;
 
-    // Build CR: format bits determine decoder
     u32 fmtBits;
-    if (isAdpcm)      fmtBits = SOUND_FORMAT_ADPCM_NDS;
-    else if (is16)    fmtBits = SOUND_FORMAT_16BIT;
-    else              fmtBits = SOUND_FORMAT_8BIT;
+    if (isAdpcm)   fmtBits = SOUND_FORMAT_ADPCM_NDS;
+    else if (is16) fmtBits = SOUND_FORMAT_16BIT;
+    else           fmtBits = SOUND_FORMAT_8BIT;
 
     u32 cr = SCHANNEL_ENABLE
            | SOUND_VOL(info->volume)
-           | SOUND_PAN(64)          // centre
+           | SOUND_PAN(64)
            | fmtBits
            | (loop ? SOUND_REPEAT : SOUND_ONE_SHOT);
 
@@ -121,27 +91,33 @@ static void arm7SetVolume(int ch, u8 vol)
 }
 
 // ---------------------------------------------------------------------------
-// FIFO handler
+// PXI handler — calico calls this from IRQ context when ARM9 sends a packet
+// The 26-bit immediate from pxiPacketGetImmediate() contains our command word.
+// For PLAY we need a second word (the Arm7PlayInfo pointer) sent as extended.
 // ---------------------------------------------------------------------------
 static bool s_awaitingPlayInfo = false;
 static int  s_pendingChannel   = 0;
 
-static void audioFifoHandler(u32 value, void* /*userdata*/)
+static void audioPxiHandler(void* /*user*/, u32 packet)
 {
+    // Extract our 26-bit payload — upper bits are cmd/ch/vol packed the same
+    // way as before: cmd=bits25-18, ch=bits17-14, vol=bits6-0
+    u32 value = pxiPacketGetImmediate(packet);
+
     if (s_awaitingPlayInfo) {
         s_awaitingPlayInfo = false;
+        // value IS the pointer (sent as the immediate of a second packet)
         arm7StartChannel(s_pendingChannel, (const Arm7PlayInfo*)value);
         return;
     }
 
-    u8  cmd = (u8)((value >> 24) & 0xFF);
-    int ch  = (int)((value >> 16) & 0x0F);
+    u8  cmd = (u8)((value >> 18) & 0xFF);
+    int ch  = (int)((value >> 14) & 0x0F);
     u8  vol = (u8)(value & 0x7F);
 
     switch (cmd) {
         case AUDIO_CMD_PING:
-            // Reply immediately so ARM9 can detect that ARM7's FIFO handler is alive.
-            fifoSendValue32(FIFO_USER_01, (u32)(AUDIO_CMD_PING_ACK << 24));
+            pxiReply(AUDIO_PXI_CHANNEL, AUDIO_CMD_PING_ACK);
             break;
         case AUDIO_CMD_PLAY:
             s_pendingChannel   = ch;
@@ -162,75 +138,32 @@ static void audioFifoHandler(u32 value, void* /*userdata*/)
     }
 }
 
-static void arm7AudioInit()
-{
-    REG_SOUNDCNT = SOUND_ENABLE | SOUND_VOL(127);
-    fifoSetValue32Handler(FIFO_USER_01, audioFifoHandler, nullptr);
-}
-
-// Send a debug message from ARM7 to ARM9 via FIFO (for early startup diagnostics).
-// msg is a single u16 status code that ARM9 can log.
-static void arm7DebugMsg(u16 msg)
-{
-    fifoSendValue32(FIFO_USER_01, (u32)(AUDIO_CMD_DEBUG << 24) | (u32)msg);
-}
-
-// ---------------------------------------------------------------------------
-// ARM7 main  —  calico build
-//
-// The full calico subsystem startup is required.  Skipping any of these calls
-// (especially pmInit / pmMainLoop) causes the ARM7 to exit its idle loop and
-// halt, which kills all IPC including our audio FIFO handler.
-//
-// soundStartServer() is intentionally NOT called — we write SCHANNEL registers
-// directly.  Calling it alongside direct register writes causes conflicts.
-// ---------------------------------------------------------------------------
 int main()
 {
-    // Read NVRAM settings (firmware language, username, etc.)
     envReadNvramSettings();
-    arm7DebugMsg(0x0001);  // NVRAM OK
-
-    // Extended keypad server (X, Y, hinge buttons via SPI)
     keypadStartExtServer();
-    arm7DebugMsg(0x0002);  // Keypad OK
-
-    // VBlank IRQ — required by calico's scheduler
     lcdSetIrqMask(DISPSTAT_IE_ALL, DISPSTAT_IE_VBLANK);
     irqEnable(IRQ_VBLANK);
-    arm7DebugMsg(0x0003);  // VBlank IRQ OK
-
-    // Real-time clock
     rtcInit();
     rtcSyncTime();
-    arm7DebugMsg(0x0004);  // RTC OK
-
-    // Power management — pmMainLoop() returns false when the system shuts down
     pmInit();
-    arm7DebugMsg(0x0005);  // PM OK
-
-    // Block device (SD / slot-2) — needed even if we don't use it on ARM7
     blkInit();
-    arm7DebugMsg(0x0006);  // Block device OK
-
-    // Touch screen
     touchInit();
     touchStartServer(80, MAIN_THREAD_PRIO);
-    arm7DebugMsg(0x0007);  // Touch server OK
 
-    // Our audio FIFO handler
-    arm7AudioInit();
-    arm7DebugMsg(0x0008);  // Audio FIFO handler OK
+    REG_SOUNDCNT = SOUND_ENABLE | SOUND_VOL(127);
 
-    arm7DebugMsg(0x0099);  // About to enter pmMainLoop
+    // Register our handler on calico's PXI channel
+    pxiSetHandler(AUDIO_PXI_CHANNEL, audioPxiHandler, nullptr);
 
-    // Calico idle loop — keeps the ARM7 alive and services all IRQs/threads
+    // Signal ARM9 we are ready
+    pxiSend(AUDIO_PXI_CHANNEL, (AUDIO_CMD_DEBUG << 18) | 0x0099);
+
     while (pmMainLoop()) {
         threadWaitForVBlank();
     }
 
-    arm7DebugMsg(0xFFFF);  // ARM7 exiting main loop
     return 0;
 }
 
-#endif  // ARM7
+#endif // ARM7

@@ -226,26 +226,19 @@ static bool runSwapCreation(MemoryManager& mem)
 // ---------------------------------------------------------------------------
 int main()
 {
-    // Initialize console FIRST before anything else so we can see output
-    // SKIP fatInitDefault for now to test if that's the hang
-    // fatInitDefault();
+    fatInitDefault();
+    setupScreens();
     consoleInit(&bottomConsole, 3, BgType_Text4bpp, BgSize_T_256x256,
                 31, 0, false, true);
     consoleSelect(&bottomConsole);
-    
-    iprintf("STAGE 0: Console init OK (FAT SKIPPED)\n");
-    
-    iprintf("STAGE 1: About to call setupScreens\n");
-    setupScreens();
-    iprintf("STAGE 1: setupScreens OK\n");
-    
-    iprintf("STAGE 2: About to call setup3D\n");
+    iprintf("Boot OK\n");
+    for (int i = 0; i < 60; i++) swiWaitForVBlank();  // can you see this?
+
     setup3D();
-    iprintf("STAGE 2: setup3D OK\n");
     
     // Skip initLight() and applyTimeOfDay() to isolate hang
-    // initLight();
-    // applyTimeOfDay();
+    initLight();
+    applyTimeOfDay();
     
     // Drain any debug messages from ARM7 startup before initializing logger.
     // ARM7 sends 0x20 command with u16 status code.
@@ -263,18 +256,29 @@ int main()
     }
     
     // Initialize persistent logger (writes to fat:/Alone/log.txt)
-    // logger_init();  // SKIP - depends on FAT
+    iprintf("Initializing logger...\n");
+    logger_init();
+    iprintf("Logger OK\n");
 
     static MemoryManager mem;
-    // mem.setSwappiness(30);  // SKIP memory manager for now
+    mem.setSwappiness(30);
 
     iprintf("STAGE 3: About to check world.loadWorld\n");
     
-    static ChunkLibrary world(&mem);
-    // bool worldLoaded = world.loadWorld("fat:/Alone/world.world");  // SKIP - depends on FAT
-    bool worldLoaded = false;
+    // Check if world file exists
+    FILE* testFd = fopen("fat:/Alone/world.world", "rb");
+    if (testFd) {
+        fclose(testFd);
+        iprintf("world.world EXISTS on SD\n");
+    } else {
+        iprintf("ERROR: world.world NOT FOUND\n");
+        iprintf("Check fat:/Alone/ path\n");
+    }
     
-    iprintf("STAGE 4: Skipped world load, worldLoaded=%d\n", worldLoaded);
+    static ChunkLibrary world(&mem);
+    bool worldLoaded = world.loadWorld("fat:/Alone/world.world");
+    
+    iprintf("STAGE 4: world load result=%d\n", worldLoaded);
 
     consoleClear();
     if (worldLoaded) {
@@ -389,7 +393,9 @@ int main()
             float sunrise, daylight;
             getSeasonParams(sunrise, daylight);
 
+            // Clear and redraw full menu
             consoleClear();
+            
             iprintf("%02d:00  A/B=hr  X/Y=ssn\n", s_hour);
             iprintf("%s\n", seasonName(s_season));
             iprintf("Rise:%d:%02d Set:%d:%02d\n",
@@ -406,7 +412,36 @@ int main()
                     (unsigned long)world.totalChunkCount(),
                     (unsigned long)world.lastFramePolys());
             }
-            iprintf("RAM:%lu\n", (unsigned long)mem.getFreeRAM());
+            iprintf("\n");
+            
+            // ---- Audio Menu Section ----
+            iprintf("=== MUSIC ===\n");
+            if (g_audio.getPlaylistTrackCount() > 0) {
+                u8 trackIdx = g_audio.getCurrentTrackIndex();
+                u32 posSec = g_audio.getPlaybackPositionSeconds();
+                int sampleRate, bits;
+                bool isAdpcm;
+                g_audio.getTrackFormatInfo(sampleRate, bits, isAdpcm);
+                
+                const char* trackName = g_audio.getCurrentTrackFilename();
+                const char* slashPos = trackName ? strrchr(trackName, '/') : nullptr;
+                if (slashPos) trackName = slashPos + 1;
+                if (!trackName) trackName = "???";
+                
+                iprintf("Track: [%d/%d] %s\n",
+                    (int)trackIdx+1, (int)g_audio.getPlaylistTrackCount(),
+                    trackName);
+                iprintf("Time: %us\n", (unsigned)posSec);
+                if (sampleRate > 0) {
+                    iprintf("Format: %dHz %s\n",
+                        sampleRate,
+                        isAdpcm ? "IMA-ADPCM" : (bits == 16 ? "PCM16" : "PCM8"));
+                }
+            } else {
+                iprintf("(No playlist)\n");
+            }
+            
+            iprintf("\nRAM:%lu\n", (unsigned long)mem.getFreeRAM());
         }
         frame++;
     }

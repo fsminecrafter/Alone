@@ -32,7 +32,8 @@ static void sendFifoPlay(int ch)
     DC_FlushRange(&s_arm7PlayInfos[ch], sizeof(Arm7PlayInfo));
     fifoSendValue32(FIFO_USER_01,
         AUDIO_PACK(AUDIO_CMD_PLAY, ch, s_arm7PlayInfos[ch].volume));
-    fifoSendValue32(FIFO_USER_01, (u32)&s_arm7PlayInfos[ch]);
+    // Send pointer as separate raw packet
+    fifoSendPtr(FIFO_USER_01, (u32)&s_arm7PlayInfos[ch]);
 }
 
 static void sendFifoVol(int ch, u8 vol)
@@ -594,4 +595,59 @@ int AudioSystem::findFreeChannel(bool music)
                 && !channels[i].streaming)
             return i;
     return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Public: Debug info getters
+// ---------------------------------------------------------------------------
+const char* AudioSystem::getCurrentTrackFilename() const
+{
+    if (currentTrack >= trackCount) return "";
+    return tracks[currentTrack].filename;
+}
+
+u32 AudioSystem::getPlaybackPositionSamples() const
+{
+    // For streaming music (channel 1), calculate sample position from file position
+    if (channels[1].streaming && channels[1].streamBuf) {
+        if (channels[1].streamIsAdpcm) {
+            // ADPCM: 2 samples per byte, but skip the 4-byte preamble on first read
+            u32 streamBytes = channels[1].streamFilePos;
+            if (streamBytes > 0) streamBytes -= 4;  // Account for preamble
+            return (streamBytes * 2);
+        } else {
+            // PCM: calculate from byte position
+            u32 bytesPerSample = channels[1].streamIs16 ? 2 : 1;
+            return channels[1].streamFilePos / bytesPerSample;
+        }
+    }
+    return 0;
+}
+
+u32 AudioSystem::getPlaybackPositionSeconds() const
+{
+    const u32 rateDivTable[] = { 32768, 16384, 8192, 5512 };
+    if (currentTrack >= trackCount) return 0;
+    
+    // Get the streaming channel's rate info
+    if (channels[1].streaming) {
+        u32 sampleRate = rateDivTable[channels[1].streamRateDiv];
+        u32 samples = getPlaybackPositionSamples();
+        return samples / sampleRate;
+    }
+    return 0;
+}
+
+void AudioSystem::getTrackFormatInfo(int& outSampleRate, int& outBits, bool& outIsAdpcm) const
+{
+    outSampleRate = 0;
+    outBits = 0;
+    outIsAdpcm = false;
+
+    if (!channels[1].streaming) return;
+
+    const u32 rateDivTable[] = { 32768, 16384, 8192, 5512 };
+    outSampleRate = rateDivTable[channels[1].streamRateDiv];
+    outBits = channels[1].streamIs16 ? 16 : 8;
+    outIsAdpcm = channels[1].streamIsAdpcm;
 }

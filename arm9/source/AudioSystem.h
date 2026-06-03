@@ -218,6 +218,14 @@ public:
 
     bool isChannelActive(int ch) const;
 
+    // ---- Debug info getters ----
+    u8   getPlaylistTrackCount() const { return trackCount; }
+    u8   getCurrentTrackIndex() const { return currentTrack; }
+    const char* getCurrentTrackFilename() const;
+    u32  getPlaybackPositionSamples() const;
+    u32  getPlaybackPositionSeconds() const;
+    void getTrackFormatInfo(int& outSampleRate, int& outBits, bool& outIsAdpcm) const;
+
 private:
     AudioChannel   channels[AUDIO_MAX_CHANNELS];
     RuntimeEmitter emitters[AUDIO_MAX_EMITTERS];

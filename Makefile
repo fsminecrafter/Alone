@@ -38,6 +38,7 @@ TARGET := Alone
 
 # Default: build everything then pack the ROM
 all: $(TARGET).nds
+	@echo "  BUILD COMPLETED: $@"
 
 #---------------------------------------------------------------------------------
 # ROM assembly

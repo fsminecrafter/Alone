@@ -51,47 +51,56 @@ bool ObjectSystem::loadFromWorld(FILE* fd)
     // --- Objects ---
     ObjectTableHeader oh;
     if (fread(&oh, sizeof(oh), 1, fd) != 1) return true;
-    if (memcmp(oh.magic, "OBJS", 4) != 0)   return true;  // old format
+    
+    // Check if this is actually an OBJS header or an old format
+    if (memcmp(oh.magic, "OBJS", 4) == 0) {
+        // v2 format with objects
+        objCount = (oh.objectCount < OBJ_MAX_OBJECTS) ? oh.objectCount : OBJ_MAX_OBJECTS;
+        for (u16 i = 0; i < objCount; i++) {
+            ObjectEntry oe;
+            if (fread(&oe, sizeof(oe), 1, fd) != 1) return false;
+            WorldObject& o = objects[i];
+            o.id      = oe.id;
+            memcpy(o.name, oe.name, OBJ_MAX_NAME);
+            o.x       = (float)oe.worldX / 4096.0f;
+            o.y       = (float)oe.worldY / 4096.0f;
+            o.z       = (float)oe.worldZ / 4096.0f;
+            o.rotY    = 0.0f;
+            o.tagMask = oe.tagMask;
+            o.flags   = oe.flags;
+            o.active  = (oe.flags & OBJ_FLAG_ACTIVE) != 0;
+            o.scriptCount = 0;
+            memset(o.scripts, 0, sizeof(o.scripts));
+        }
 
-    objCount = (oh.objectCount < OBJ_MAX_OBJECTS) ? oh.objectCount : OBJ_MAX_OBJECTS;
-    for (u16 i = 0; i < objCount; i++) {
-        ObjectEntry oe;
-        if (fread(&oe, sizeof(oe), 1, fd) != 1) return false;
-        WorldObject& o = objects[i];
-        o.id      = oe.id;
-        memcpy(o.name, oe.name, OBJ_MAX_NAME);
-        o.x       = (float)oe.worldX / 4096.0f;
-        o.y       = (float)oe.worldY / 4096.0f;
-        o.z       = (float)oe.worldZ / 4096.0f;
-        o.rotY    = 0.0f;
-        o.tagMask = oe.tagMask;
-        o.flags   = oe.flags;
-        o.active  = (oe.flags & OBJ_FLAG_ACTIVE) != 0;
-        o.scriptCount = 0;
-        memset(o.scripts, 0, sizeof(o.scripts));
-    }
+        // --- Tags ---
+        TagTableHeader th;
+        if (fread(&th, sizeof(th), 1, fd) != 1) return true;
+        if (memcmp(th.magic, "TAGS", 4) != 0)   return true;
 
-    // --- Tags ---
-    TagTableHeader th;
-    if (fread(&th, sizeof(th), 1, fd) != 1) return true;
-    if (memcmp(th.magic, "TAGS", 4) != 0)   return true;
-
-    tagCount = (th.tagCount < OBJ_MAX_TAGS) ? th.tagCount : OBJ_MAX_TAGS;
-    for (u8 t = 0; t < tagCount; t++) {
-        TagEntry te;
-        if (fread(&te, sizeof(te), 1, fd) != 1) return false;
-        RuntimeTag& rt = tags[t];
-        rt.index = te.tagIndex;
-        memcpy(rt.name, te.name, OBJ_MAX_TAG_NAME);
-        rt.memberCount = 0;
-        u16 count = (te.memberCount < OBJ_MAX_OBJECTS) ? te.memberCount : OBJ_MAX_OBJECTS;
-        for (u16 m = 0; m < te.memberCount; m++) {
-            u16 oid;
-            if (fread(&oid, sizeof(u16), 1, fd) != 1) return false;
-            if (m < count) {
-                rt.members[rt.memberCount++] = oid;
+        tagCount = (th.tagCount < OBJ_MAX_TAGS) ? th.tagCount : OBJ_MAX_TAGS;
+        for (u8 t = 0; t < tagCount; t++) {
+            TagEntry te;
+            if (fread(&te, sizeof(te), 1, fd) != 1) return false;
+            RuntimeTag& rt = tags[t];
+            rt.index = te.tagIndex;
+            memcpy(rt.name, te.name, OBJ_MAX_TAG_NAME);
+            rt.memberCount = 0;
+            u16 count = (te.memberCount < OBJ_MAX_OBJECTS) ? te.memberCount : OBJ_MAX_OBJECTS;
+            for (u16 m = 0; m < te.memberCount; m++) {
+                u16 oid;
+                if (fread(&oid, sizeof(u16), 1, fd) != 1) return false;
+                if (m < count) {
+                    rt.members[rt.memberCount++] = oid;
+                }
             }
         }
+    } else if (memcmp(oh.magic, "AUDI", 4) == 0) {
+        // No OBJS/TAGS, but AUDI is right here; seek back to read it
+        fseek(fd, -(long)sizeof(oh), SEEK_CUR);
+    } else {
+        // Old format with no v2 sections
+        return true;
     }
 
     // --- Audio ---

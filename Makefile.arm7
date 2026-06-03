@@ -1,17 +1,5 @@
 #---------------------------------------------------------------------------------
-# Makefile.arm7  —  ARM7 sub-project for Alone
-#
-# Compiles AudioArm7.cpp (and any other arm7/source/*.cpp files) with ARM7
-# settings and links against lnds7.  The resulting ELF is written to
-# arm7/arm7.elf so the top-level Makefile can pass it to ndstool via -7.
-#
-# Key differences from the ARM9 build
-# ------------------------------------
-#   • Architecture: armv4t / arm7tdmi  (the ARM7TDMI core in the NDS)
-#   • Thumb interworking: -mthumb-interwork (ARM7 calls BIOS in ARM state)
-#   • Library:       lnds7  (NOT lnds9 — completely separate ABI)
-#   • No -lfat:      the ARM7 never touches the SD card
-#   • -DARM7:        guards AudioArm7.cpp code with #ifdef ARM7
+# Makefile.arm7  —  ARM7 sub-project for Alone (calico build)
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 
@@ -22,62 +10,58 @@ endif
 include $(DEVKITARM)/ds_rules
 
 #---------------------------------------------------------------------------------
-TARGET		:= arm7
-BUILD		:= build_arm7
-SOURCES		:= arm7/source
-INCLUDES	:= common/include $(BUILD)
+TARGET      := arm7
+BUILD       := build_arm7
+SOURCES     := arm7/source
+INCLUDES    := common/include $(BUILD)
+
+CALICO      := /opt/devkitpro/calico
+LIBNDS_DIR  := /opt/devkitpro/libnds
 
 #---------------------------------------------------------------------------------
-# ARM7TDMI is ARMv4T.  -mthumb-interwork is mandatory because BIOS calls
-# (swiIntrWait etc.) are ARM-state routines and the linker must generate
-# BX-safe veneers for any Thumb→ARM transitions.
-# Do NOT use -mthumb alone here; it breaks the BIOS call convention.
-#---------------------------------------------------------------------------------
-ARCH		:= -march=armv4t -mtune=arm7tdmi -mthumb -mthumb-interwork
+ARCH        := -march=armv4t -mtune=arm7tdmi -mthumb -mthumb-interwork
 
-CFLAGS		:= -g -Wall -O2 \
-		   $(ARCH)
-CFLAGS		+= $(INCLUDE) -DARM7
+CFLAGS      := -g -Wall -O2 \
+               $(ARCH)
+CFLAGS      += $(INCLUDE) -DARM7
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
+CXXFLAGS    := $(CFLAGS) -fno-rtti -fno-exceptions
 
-ASFLAGS		:= -g $(ARCH)
-LDFLAGS		:= -specs=ds_arm7.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+ASFLAGS     := -g $(ARCH)
+LDFLAGS     := -specs=ds_arm7.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-# ARM7 links only against lnds7.  No FAT, no C++ runtime beyond what
-# -fno-rtti/-fno-exceptions leaves in libgcc.
-LIBS		:= -lnds7
+LIBS        := -lcalico_ds7 -lnds7
 
-LIBDIRS		:= $(LIBNDS)
+LIBDIRS     := $(CALICO) $(LIBNDS_DIR)
 
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 #---------------------------------------------------------------------------------
 
-export OUTPUT	:= $(CURDIR)/arm7/$(TARGET)
+export OUTPUT   := $(CURDIR)/arm7/$(TARGET)
 
-export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
-export DEPSDIR	:= $(CURDIR)/$(BUILD)
+export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
+export DEPSDIR  := $(CURDIR)/$(BUILD)
 
-CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
-BINFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.bin)))
+CFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES    := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+BINFILES    := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.bin)))
 
 ifeq ($(strip $(CPPFILES)),)
-	export LD	:= $(CC)
+    export LD   := $(CC)
 else
-	export LD	:= $(CXX)
+    export LD   := $(CXX)
 endif
 
-export OFILES	:= $(BINFILES:.bin=.o) \
-		   $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
+export OFILES   := $(BINFILES:.bin=.o) \
+                   $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
 
-export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-		   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-		   -I$(CURDIR)/$(BUILD)
+export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+                   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+                   -I$(CURDIR)/$(BUILD)
 
-export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 .PHONY: $(BUILD) clean
 
@@ -94,11 +78,11 @@ clean:
 else
 #---------------------------------------------------------------------------------
 
-DEPENDS		:= $(OFILES:.o=.d)
+DEPENDS     := $(OFILES:.o=.d)
 
-$(OUTPUT).elf	: $(OFILES)
+$(OUTPUT).elf   : $(OFILES)
 
-%.o	: %.bin
+%.o : %.bin
 	@echo $(notdir $<)
 	$(bin2o)
 

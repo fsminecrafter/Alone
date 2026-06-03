@@ -50481,6 +50481,16 @@
   "foliage": [],
   "objects": [],
   "tags": [],
-  "audio_tracks": [],
-  "audio_emitters": []
+  "audio_tracks": [
+    {
+      "filename": "fat:/Alone/music/LapsedGuardian.dsnd",
+      "volume": 100,
+      "flags": 1
+    }
+  ],
+  "audio_emitters": [],
+  "audio_settings": {
+    "crossfade_frames": 64,
+    "track_delay_frames": 0
+  }
 }
