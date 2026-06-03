@@ -206,6 +206,7 @@ public:
     void nextTrack();
     void prevTrack();
     void setMusicVolume(u8 vol);    // 0-127
+    void setPlaylistSettings(u8 fadeFrames, u8 delayFrames);
 
     // ---- One-shot positional sound (fully loaded, not streamed) ----
     int  playEmitterOnce(const char* path, float x, float y, float z, u8 vol = 100);
@@ -229,6 +230,9 @@ private:
     bool fading;
     bool playlistActive;
     u8   musicVolume;
+    u8   playlistFadeFrames;
+    u8   playlistDelayFrames;
+    u8   playlistDelayCounter;
 
     float _camX, _camY, _camZ;
 

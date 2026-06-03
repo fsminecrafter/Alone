@@ -86,6 +86,12 @@ struct AudioTableHeader {
     u8    emitterCount;
 };
 
+struct AudioSettingsHeader {
+    char  magic[4];   // "AUSF"
+    u8    fadeFrames;
+    u8    delayFrames;
+};
+
 #define AUDIO_TRACK_NAME_LEN  48
 struct AudioTrackEntry {
     char  filename[AUDIO_TRACK_NAME_LEN];  // e.g. "fat:/Alone/music/theme.dsnd"

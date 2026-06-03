@@ -10,8 +10,10 @@ import io
 import json
 import math
 import os
+import shutil
 import struct
 import sys
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -94,41 +96,70 @@ DSND_MAGIC_BYTES = b"DSND"
 
 def _convert_audio_to_dsnd(src_path: str, dst_path: str,
                              rate_div: int = 1, stereo: bool = False,
-                             bits: int = 8) -> None:
+                             codec: str = "pcm", bits: int = 8,
+                             sample_rate: int | None = None) -> None:
     """Convert any audio file to .dsnd using ffmpeg + struct packing.
 
     rate_div: 0=32768 Hz, 1=16384 Hz, 2=8192 Hz, 3=5512 Hz
-    Writes a DsndHeader then raw PCM samples.
+    sample_rate: actual ffmpeg output sample rate. If None, uses the rate
+                 implied by rate_div.
+    codec: "pcm" or "adpcm"
+    Writes a DsndHeader then raw PCM / ADPCM payload.
     Raises RuntimeError when ffmpeg is missing or fails.
     """
     import subprocess, tempfile, os as _os
     sample_rates = {0: 32768, 1: 16384, 2: 8192, 3: 5512}
-    sr = sample_rates.get(rate_div, 16384)
+    if sample_rate is None:
+        sample_rate = sample_rates.get(rate_div, 16384)
     channels = 2 if stereo else 1
-    sample_fmt = "s16le" if bits == 16 else "u8"
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".raw")
+    if codec == "adpcm":
+        fmt = "wav"
+        codec_args = ["-c:a", "adpcm_ima_wav"]
+        tmp_suffix = ".wav"
+    else:
+        fmt = "raw"
+        codec_args = []
+        tmp_suffix = ".raw"
+
+    fd, tmp_path = tempfile.mkstemp(suffix=tmp_suffix)
     _os.close(fd)
     try:
         cmd = ["ffmpeg", "-y", "-i", src_path,
-               "-ar", str(sr), "-ac", str(channels),
-               "-f", sample_fmt, tmp_path]
+               "-ar", str(sample_rate), "-ac", str(channels)]
+        if codec == "pcm":
+            sample_fmt = "s16le" if bits == 16 else "u8"
+            cmd += ["-f", sample_fmt, tmp_path]
+        else:
+            cmd += codec_args + [tmp_path]
         result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(
                 f"ffmpeg failed:\n{result.stderr.decode(errors='replace')}")
+
         with open(tmp_path, "rb") as f:
-            pcm = f.read()
+            payload = f.read()
     finally:
         try:
             _os.unlink(tmp_path)
         except OSError:
             pass
 
-    sample_count = len(pcm) // (2 if bits == 16 else 1)
+    if codec == "adpcm":
+        payload = _extract_wav_data_chunk(payload)
+        sample_count = len(payload) * 2
+    else:
+        if bits == 16:
+            sample_count = len(payload) // 2
+        else:
+            sample_count = len(payload)
+
     flags = 0
     if stereo:   flags |= 1   # DSND_FLAG_STEREO
-    if bits == 16: flags |= 4 # DSND_FLAG_16BIT
+    if codec == "adpcm":
+        flags |= 8   # DSND_FLAG_ADPCM
+    elif bits == 16:
+        flags |= 4   # DSND_FLAG_16BIT
 
     # DsndHeader: magic(4), rateDiv(1), flags(1), loopStart(2u), sampleCount(4u)
     header = struct.pack("<4sBBHL", DSND_MAGIC_BYTES, rate_div, flags, 0, sample_count)
@@ -136,7 +167,25 @@ def _convert_audio_to_dsnd(src_path: str, dst_path: str,
     _os.makedirs(_os.path.dirname(_os.path.abspath(dst_path)), exist_ok=True)
     with open(dst_path, "wb") as f:
         f.write(header)
-        f.write(pcm)
+        f.write(payload)
+
+
+def _extract_wav_data_chunk(wav_bytes: bytes) -> bytes:
+    if len(wav_bytes) < 12 or wav_bytes[0:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+        raise RuntimeError("Expected WAV file from ffmpeg for ADPCM conversion.")
+    offset = 12
+    while offset + 8 <= len(wav_bytes):
+        chunk_id, chunk_size = struct.unpack_from("<4sI", wav_bytes, offset)
+        offset += 8
+        if offset + chunk_size > len(wav_bytes):
+            raise RuntimeError("Truncated WAV chunk while parsing ADPCM data.")
+        chunk_data = wav_bytes[offset:offset + chunk_size]
+        offset += chunk_size
+        if chunk_size % 2:
+            offset += 1
+        if chunk_id == b"data":
+            return chunk_data
+    raise RuntimeError("WAV ADPCM data chunk not found.")
 
 # Billboard mode sentinels stored in nx.
 # Impossible for a real normalised normal in f32 (max s16 = 0x7FFF).
@@ -724,6 +773,8 @@ class WorldFile:
         self.tags:         list[DSTag]         = []
         self.audio_tracks: list[DSAudioTrack]  = []
         self.audio_emitters: list[DSAudioEmitter] = []
+        self.audio_crossfade_frames = 64
+        self.audio_track_delay_frames = 0
         self.path = None
 
     def save(self, path):
@@ -844,6 +895,10 @@ class WorldFile:
                 "radius_inner": emitter.radius_inner,
                 "radius_outer": emitter.radius_outer,
             })
+        doc["audio_settings"] = {
+            "crossfade_frames": self.audio_crossfade_frames,
+            "track_delay_frames": self.audio_track_delay_frames,
+        }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2)
         self.path = path
@@ -996,6 +1051,9 @@ class WorldFile:
                     f.write(track.pack())
                 for emitter in self.audio_emitters:
                     f.write(emitter.pack())
+                f.write(struct.pack("<4sBB", b"AUSF",
+                                   min(255, max(0, self.audio_crossfade_frames)),
+                                   min(255, max(0, self.audio_track_delay_frames))))
 
     @staticmethod
     def load(path):
@@ -1119,6 +1177,10 @@ class WorldFile:
                 )
                 w.audio_emitters.append(emitter)
 
+            settings = doc.get("audio_settings", {})
+            w.audio_crossfade_frames = settings.get("crossfade_frames", 64)
+            w.audio_track_delay_frames = settings.get("track_delay_frames", 0)
+
             return w
 
         # Legacy binary .world
@@ -1209,6 +1271,12 @@ class WorldFile:
                     filename, volume, flags,
                     from_fp(ri_fp) / 16.0, from_fp(ro_fp) / 16.0)
                 w.audio_emitters.append(emitter)
+
+            if offset + 6 <= len(data) and data[offset:offset+4] == b"AUSF":
+                _, fade_frames, delay_frames = struct.unpack_from("<4sBB", data, offset)
+                w.audio_crossfade_frames = fade_frames
+                w.audio_track_delay_frames = delay_frames
+                offset += struct.calcsize("<4sBB")
 
         return w
 
@@ -5459,6 +5527,19 @@ class AudioPanel(QWidget):
         tf.addRow("", ab)
         self._track_grp.setEnabled(False)
         lay.addWidget(self._track_grp)
+
+        self._playlist_settings_grp = QGroupBox("Playlist settings")
+        sf = QFormLayout(self._playlist_settings_grp)
+        sf.setContentsMargins(4,4,4,4); sf.setSpacing(4)
+        self.music_fade = QSpinBox(); self.music_fade.setRange(0, 255); self.music_fade.setValue(64)
+        self.music_delay = QSpinBox(); self.music_delay.setRange(0, 255); self.music_delay.setValue(0)
+        self.music_fade.valueChanged.connect(self._on_playlist_settings_changed)
+        self.music_delay.valueChanged.connect(self._on_playlist_settings_changed)
+        sf.addRow("Crossfade frames:", self.music_fade)
+        sf.addRow("Delay before next track:", self.music_delay)
+        self._playlist_settings_grp.setEnabled(False)
+        lay.addWidget(self._playlist_settings_grp)
+
         lay.addStretch(1)
         return w
 
@@ -5531,23 +5612,44 @@ class AudioPanel(QWidget):
             return None
 
         # Ask for conversion settings
-        rate_items = ["32768 Hz (rate 0)", "16384 Hz (rate 1)",
-                      "8192 Hz (rate 2)", "5512 Hz (rate 3)"]
-        rate_str, ok = QInputDialog.getItem(self, "Sample rate", "Output rate:", rate_items, 1, False)
+        rate_items = {
+            "32768 Hz (rate 0)": (0, 32768),
+            "22050 Hz (rate 0 source)": (0, 22050),
+            "16384 Hz (rate 1)": (1, 16384),
+            "8192 Hz (rate 2)": (2, 8192),
+            "5512 Hz (rate 3)": (3, 5512),
+        }
+        rate_str, ok = QInputDialog.getItem(self, "Sample rate", "Output rate:", list(rate_items.keys()), 1, False)
         if not ok:
             return None
-        rate_div = rate_items.index(rate_str)
+        rate_div, sample_rate = rate_items[rate_str]
 
-        bits_str, ok = QInputDialog.getItem(self, "Bit depth", "PCM depth:",
-                                             ["8-bit PCM", "16-bit PCM"], 0, False)
+        channel_str, ok = QInputDialog.getItem(self, "Output channels", "Audio channels:",
+                                               ["Mono", "Stereo"], 0, False)
         if not ok:
             return None
-        bits = 16 if "16" in bits_str else 8
+        stereo = (channel_str == "Stereo")
+
+        codec_str, ok = QInputDialog.getItem(self, "Audio type", "Output format:",
+                                             ["PCM", "IMA-ADPCM"], 0, False)
+        if not ok:
+            return None
+        adpcm = (codec_str == "IMA-ADPCM")
+
+        if not adpcm:
+            bits_str, ok = QInputDialog.getItem(self, "Bit depth", "PCM depth:",
+                                                 ["8-bit PCM", "16-bit PCM"], 0, False)
+            if not ok:
+                return None
+            bits = 16 if "16" in bits_str else 8
+        else:
+            bits = 16
 
         stem = Path(src).stem
         base = self._world_base_dir()
         if base:
             abs_dst = str(Path(base) / subfolder / f"{stem}.dsnd")
+            Path(abs_dst).parent.mkdir(parents=True, exist_ok=True)
         else:
             abs_dst, _ = QFileDialog.getSaveFileName(
                 self, "Save .dsnd to…", f"{stem}.dsnd",
@@ -5556,7 +5658,11 @@ class AudioPanel(QWidget):
                 return None
 
         try:
-            _convert_audio_to_dsnd(src, abs_dst, rate_div=rate_div, bits=bits)
+            _convert_audio_to_dsnd(src, abs_dst, rate_div=rate_div,
+                                     stereo=stereo,
+                                     codec="adpcm" if adpcm else "pcm",
+                                     bits=bits,
+                                     sample_rate=sample_rate)
         except RuntimeError as e:
             QMessageBox.critical(self, "Conversion failed", str(e))
             return None
@@ -5612,12 +5718,28 @@ class AudioPanel(QWidget):
     def _refresh_tracks(self):
         self.track_list.clear()
         if not self.world:
+            self._track_grp.setEnabled(False)
+            self._playlist_settings_grp.setEnabled(False)
             return
         for i, t in enumerate(self.world.audio_tracks):
             loop_s = " [loop]" if (t.flags & TRACK_FLAG_LOOP) else ""
             name = t.filename.split("/")[-1] or "(no file)"
             self.track_list.addItem(f"{i+1}.  {name}  vol={t.volume}{loop_s}")
         self._track_grp.setEnabled(False)
+        self._playlist_settings_grp.setEnabled(True)
+        self.music_fade.blockSignals(True)
+        self.music_delay.blockSignals(True)
+        self.music_fade.setValue(self.world.audio_crossfade_frames)
+        self.music_delay.setValue(self.world.audio_track_delay_frames)
+        self.music_fade.blockSignals(False)
+        self.music_delay.blockSignals(False)
+
+    def _on_playlist_settings_changed(self, value):
+        if not self.world:
+            return
+        self.world.audio_crossfade_frames = self.music_fade.value()
+        self.world.audio_track_delay_frames = self.music_delay.value()
+        self.changed.emit()
 
     def _on_track_selected(self, row):
         if not self.world or row < 0 or row >= len(self.world.audio_tracks):
@@ -6363,6 +6485,7 @@ class MainWindow(QMainWindow):
             path = str(Path(path).with_suffix(".svworld"))
         try:
             self.world.save(path)
+            self.audio_panel.set_world(self.world, world_path=path)
             self.setWindowTitle(f"Alone — World Editor  [{Path(path).name}]")
             self.status.showMessage(f"Saved  —  {path}")
         except Exception as ex:
@@ -6376,6 +6499,7 @@ class MainWindow(QMainWindow):
         if not path.endswith(".svworld"): path += ".svworld"
         try:
             self.world.save(path)
+            self.audio_panel.set_world(self.world, world_path=path)
             self.setWindowTitle(f"Alone — World Editor  [{Path(path).name}]")
             self.status.showMessage(f"Saved  —  {path}")
         except Exception as ex:
@@ -6395,12 +6519,19 @@ class MainWindow(QMainWindow):
             merged = [(k, v) for k, v in grid_counts.items() if v > 1]
 
             self.world.export_world(path)
+            exported, missing = self._export_audio_assets(path)
             self.status.showMessage(f"Exported  —  {path}")
 
             details = (
                 f"Textures: converted to NDS packed format (ABGR1555)\n"
                 f"Bottom faces stripped, s16 clamped\n"
             )
+            if exported:
+                details += f"\nCopied {len(exported)} audio file(s) to the export location.\n"
+            if missing:
+                details += ("\nWarning: the following audio file(s) were referenced but not found "
+                            "in the source world directory:\n"
+                            + "\n".join(missing) + "\n")
             if merged:
                 details += f"\nMerged {len(merged)} grid position(s) with multiple chunks:\n"
                 for (gx, gz), n in merged:
@@ -6421,6 +6552,40 @@ class MainWindow(QMainWindow):
             self.obj_selector.refresh()
             self.viewport.update()
             self.status.showMessage("DS-ify complete — review and save")
+
+    def _export_audio_assets(self, world_path: str) -> tuple[list[str], list[str]]:
+        if not self.world:
+            return [], []
+        audio_files = {
+            t.filename for t in self.world.audio_tracks
+        } | {
+            e.filename for e in self.world.audio_emitters
+        }
+        source_root = None
+        if self.audio_panel._world_path:
+            source_root = Path(self.audio_panel._world_path).parent
+        elif self.world.path:
+            source_root = Path(self.world.path).parent
+        if not source_root or not source_root.exists():
+            return [], []
+
+        exported = []
+        missing = []
+        dest_root = Path(world_path).parent
+        for filename in audio_files:
+            if not filename.startswith("fat:/Alone/"):
+                continue
+            rel = Path(filename[len("fat:/Alone/"):])
+            src = source_root / rel
+            dst = dest_root / rel
+            if not src.exists():
+                missing.append(str(rel))
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.exists() or src.resolve() != dst.resolve():
+                shutil.copy2(src, dst)
+            exported.append(str(rel))
+        return exported, missing
 
     def _frame_all(self):
         if self.world and self.world.chunks:

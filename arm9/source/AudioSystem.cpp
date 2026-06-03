@@ -52,6 +52,7 @@ AudioSystem::AudioSystem()
     : trackCount(0), emitterCount(0), currentTrack(0), nextTrackIdx(0),
       fadeStepA(0), fadeStepB(0), fading(false),
       playlistActive(false), musicVolume(100),
+      playlistFadeFrames(64), playlistDelayFrames(0), playlistDelayCounter(0),
       _camX(0), _camY(0), _camZ(0)
 {
     memset(channels, 0, sizeof(channels));
@@ -103,6 +104,16 @@ void AudioSystem::loadFromWorld(FILE* fd, u8 numTracks, u8 numEmitters)
             em.channelId = -1;
         }
     }
+
+    AudioSettingsHeader sh;
+    long pos = ftell(fd);
+    if (pos >= 0 && fread(&sh, sizeof(sh), 1, fd) == 1) {
+        if (memcmp(sh.magic, "AUSF", 4) == 0) {
+            setPlaylistSettings(sh.fadeFrames, sh.delayFrames);
+        } else {
+            fseek(fd, pos, SEEK_SET);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,19 +125,20 @@ void AudioSystem::update(float camX, float camY, float camZ)
 
     // ── Music crossfade ──
     if (fading) {
+        u8 fade_len = playlistFadeFrames ? playlistFadeFrames : 1;
         if (fadeStepA > 0) {
             fadeStepA--;
-            u8 vol = (u8)((u32)channels[0].targetVol * fadeStepA / AUDIO_FADE_STEPS);
+            u8 vol = (u8)((u32)channels[0].targetVol * fadeStepA / fade_len);
             channels[0].volume = vol;
             arm7SetVolume(0, vol);
         }
-        if (fadeStepB < AUDIO_FADE_STEPS) {
+        if (fadeStepB < fade_len) {
             fadeStepB++;
-            u8 vol = (u8)((u32)channels[1].targetVol * fadeStepB / AUDIO_FADE_STEPS);
+            u8 vol = (u8)((u32)channels[1].targetVol * fadeStepB / fade_len);
             channels[1].volume = vol;
             arm7SetVolume(1, vol);
         }
-        if (fadeStepA == 0 && fadeStepB >= AUDIO_FADE_STEPS) {
+        if (fadeStepA == 0 && fadeStepB >= fade_len) {
             arm7Stop(0);
             unloadChannel(0);
             fading = false;
@@ -139,8 +151,17 @@ void AudioSystem::update(float camX, float camY, float camZ)
         bool b_dead = !channels[1].active &&
                       !(channels[1].streaming && channels[1].streamBuf &&
                         channels[1].streamBuf->active);
-        if (a_dead && b_dead)
-            nextTrack();
+        if (a_dead && b_dead) {
+            if (playlistDelayFrames == 0) {
+                nextTrack();
+            } else if (playlistDelayCounter == 0) {
+                playlistDelayCounter = playlistDelayFrames;
+            } else {
+                playlistDelayCounter--;
+                if (playlistDelayCounter == 0)
+                    nextTrack();
+            }
+        }
     }
 
     // ── Stream buffer refill (music channels 0 and 1) ──
@@ -211,7 +232,13 @@ void AudioSystem::startPlaylist()
     if (openDsndStream(1, tracks[0].filename)) {
         fadeStepA = 0;
         fadeStepB = 0;
-        fading    = true;
+        if (playlistFadeFrames == 0) {
+            channels[1].volume = channels[1].targetVol;
+            arm7SetVolume(1, channels[1].volume);
+            fading = false;
+        } else {
+            fading = true;
+        }
     }
 }
 
@@ -239,9 +266,16 @@ void AudioSystem::nextTrack()
         (u8)((u32)tracks[currentTrack].baseVolume * musicVolume / 127);
 
     if (openDsndStream(1, tracks[currentTrack].filename)) {
-        fadeStepA = AUDIO_FADE_STEPS;
+        fadeStepA = playlistFadeFrames;
         fadeStepB = 0;
-        fading    = true;
+        if (playlistFadeFrames == 0) {
+            channels[1].volume = channels[1].targetVol;
+            arm7SetVolume(1, channels[1].volume);
+            fading = false;
+        } else {
+            fading = true;
+        }
+        playlistDelayCounter = 0;
     }
 }
 
@@ -259,6 +293,13 @@ void AudioSystem::setMusicVolume(u8 vol)
         u8 scaled = (u8)((u32)channels[1].targetVol * vol / 127);
         arm7SetVolume(1, scaled);
     }
+}
+
+void AudioSystem::setPlaylistSettings(u8 fadeFrames, u8 delayFrames)
+{
+    playlistFadeFrames = fadeFrames;
+    playlistDelayFrames = delayFrames;
+    playlistDelayCounter = 0;
 }
 
 // ---------------------------------------------------------------------------
