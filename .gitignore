@@ -39,7 +39,6 @@
 *.out
 *.app
 *.elf
-*.nds
 
 # Build directories
 build/
@@ -68,3 +67,8 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# NDS stuff
+*.nds
+*.lst
+*.map

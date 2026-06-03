@@ -1,17 +1,16 @@
 // ---------------------------------------------------------------------------
-// AudioArm7.cpp  —  ARM7 audio back-end
+// AudioArm7.cpp  —  ARM7 audio back-end  (calico build)
 // Compiled ONLY for the ARM7 sub-project (Makefile.arm7, -DARM7).
 // ---------------------------------------------------------------------------
 
 #ifdef ARM7
 
+#include <calico.h>
 #include <nds.h>
-#include <nds/arm7/audio.h>
-#include "ipc_fifo.h"   // FIFO_USER_01, fifoSetValue32Handler, fifoCheckValue32,
-                        // fifoGetValue32, _ipc_fifo_isr (compatibility shim)
+#include "ipc_fifo.h"
 #include <string.h>
 
-// ---- shared constants (mirrored from AudioSystem.h to avoid pulling ARM9 headers) ----
+// ---- shared constants (mirrored from AudioSystem.h) ----
 #define AUDIO_CMD_PLAY      0x01
 #define AUDIO_CMD_STOP      0x02
 #define AUDIO_CMD_VOL       0x03
@@ -45,9 +44,9 @@ static void arm7StartChannel(int ch, const Arm7PlayInfo* info)
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
     arm7StopChannel(ch);
 
-    u32  hz    = kRateHz[info->rateDiv < 4 ? info->rateDiv : 0];
-    bool is16  = (info->flags & DSND_FLAG_16BIT) != 0;
-    bool loop  = (info->flags & DSND_FLAG_LOOP)  != 0;
+    u32  hz   = kRateHz[info->rateDiv < 4 ? info->rateDiv : 0];
+    bool is16 = (info->flags & DSND_FLAG_16BIT) != 0;
+    bool loop = (info->flags & DSND_FLAG_LOOP)  != 0;
 
     u32 lengthWords = is16 ? (info->sampleCount + 1) / 2
                            : (info->sampleCount + 3) / 4;
@@ -76,10 +75,10 @@ static void arm7SetVolume(int ch, u8 vol)
 }
 
 // ---------------------------------------------------------------------------
-// FIFO handler — called from _ipc_fifo_isr (registered in arm7AudioInit below)
+// FIFO handler
 // ---------------------------------------------------------------------------
-static bool    s_awaitingPlayInfo = false;
-static int     s_pendingChannel   = 0;
+static bool s_awaitingPlayInfo = false;
+static int  s_pendingChannel   = 0;
 
 static void audioFifoHandler(u32 value, void* /*userdata*/)
 {
@@ -116,21 +115,35 @@ static void audioFifoHandler(u32 value, void* /*userdata*/)
 static void arm7AudioInit()
 {
     REG_SOUNDCNT = SOUND_ENABLE | SOUND_VOL(127);
-    // fifoSetValue32Handler from ipc_fifo.h registers audioFifoHandler and
-    // hooks _ipc_fifo_isr to IRQ_FIFO_NOT_EMPTY.
     fifoSetValue32Handler(FIFO_USER_01, audioFifoHandler, nullptr);
 }
 
 // ---------------------------------------------------------------------------
-// ARM7 main
+// ARM7 main  —  calico build
 // ---------------------------------------------------------------------------
 int main()
 {
-    defaultARM7();    // libnds: power, touch, wifi stubs, IPC_SYNC
-    arm7AudioInit();  // override FIFO_USER_01 with our audio handler
+    // ── Mandatory calico startup sequence (from the combined template) ──
+    envReadNvramSettings();
+    keypadStartExtServer();
 
-    while (1)
-        swiIntrWait(1, IRQ_ALL);
+    lcdSetIrqMask(DISPSTAT_IE_ALL, DISPSTAT_IE_VBLANK);
+    irqEnable(IRQ_VBLANK);
+
+    rtcInit();
+    rtcSyncTime();
+    pmInit();
+    blkInit();
+    touchInit();
+    touchStartServer(80, MAIN_THREAD_PRIO);
+
+    // ── Our audio init — register the raw-FIFO handler ──
+    arm7AudioInit();
+
+    // ── Idle loop (calico style) ──
+    while (pmMainLoop()) {
+        threadWaitForVBlank();
+    }
 
     return 0;
 }

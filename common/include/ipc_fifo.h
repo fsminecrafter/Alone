@@ -48,7 +48,7 @@
 // Both CPUs must enable the FIFO before the first transfer; calling this
 // function on both sides before any data is sent satisfies that requirement.
 // ---------------------------------------------------------------------------
-static inline void fifoSendValue32(unsigned int /*channel*/, unsigned int value)
+static inline void fifoSendValue32(u32 /*channel*/, u32 value)
 {
     // Enable the FIFO if it hasn't been already.
     REG_IPC_FIFO_CR |= IPC_FIFO_ENABLE;
@@ -63,7 +63,7 @@ static inline void fifoSendValue32(unsigned int /*channel*/, unsigned int value)
 // ---------------------------------------------------------------------------
 // fifoCheckValue32  — return non-zero if at least one word is waiting.
 // ---------------------------------------------------------------------------
-static inline int fifoCheckValue32(unsigned int /*channel*/)
+static inline int fifoCheckValue32(u32 /*channel*/)
 {
     return (REG_IPC_FIFO_CR & IPC_FIFO_RECV_EMPTY) == 0;
 }
@@ -72,9 +72,9 @@ static inline int fifoCheckValue32(unsigned int /*channel*/)
 // fifoGetValue32  — pop and return the next word from the receive FIFO.
 // Caller should check fifoCheckValue32() first.
 // ---------------------------------------------------------------------------
-static inline unsigned int fifoGetValue32(unsigned int /*channel*/)
+static inline u32 fifoGetValue32(u32 /*channel*/)
 {
-    return (unsigned int)REG_IPC_FIFO_RX;
+    return (u32)REG_IPC_FIFO_RX;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ static inline unsigned int fifoGetValue32(unsigned int /*channel*/)
 // If handler is nullptr the IRQ is disabled (ARM9 calls this to disable
 // the receive side, which it never uses).
 // ---------------------------------------------------------------------------
-typedef void (*FifoValue32Handler)(unsigned int value, void* userdata);
+typedef void (*FifoValue32Handler)(u32 value, void* userdata);
 
 // Storage for the registered handler (one slot; channel arg ignored).
 // Placed in DTCM on ARM7 so IRQ latency is minimal.
@@ -103,14 +103,14 @@ static void*              _s_fifo_userdata  = 0;
 static void _ipc_fifo_isr()
 {
     while (fifoCheckValue32(FIFO_USER_01)) {
-        unsigned int val = fifoGetValue32(FIFO_USER_01);
+        u32 val = fifoGetValue32(FIFO_USER_01);
         if (_s_fifo_handler)
             _s_fifo_handler(val, _s_fifo_userdata);
     }
 }
 #endif  // ARM7
 
-static inline void fifoSetValue32Handler(unsigned int /*channel*/,
+static inline void fifoSetValue32Handler(u32 /*channel*/,
                                           FifoValue32Handler handler,
                                           void* userdata)
 {
