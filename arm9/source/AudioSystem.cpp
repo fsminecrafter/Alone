@@ -1,30 +1,25 @@
 #include "AudioSystem.h"
-#include "ObjectSystem.h"       // AudioTrackEntry, AudioEmitterEntry, TRACK_FLAG_LOOP, EMITTER_FLAG_LOOP
-#include <nds/arm9/sound.h>
-#include "ipc_fifo.h"           // FIFO_USER_01, fifoSendValue32, fifoSetValue32Handler
-                                // (compatibility shim — libnds on this install has no fifocommon.h)
+#include "ObjectSystem.h"   // AudioTrackEntry, AudioEmitterEntry, TRACK_FLAG_LOOP, EMITTER_FLAG_LOOP
+#include "ipc_fifo.h"       // FIFO_USER_01, fifoSendValue32, fifoSetValue32Handler
 
 AudioSystem g_audio;
 
 // ---------------------------------------------------------------------------
-// IPC FIFO message layout to ARM7
-// We use FIFO_USER_01 (the first user-defined channel).
-// The ARM7 half runs a matching handler (see AudioArm7.cpp).
-//
-// Message word layout (32-bit):
-//   bits [31:24] = command  (AUDIO_CMD_*)
-//   bits [23:16] = channel  (0-15)
-//   bits  [7: 0] = volume   (0-127 for VOL/PLAY)
-//
-// For PLAY we send a second word: pointer to the Arm7PlayInfo staging struct.
+// Streaming ring buffers live in EWRAM so the ARM7 can DMA-read them without
+// going through the ARM9's cache.  Two slots: one per music channel (0 and 1).
+// The __attribute__ ensures they land in .ewram, not in the 96 KB DTCM/ITCM.
 // ---------------------------------------------------------------------------
+static StreamBuffer s_streamBufs[2] __attribute__((section(".ewram")));
 
+// ---------------------------------------------------------------------------
+// IPC FIFO helpers
+// ---------------------------------------------------------------------------
 struct Arm7PlayInfo {
-    u32  dataAddr;      // 32-bit ARM7-space address of raw PCM (past DsndHeader)
+    u32  dataAddr;
     u32  sampleCount;
     u16  loopStart;
     u8   rateDiv;
-    u8   flags;         // DSND_FLAG_*
+    u8   flags;
     u8   volume;
     u8   channelId;
     u16  pad;
@@ -36,7 +31,7 @@ static void sendFifoPlay(int ch)
 {
     DC_FlushRange(&s_arm7PlayInfos[ch], sizeof(Arm7PlayInfo));
     fifoSendValue32(FIFO_USER_01,
-                    AUDIO_PACK(AUDIO_CMD_PLAY, ch, s_arm7PlayInfos[ch].volume));
+        AUDIO_PACK(AUDIO_CMD_PLAY, ch, s_arm7PlayInfos[ch].volume));
     fifoSendValue32(FIFO_USER_01, (u32)&s_arm7PlayInfos[ch]);
 }
 
@@ -62,8 +57,6 @@ AudioSystem::AudioSystem()
     memset(channels, 0, sizeof(channels));
     memset(emitters, 0, sizeof(emitters));
     memset(tracks,   0, sizeof(tracks));
-    // AudioChannel has no channelId field; channel identity is its array index.
-    // RuntimeEmitter.channelId is -1 when not playing.
     for (int i = 0; i < AUDIO_MAX_EMITTERS; i++)
         emitters[i].channelId = -1;
 }
@@ -72,7 +65,6 @@ AudioSystem::~AudioSystem() { stopAllChannels(); }
 
 void AudioSystem::init()
 {
-    // ARM9 never receives on the user FIFO — just enable it for sending.
     fifoSetValue32Handler(FIFO_USER_01, nullptr, nullptr);
     soundEnable();
 }
@@ -89,7 +81,7 @@ void AudioSystem::loadFromWorld(FILE* fd, u8 numTracks, u8 numEmitters)
         if (i < trackCount) {
             memcpy(tracks[i].filename, te.filename, AUDIO_MAX_PATH);
             tracks[i].baseVolume = te.volume;
-            tracks[i].loop = (te.flags & TRACK_FLAG_LOOP) != 0;
+            tracks[i].loop       = (te.flags & TRACK_FLAG_LOOP) != 0;
         }
     }
 
@@ -120,7 +112,7 @@ void AudioSystem::update(float camX, float camY, float camZ)
 {
     _camX = camX; _camY = camY; _camZ = camZ;
 
-    // --- Music cross-fade ---
+    // ── Music crossfade ──
     if (fading) {
         if (fadeStepA > 0) {
             fadeStepA--;
@@ -140,18 +132,42 @@ void AudioSystem::update(float camX, float camY, float camZ)
             fading = false;
         }
     } else if (playlistActive) {
-        if (!channels[1].active && !channels[0].active)
+        // Both channels quiet → advance to next track
+        bool a_dead = !channels[0].active &&
+                      !(channels[0].streaming && channels[0].streamBuf &&
+                        channels[0].streamBuf->active);
+        bool b_dead = !channels[1].active &&
+                      !(channels[1].streaming && channels[1].streamBuf &&
+                        channels[1].streamBuf->active);
+        if (a_dead && b_dead)
             nextTrack();
     }
 
-    // --- Positional emitters ---
+    // ── Stream buffer refill (music channels 0 and 1) ──
+    for (int ch = 0; ch < 2; ch++) {
+        AudioChannel& c = channels[ch];
+        if (!c.streaming || !c.streamBuf || !c.streamBuf->active) continue;
+        if (c.streamEof && !c.looping) continue;
+
+        // Refill whichever block ARM9 has NOT just filled
+        int nextBlock = 1 - (int)(c.streamBuf->arm9_block);
+        _streamFillBlock(ch, nextBlock);
+
+        // Flush that block's bytes from ARM9 data cache so ARM7 sees fresh data
+        u32 blockBytes = c.streamIs16
+            ? (u32)(STREAM_BLOCK_SAMPLES * 2)
+            : (u32)STREAM_BLOCK_SAMPLES;
+        DC_FlushRange(c.streamBuf->data + nextBlock * blockBytes, blockBytes);
+    }
+
+    // ── Positional emitters ──
     for (u8 i = 0; i < emitterCount; i++) {
         RuntimeEmitter& em = emitters[i];
         if (!em.active) continue;
 
         float dist = fDist(em.x, em.y, em.z, _camX, _camY, _camZ);
         float att  = attenuate(dist, em.innerRadius, em.outerRadius);
-        u8 vol = (u8)((float)em.baseVolume * att);
+        u8 vol     = (u8)((float)em.baseVolume * att);
 
         if (vol == 0) {
             if (em.channelId >= 0) {
@@ -164,9 +180,10 @@ void AudioSystem::update(float camX, float camY, float camZ)
                 int ch = findFreeChannel(false);
                 if (ch >= 0 && loadDsnd(ch, em.filename)) {
                     DsndHeader* hdr = (DsndHeader*)channels[ch].data;
-                    arm7Play(ch, hdr, channels[ch].data + sizeof(DsndHeader),
+                    arm7Play(ch, hdr,
+                             channels[ch].data + sizeof(DsndHeader),
                              channels[ch].dataBytes - sizeof(DsndHeader), vol);
-                    em.channelId = ch;
+                    em.channelId         = ch;
                     channels[ch].volume  = vol;
                     channels[ch].looping = em.loop;
                 }
@@ -185,21 +202,26 @@ void AudioSystem::startPlaylist()
 {
     if (trackCount == 0) return;
     playlistActive = true;
-    currentTrack = 0;
-    if (loadDsnd(1, tracks[0].filename)) {
-        DsndHeader* hdr = (DsndHeader*)channels[1].data;
-        channels[1].targetVol = (u8)((u32)tracks[0].baseVolume * musicVolume / 127);
-        fadeStepA = 0; fadeStepB = 0; fading = true;
-        arm7Play(1, hdr, channels[1].data + sizeof(DsndHeader),
-                 channels[1].dataBytes - sizeof(DsndHeader), 0);
+    currentTrack   = 0;
+
+    channels[1].volume    = 0;
+    channels[1].targetVol = (u8)((u32)tracks[0].baseVolume * musicVolume / 127);
+    channels[1].looping   = tracks[0].loop;
+
+    if (openDsndStream(1, tracks[0].filename)) {
+        fadeStepA = 0;
+        fadeStepB = 0;
+        fading    = true;
     }
 }
 
 void AudioSystem::stopPlaylist()
 {
     playlistActive = false;
-    arm7Stop(0); arm7Stop(1);
-    unloadChannel(0); unloadChannel(1);
+    arm7Stop(0);
+    arm7Stop(1);
+    unloadChannel(0);
+    unloadChannel(1);
     fading = false;
 }
 
@@ -207,18 +229,19 @@ void AudioSystem::nextTrack()
 {
     if (trackCount == 0) return;
     currentTrack = (currentTrack + 1) % trackCount;
+
     unloadChannel(0);
     channels[0] = channels[1];
     memset(&channels[1], 0, sizeof(AudioChannel));
 
-    if (loadDsnd(1, tracks[currentTrack].filename)) {
-        DsndHeader* hdr = (DsndHeader*)channels[1].data;
-        channels[1].targetVol = (u8)((u32)tracks[currentTrack].baseVolume * musicVolume / 127);
+    channels[1].looping   = tracks[currentTrack].loop;
+    channels[1].targetVol =
+        (u8)((u32)tracks[currentTrack].baseVolume * musicVolume / 127);
+
+    if (openDsndStream(1, tracks[currentTrack].filename)) {
         fadeStepA = AUDIO_FADE_STEPS;
         fadeStepB = 0;
-        fading = true;
-        arm7Play(1, hdr, channels[1].data + sizeof(DsndHeader),
-                 channels[1].dataBytes - sizeof(DsndHeader), 0);
+        fading    = true;
     }
 }
 
@@ -239,12 +262,13 @@ void AudioSystem::setMusicVolume(u8 vol)
 }
 
 // ---------------------------------------------------------------------------
-// One-shot positional sound
+// One-shot positional sound  (fully loaded, not streamed)
 // ---------------------------------------------------------------------------
-int AudioSystem::playEmitterOnce(const char* path, float x, float y, float z, u8 vol)
+int AudioSystem::playEmitterOnce(const char* path,
+                                  float x, float y, float z, u8 vol)
 {
     float dist = fDist(x, y, z, _camX, _camY, _camZ);
-    float att = attenuate(dist, 4.0f, 32.0f);
+    float att  = attenuate(dist, 4.0f, 32.0f);
     u8 scaledVol = (u8)((float)vol * att);
     if (scaledVol == 0) return -1;
 
@@ -253,7 +277,8 @@ int AudioSystem::playEmitterOnce(const char* path, float x, float y, float z, u8
     if (!loadDsnd(ch, path)) return -1;
 
     DsndHeader* hdr = (DsndHeader*)channels[ch].data;
-    arm7Play(ch, hdr, channels[ch].data + sizeof(DsndHeader),
+    arm7Play(ch, hdr,
+             channels[ch].data + sizeof(DsndHeader),
              channels[ch].dataBytes - sizeof(DsndHeader), scaledVol);
     channels[ch].volume  = scaledVol;
     channels[ch].looping = false;
@@ -281,13 +306,14 @@ bool AudioSystem::isChannelActive(int ch) const
 }
 
 // ---------------------------------------------------------------------------
-// Private helpers
+// Private: full load (SFX / emitters)
 // ---------------------------------------------------------------------------
 bool AudioSystem::loadDsnd(int ch, const char* path)
 {
     unloadChannel(ch);
     FILE* f = fopen(path, "rb");
     if (!f) return false;
+
     fseek(f, 0, SEEK_END);
     u32 sz = (u32)ftell(f);
     rewind(f);
@@ -304,32 +330,169 @@ bool AudioSystem::loadDsnd(int ch, const char* path)
     channels[ch].data      = buf;
     channels[ch].dataBytes = sz;
     channels[ch].active    = false;
-    strncpy(channels[ch].filename, path, AUDIO_MAX_PATH-1);
+    channels[ch].streaming = false;
+    strncpy(channels[ch].filename, path, AUDIO_MAX_PATH - 1);
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Private: streaming open (music channels)
+// ---------------------------------------------------------------------------
+bool AudioSystem::openDsndStream(int ch, const char* path)
+{
+    unloadChannel(ch);
+
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+
+    DsndHeader hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != DSND_MAGIC) {
+        fclose(f); return false;
+    }
+
+    bool is16   = (hdr.flags & DSND_FLAG_16BIT)  != 0;
+    bool isAdpc = (hdr.flags & DSND_FLAG_ADPCM)  != 0;
+    if (isAdpc) is16 = false;   // ADPCM uses its own byte packing
+
+    // Total payload bytes in file
+    long payloadStart = ftell(f);
+    fseek(f, 0, SEEK_END);
+    u32 totalPayload = (u32)(ftell(f) - payloadStart);
+    fseek(f, payloadStart, SEEK_SET);
+
+    // Grab the stream buffer slot (channel 0 → slot 0, channel 1 → slot 1)
+    int slot = ch & 1;
+    StreamBuffer* buf = &s_streamBufs[slot];
+    memset(buf, 0, sizeof(StreamBuffer));
+    buf->active   = 1;
+    buf->is16bit  = is16 ? 1 : 0;
+    buf->isAdpcm  = isAdpc ? 1 : 0;
+
+    AudioChannel& c     = channels[ch];
+    c.streaming         = true;
+    c.active            = false;
+    c.data              = nullptr;
+    c.dataBytes         = 0;
+    c.streamFd          = f;
+    c.streamDataOffset  = (u32)payloadStart;
+    c.streamTotalBytes  = totalPayload;
+    c.streamFilePos     = 0;
+    c.streamBuf         = buf;
+    c.streamBufIdx      = slot;
+    c.streamIs16        = is16;
+    c.streamIsAdpcm     = isAdpc;
+    c.streamEof         = false;
+    c.streamRateDiv     = hdr.rateDiv;
+    c.streamFlags       = hdr.flags;
+    c.streamLoopStart   = hdr.loopStart;
+    c.streamSampleCount = hdr.sampleCount;
+    strncpy(c.filename, path, AUDIO_MAX_PATH - 1);
+
+    // Pre-fill both halves before starting playback so ARM7 never reads zeroes
+    _streamFillBlock(ch, 0);
+    _streamFillBlock(ch, 1);
+
+    // Flush entire buffer
+    u32 totalBytes = is16
+        ? (u32)(STREAM_BUF_BYTES_16)
+        : (u32)(STREAM_BUF_BYTES);
+    DC_FlushRange(buf->data, totalBytes);
+
+    // Tell ARM7 to play the ring buffer in REPEAT (loop) mode.
+    // sampleCount = total ring size so the channel length covers the full ring;
+    // loopStart   = 0 so it wraps back to the very start of buf->data.
+    // ARM7 decodes ADPCM via SOUND_FORMAT_ADPCM — no software decompression.
+    arm7PlayStream(ch, buf,
+                   hdr.rateDiv,
+                   // Force LOOP flag so hardware wraps at ring boundary
+                   (hdr.flags & ~DSND_FLAG_LOOP) | DSND_FLAG_LOOP,
+                   0,                       // loopStart = ring start
+                   is16 ? (u32)(STREAM_BLOCK_SAMPLES * STREAM_BLOCKS)
+                        : (u32)(STREAM_BUF_BYTES),
+                   channels[ch].volume);
+    c.active = true;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Private: fill one half-buffer from file
+// ---------------------------------------------------------------------------
+void AudioSystem::_streamFillBlock(int ch, int block)
+{
+    AudioChannel& c = channels[ch];
+    if (!c.streamFd || !c.streamBuf) return;
+    if (c.streamEof && !c.looping)   return;
+
+    // How many bytes make up one block?
+    u32 blockBytes = c.streamIs16
+        ? (u32)(STREAM_BLOCK_SAMPLES * 2)
+        : (u32)(STREAM_BLOCK_SAMPLES);
+    // ADPCM: 2 nibbles per byte → STREAM_BLOCK_SAMPLES nibbles = half the bytes
+    if (c.streamIsAdpcm)
+        blockBytes = STREAM_BLOCK_SAMPLES / 2;
+
+    u8* dst = c.streamBuf->data + (u32)block * blockBytes;
+    u32 remaining = c.streamTotalBytes - c.streamFilePos;
+    u32 toRead    = (blockBytes < remaining) ? blockBytes : remaining;
+
+    if (toRead > 0) {
+        fread(dst, 1, toRead, c.streamFd);
+        c.streamFilePos += toRead;
+    }
+
+    // Pad the tail of this block with silence if we hit EOF
+    if (toRead < blockBytes) {
+        u8 silence = c.streamIs16 ? 0x00 : 0x80; // 0x80 = silence for unsigned PCM8
+        memset(dst + toRead, silence, blockBytes - toRead);
+        c.streamEof = true;
+
+        if (c.looping) {
+            // Seek back to the start of the payload for the next fill
+            fseek(c.streamFd, (long)c.streamDataOffset, SEEK_SET);
+            c.streamFilePos = 0;
+            c.streamEof     = false;
+        } else {
+            c.streamBuf->active = 0;
+        }
+    }
+
+    c.streamBuf->arm9_block = (u8)block;
+}
+
+// ---------------------------------------------------------------------------
+// Private: unload channel (handles both streamed and non-streamed)
+// ---------------------------------------------------------------------------
 void AudioSystem::unloadChannel(int ch)
 {
-    if (channels[ch].data) {
-        free(channels[ch].data);
-        channels[ch].data = nullptr;
+    AudioChannel& c = channels[ch];
+
+    if (c.streaming) {
+        if (c.streamBuf) c.streamBuf->active = 0;
+        if (c.streamFd)  { fclose(c.streamFd); c.streamFd = nullptr; }
+        c.streamBuf      = nullptr;
+        c.streamBufIdx   = 0;
+        c.streamFd       = nullptr;
+        c.streaming      = false;
+        c.streamEof      = false;
     }
-    channels[ch].active    = false;
-    channels[ch].dataBytes = 0;
+
+    if (c.data) {
+        free(c.data);
+        c.data = nullptr;
+    }
+
+    c.active    = false;
+    c.dataBytes = 0;
 }
 
-int AudioSystem::findFreeChannel(bool music)
-{
-    int start = music ? 0 : 2;
-    for (int i = start; i < AUDIO_MAX_CHANNELS; i++)
-        if (!channels[i].active && channels[i].data == nullptr)
-            return i;
-    return -1;
-}
-
-void AudioSystem::arm7Play(int ch, const DsndHeader* hdr, u8* data, u32 /*bytes*/, u8 vol)
+// ---------------------------------------------------------------------------
+// Private: ARM7 IPC — full load
+// ---------------------------------------------------------------------------
+void AudioSystem::arm7Play(int ch, const DsndHeader* hdr,
+                            u8* data, u32 /*bytes*/, u8 vol)
 {
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
+
     s_arm7PlayInfos[ch].dataAddr    = (u32)data;
     s_arm7PlayInfos[ch].sampleCount = hdr->sampleCount;
     s_arm7PlayInfos[ch].loopStart   = hdr->loopStart;
@@ -337,10 +500,35 @@ void AudioSystem::arm7Play(int ch, const DsndHeader* hdr, u8* data, u32 /*bytes*
     s_arm7PlayInfos[ch].flags       = hdr->flags;
     s_arm7PlayInfos[ch].volume      = vol;
     s_arm7PlayInfos[ch].channelId   = (u8)ch;
+
     channels[ch].active = true;
     sendFifoPlay(ch);
 }
 
+// ---------------------------------------------------------------------------
+// Private: ARM7 IPC — streaming (ring buffer already in EWRAM)
+// ---------------------------------------------------------------------------
+void AudioSystem::arm7PlayStream(int ch, StreamBuffer* buf,
+                                  u8 rateDiv, u8 flags,
+                                  u16 loopStart, u32 sampleCount, u8 vol)
+{
+    if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
+
+    // Point ARM7 directly at the EWRAM ring buffer
+    s_arm7PlayInfos[ch].dataAddr    = (u32)buf->data;
+    s_arm7PlayInfos[ch].sampleCount = sampleCount;
+    s_arm7PlayInfos[ch].loopStart   = loopStart;
+    s_arm7PlayInfos[ch].rateDiv     = rateDiv;
+    s_arm7PlayInfos[ch].flags       = flags;
+    s_arm7PlayInfos[ch].volume      = vol;
+    s_arm7PlayInfos[ch].channelId   = (u8)ch;
+
+    sendFifoPlay(ch);
+}
+
+// ---------------------------------------------------------------------------
+// Private: ARM7 IPC — volume / stop
+// ---------------------------------------------------------------------------
 void AudioSystem::arm7SetVolume(int ch, u8 vol)
 {
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
@@ -352,4 +540,17 @@ void AudioSystem::arm7Stop(int ch)
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
     sendFifoStop(ch);
     channels[ch].active = false;
+}
+
+// ---------------------------------------------------------------------------
+// Private: find a free SFX channel (skips music channels 0-1)
+// ---------------------------------------------------------------------------
+int AudioSystem::findFreeChannel(bool music)
+{
+    int start = music ? 0 : 2;
+    for (int i = start; i < AUDIO_MAX_CHANNELS; i++)
+        if (!channels[i].active && channels[i].data == nullptr
+                && !channels[i].streaming)
+            return i;
+    return -1;
 }
