@@ -1,49 +1,71 @@
 #include "AudioSystem.h"
 #include "ObjectSystem.h"   // AudioTrackEntry, AudioEmitterEntry, TRACK_FLAG_LOOP, EMITTER_FLAG_LOOP
-#include "ipc_fifo.h"       // FIFO_USER_01, fifoSendValue32, fifoSetValue32Handler
+#include <calico.h>         // pxiSend() — ARM7 uses calico PXI, ARM9 must match
+#include "../../common/include/logger.h"
+
+// All audio IPC goes through calico PXI on PxiChannel_User0.
+// Do NOT use libnds fifoSendValue32 / fifoSendPtr — those use a different
+// framing protocol and will never reach the ARM7 pxiSetHandler.
+#define AUDIO_PXI_CHANNEL   PxiChannel_User0
 
 AudioSystem g_audio;
 
 // ---------------------------------------------------------------------------
 // Streaming ring buffers live in EWRAM so the ARM7 can DMA-read them without
 // going through the ARM9's cache.  Two slots: one per music channel (0 and 1).
-// The __attribute__ ensures they land in .ewram, not in the 96 KB DTCM/ITCM.
 // ---------------------------------------------------------------------------
 static StreamBuffer s_streamBufs[2] __attribute__((section(".ewram")));
 
 // ---------------------------------------------------------------------------
+// IPC play-info rendezvous
+//
+// ARM9 and ARM7 are separate binaries; "extern" does not work across them.
+// Both sides access Arm7PlayInfo through AUDIO_PLAY_INFO_ARRAY(), a fixed
+// physical address in upper EWRAM defined in AudioSystem.h.
+//
+// ARM9 writes via the volatile pointer and calls DC_FlushRange before sending
+// the PXI packet.  ARM7 has no D-cache so reads main RAM directly.
+// ---------------------------------------------------------------------------
+static inline volatile Arm7PlayInfo& arm9PlayInfo(int ch)
+{
+    return AUDIO_PLAY_INFO_ARRAY()[ch];
+}
+
+// ---------------------------------------------------------------------------
 // IPC FIFO helpers
 // ---------------------------------------------------------------------------
-struct Arm7PlayInfo {
-    u32  dataAddr;
-    u32  sampleCount;
-    u16  loopStart;
-    u8   rateDiv;
-    u8   flags;
-    u8   volume;
-    u8   channelId;
-    u16  pad;
-};
-
-static Arm7PlayInfo s_arm7PlayInfos[AUDIO_MAX_CHANNELS];
-
 static void sendFifoPlay(int ch)
 {
-    DC_FlushRange(&s_arm7PlayInfos[ch], sizeof(Arm7PlayInfo));
-    fifoSendValue32(FIFO_USER_01,
-        AUDIO_PACK(AUDIO_CMD_PLAY, ch, s_arm7PlayInfos[ch].volume));
-    // Send pointer as separate raw packet
-    fifoSendPtr(FIFO_USER_01, (u32)&s_arm7PlayInfos[ch]);
+    // Flush this channel's Arm7PlayInfo from D-cache to main RAM.
+    DC_FlushRange(
+        (void*)(AUDIO_SHARED_EWRAM_ADDR + (u32)ch * sizeof(Arm7PlayInfo)),
+        sizeof(Arm7PlayInfo));
+
+    u32 packet = AUDIO_PACK(AUDIO_CMD_PLAY, ch, arm9PlayInfo(ch).volume);
+    logger_printf("[AUDIO IPC] sendFifoPlay ch%d: packet=0x%08lX "
+                  "rendezvous=0x%08lX dataAddr=0x%08lX vol=%u\n",
+                  ch, (unsigned long)packet,
+                  (unsigned long)(AUDIO_SHARED_EWRAM_ADDR + (u32)ch * sizeof(Arm7PlayInfo)),
+                  (unsigned long)arm9PlayInfo(ch).dataAddr,
+                  (unsigned)arm9PlayInfo(ch).volume);
+
+    pxiSend(AUDIO_PXI_CHANNEL, packet);
 }
 
 static void sendFifoVol(int ch, u8 vol)
 {
-    fifoSendValue32(FIFO_USER_01, AUDIO_PACK(AUDIO_CMD_VOL, ch, vol));
+    u32 packet = AUDIO_PACK(AUDIO_CMD_VOL, ch, vol);
+    logger_printf("[AUDIO IPC] sendFifoVol ch%d vol=%u packet=0x%08lX\n",
+                  ch, (unsigned)vol, (unsigned long)packet);
+    pxiSend(AUDIO_PXI_CHANNEL, packet);
 }
 
 static void sendFifoStop(int ch)
 {
-    fifoSendValue32(FIFO_USER_01, AUDIO_PACK(AUDIO_CMD_STOP, ch, 0));
+    u32 packet = AUDIO_PACK(AUDIO_CMD_STOP, ch, 0);
+    logger_printf("[AUDIO IPC] sendFifoStop ch%d packet=0x%08lX\n",
+                  ch, (unsigned long)packet);
+    pxiSend(AUDIO_PXI_CHANNEL, packet);
 }
 
 // ---------------------------------------------------------------------------
@@ -67,8 +89,24 @@ AudioSystem::~AudioSystem() { stopAllChannels(); }
 
 void AudioSystem::init()
 {
-    fifoSetValue32Handler(FIFO_USER_01, nullptr, nullptr);
-    soundEnable();
+    // soundEnable() is a libnds call that touches REG_SOUNDCNT on ARM9.
+    // Under calico ARM9 does not own sound hardware — ARM7 owns it and sets
+    // REG_SOUNDCNT = SOUND_ENABLE | SOUND_VOL(127) in AudioArm7.cpp.  Removed.
+
+    logger_printf("[AUDIO] ============================================\n");
+    logger_printf("[AUDIO] AudioSystem::init()\n");
+    logger_printf("[AUDIO]   AUDIO_SHARED_EWRAM_ADDR = 0x%08lX\n",
+                  (unsigned long)AUDIO_SHARED_EWRAM_ADDR);
+    logger_printf("[AUDIO]   sizeof(Arm7PlayInfo)    = %u\n",
+                  (unsigned)sizeof(Arm7PlayInfo));
+    logger_printf("[AUDIO]   array end               = 0x%08lX\n",
+                  (unsigned long)(AUDIO_SHARED_EWRAM_ADDR
+                                  + AUDIO_MAX_CHANNELS * sizeof(Arm7PlayInfo)));
+    logger_printf("[AUDIO]   s_streamBufs[0]         = 0x%08lX\n",
+                  (unsigned long)(u32)&s_streamBufs[0]);
+    logger_printf("[AUDIO]   s_streamBufs[1]         = 0x%08lX\n",
+                  (unsigned long)(u32)&s_streamBufs[1]);
+    logger_printf("[AUDIO] ============================================\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -76,21 +114,34 @@ void AudioSystem::init()
 // ---------------------------------------------------------------------------
 void AudioSystem::loadFromWorld(FILE* fd, u8 numTracks, u8 numEmitters)
 {
+    logger_printf("[AUDIO] loadFromWorld: numTracks=%u numEmitters=%u\n",
+                  (unsigned)numTracks, (unsigned)numEmitters);
+
     trackCount = (numTracks < AUDIO_MAX_TRACKS) ? numTracks : AUDIO_MAX_TRACKS;
     for (u8 i = 0; i < numTracks; i++) {
         AudioTrackEntry te;
-        if (fread(&te, sizeof(te), 1, fd) != 1) break;
+        if (fread(&te, sizeof(te), 1, fd) != 1) {
+            logger_printf("[AUDIO]   track %u: fread failed — truncated file?\n",
+                          (unsigned)i);
+            break;
+        }
         if (i < trackCount) {
             memcpy(tracks[i].filename, te.filename, AUDIO_MAX_PATH);
             tracks[i].baseVolume = te.volume;
             tracks[i].loop       = (te.flags & TRACK_FLAG_LOOP) != 0;
+            logger_printf("[AUDIO]   track %u: '%s' baseVol=%u loop=%d\n",
+                          (unsigned)i, tracks[i].filename,
+                          (unsigned)tracks[i].baseVolume, (int)tracks[i].loop);
         }
     }
 
     emitterCount = (numEmitters < AUDIO_MAX_EMITTERS) ? numEmitters : AUDIO_MAX_EMITTERS;
     for (u8 i = 0; i < numEmitters; i++) {
         AudioEmitterEntry ee;
-        if (fread(&ee, sizeof(ee), 1, fd) != 1) break;
+        if (fread(&ee, sizeof(ee), 1, fd) != 1) {
+            logger_printf("[AUDIO]   emitter %u: fread failed\n", (unsigned)i);
+            break;
+        }
         if (i < emitterCount) {
             RuntimeEmitter& em = emitters[i];
             em.active      = true;
@@ -103,6 +154,11 @@ void AudioSystem::loadFromWorld(FILE* fd, u8 numTracks, u8 numEmitters)
             em.loop        = (ee.flags & EMITTER_FLAG_LOOP) != 0;
             memcpy(em.filename, ee.filename, AUDIO_MAX_PATH);
             em.channelId = -1;
+            logger_printf("[AUDIO]   emitter %u: '%s' vol=%u loop=%d "
+                          "inner=%.1f outer=%.1f\n",
+                          (unsigned)i, em.filename,
+                          (unsigned)em.baseVolume, (int)em.loop,
+                          em.innerRadius, em.outerRadius);
         }
     }
 
@@ -111,10 +167,19 @@ void AudioSystem::loadFromWorld(FILE* fd, u8 numTracks, u8 numEmitters)
     if (pos >= 0 && fread(&sh, sizeof(sh), 1, fd) == 1) {
         if (memcmp(sh.magic, "AUSF", 4) == 0) {
             setPlaylistSettings(sh.fadeFrames, sh.delayFrames);
+            logger_printf("[AUDIO]   AUSF: fadeFrames=%u delayFrames=%u\n",
+                          (unsigned)sh.fadeFrames, (unsigned)sh.delayFrames);
         } else {
             fseek(fd, pos, SEEK_SET);
+            logger_printf("[AUDIO]   no AUSF block — using defaults: "
+                          "fade=%u delay=%u\n",
+                          (unsigned)playlistFadeFrames,
+                          (unsigned)playlistDelayFrames);
         }
     }
+
+    logger_printf("[AUDIO] loadFromWorld done: %u tracks, %u emitters loaded\n",
+                  (unsigned)trackCount, (unsigned)emitterCount);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +205,12 @@ void AudioSystem::update(float camX, float camY, float camZ)
             arm7SetVolume(1, vol);
         }
         if (fadeStepA == 0 && fadeStepB >= fade_len) {
+            logger_printf("[AUDIO] crossfade complete: stopping ch0\n");
             arm7Stop(0);
             unloadChannel(0);
             fading = false;
         }
     } else if (playlistActive) {
-        // Both channels quiet → advance to next track
         bool a_dead = !channels[0].active &&
                       !(channels[0].streaming && channels[0].streamBuf &&
                         channels[0].streamBuf->active);
@@ -166,20 +231,33 @@ void AudioSystem::update(float camX, float camY, float camZ)
     }
 
     // ── Stream buffer refill (music channels 0 and 1) ──
+    static const float kSampleRates[4] = { 32768.f, 16384.f, 8192.f, 5512.f };
+
     for (int ch = 0; ch < 2; ch++) {
         AudioChannel& c = channels[ch];
         if (!c.streaming || !c.streamBuf || !c.streamBuf->active) continue;
         if (c.streamEof && !c.looping) continue;
 
-        // Refill whichever block ARM9 has NOT just filled
+        float hz = kSampleRates[c.streamRateDiv < 4 ? c.streamRateDiv : 0];
+        c.streamRefillAcc += hz / 60.0f;
+
+        if (c.streamRefillAcc < (float)STREAM_BLOCK_SAMPLES)
+            continue;
+
+        c.streamRefillAcc -= (float)STREAM_BLOCK_SAMPLES;
+
         int nextBlock = 1 - (int)(c.streamBuf->arm9_block);
         _streamFillBlock(ch, nextBlock);
 
-        // Flush that block's bytes from ARM9 data cache so ARM7 sees fresh data
-        u32 blockBytes = c.streamIs16
-            ? (u32)(STREAM_BLOCK_SAMPLES * 2)
-            : (u32)STREAM_BLOCK_SAMPLES;
-        DC_FlushRange(c.streamBuf->data + nextBlock * blockBytes, blockBytes);
+        u32 blockBytes;
+        if (c.streamIsAdpcm)
+            blockBytes = (u32)(STREAM_BLOCK_SAMPLES / 2);
+        else if (c.streamIs16)
+            blockBytes = (u32)(STREAM_BLOCK_SAMPLES * 2);
+        else
+            blockBytes = (u32)(STREAM_BLOCK_SAMPLES);
+
+        DC_FlushRange(c.streamBuf->data + (u32)nextBlock * blockBytes, blockBytes);
     }
 
     // ── Positional emitters ──
@@ -222,29 +300,53 @@ void AudioSystem::update(float camX, float camY, float camZ)
 // ---------------------------------------------------------------------------
 void AudioSystem::startPlaylist()
 {
-    if (trackCount == 0) return;
+    logger_printf("[AUDIO] startPlaylist: trackCount=%u musicVol=%u "
+                  "fadeFrames=%u\n",
+                  (unsigned)trackCount, (unsigned)musicVolume,
+                  (unsigned)playlistFadeFrames);
+
+    if (trackCount == 0) {
+        logger_printf("[AUDIO] startPlaylist: ABORT — no tracks loaded\n");
+        return;
+    }
+
     playlistActive = true;
     currentTrack   = 0;
 
-    channels[1].volume    = 0;
     channels[1].targetVol = (u8)((u32)tracks[0].baseVolume * musicVolume / 127);
     channels[1].looping   = tracks[0].loop;
+    channels[1].volume    = (playlistFadeFrames == 0) ? channels[1].targetVol : 0;
+
+    logger_printf("[AUDIO] startPlaylist: track0='%s' baseVol=%u "
+                  "targetVol=%u startVol=%u loop=%d\n",
+                  tracks[0].filename,
+                  (unsigned)tracks[0].baseVolume,
+                  (unsigned)channels[1].targetVol,
+                  (unsigned)channels[1].volume,
+                  (int)channels[1].looping);
 
     if (openDsndStream(1, tracks[0].filename)) {
         fadeStepA = 0;
         fadeStepB = 0;
         if (playlistFadeFrames == 0) {
-            channels[1].volume = channels[1].targetVol;
-            arm7SetVolume(1, channels[1].volume);
             fading = false;
+            arm7SetVolume(1, channels[1].volume);
+            logger_printf("[AUDIO] startPlaylist: OK — no fade, playing immediately "
+                          "at vol=%u\n", (unsigned)channels[1].volume);
         } else {
             fading = true;
+            logger_printf("[AUDIO] startPlaylist: OK — fade-in over %u frames\n",
+                          (unsigned)playlistFadeFrames);
         }
+    } else {
+        logger_printf("[AUDIO] startPlaylist: FAILED to open stream '%s'\n",
+                      tracks[0].filename);
     }
 }
 
 void AudioSystem::stopPlaylist()
 {
+    logger_printf("[AUDIO] stopPlaylist\n");
     playlistActive = false;
     arm7Stop(0);
     arm7Stop(1);
@@ -257,26 +359,41 @@ void AudioSystem::nextTrack()
 {
     if (trackCount == 0) return;
     currentTrack = (currentTrack + 1) % trackCount;
+    logger_printf("[AUDIO] nextTrack: -> track %u '%s'\n",
+                  (unsigned)currentTrack, tracks[currentTrack].filename);
 
     unloadChannel(0);
     channels[0] = channels[1];
+    if (channels[0].streaming && channels[0].streamBuf) {
+        memcpy(&s_streamBufs[0], &s_streamBufs[1], sizeof(StreamBuffer));
+        channels[0].streamBuf    = &s_streamBufs[0];
+        channels[0].streamBufIdx = 0;
+    }
+
     memset(&channels[1], 0, sizeof(AudioChannel));
 
     channels[1].looping   = tracks[currentTrack].loop;
     channels[1].targetVol =
         (u8)((u32)tracks[currentTrack].baseVolume * musicVolume / 127);
+    channels[1].volume    = (playlistFadeFrames == 0) ? channels[1].targetVol : 0;
 
     if (openDsndStream(1, tracks[currentTrack].filename)) {
         fadeStepA = playlistFadeFrames;
         fadeStepB = 0;
         if (playlistFadeFrames == 0) {
-            channels[1].volume = channels[1].targetVol;
             arm7SetVolume(1, channels[1].volume);
             fading = false;
         } else {
             fading = true;
         }
         playlistDelayCounter = 0;
+        logger_printf("[AUDIO] nextTrack: stream OK vol=%u targetVol=%u fade=%u\n",
+                      (unsigned)channels[1].volume,
+                      (unsigned)channels[1].targetVol,
+                      (unsigned)playlistFadeFrames);
+    } else {
+        logger_printf("[AUDIO] nextTrack: FAILED to open stream '%s'\n",
+                      tracks[currentTrack].filename);
     }
 }
 
@@ -298,7 +415,7 @@ void AudioSystem::setMusicVolume(u8 vol)
 
 void AudioSystem::setPlaylistSettings(u8 fadeFrames, u8 delayFrames)
 {
-    playlistFadeFrames = fadeFrames;
+    playlistFadeFrames  = fadeFrames;
     playlistDelayFrames = delayFrames;
     playlistDelayCounter = 0;
 }
@@ -309,9 +426,9 @@ void AudioSystem::setPlaylistSettings(u8 fadeFrames, u8 delayFrames)
 int AudioSystem::playEmitterOnce(const char* path,
                                   float x, float y, float z, u8 vol)
 {
-    float dist = fDist(x, y, z, _camX, _camY, _camZ);
-    float att  = attenuate(dist, 4.0f, 32.0f);
-    u8 scaledVol = (u8)((float)vol * att);
+    float dist     = fDist(x, y, z, _camX, _camY, _camZ);
+    float att      = attenuate(dist, 4.0f, 32.0f);
+    u8 scaledVol   = (u8)((float)vol * att);
     if (scaledVol == 0) return -1;
 
     int ch = findFreeChannel(false);
@@ -336,9 +453,10 @@ void AudioSystem::stopChannel(int ch)
 
 void AudioSystem::stopAllChannels()
 {
+    logger_printf("[AUDIO] stopAllChannels\n");
     for (int i = 0; i < AUDIO_MAX_CHANNELS; i++)
         stopChannel(i);
-    fifoSendValue32(FIFO_USER_01, AUDIO_PACK(AUDIO_CMD_STOP_ALL, 0, 0));
+    pxiSend(AUDIO_PXI_CHANNEL, AUDIO_PACK(AUDIO_CMD_STOP_ALL, 0, 0));
 }
 
 bool AudioSystem::isChannelActive(int ch) const
@@ -354,26 +472,50 @@ bool AudioSystem::loadDsnd(int ch, const char* path)
 {
     unloadChannel(ch);
     FILE* f = fopen(path, "rb");
-    if (!f) return false;
+    if (!f) {
+        logger_printf("[AUDIO] loadDsnd ch%d: FAILED fopen '%s'\n", ch, path);
+        return false;
+    }
 
     fseek(f, 0, SEEK_END);
     u32 sz = (u32)ftell(f);
     rewind(f);
-    if (sz < sizeof(DsndHeader)) { fclose(f); return false; }
+    if (sz < sizeof(DsndHeader)) {
+        logger_printf("[AUDIO] loadDsnd ch%d: file too small (%lu bytes) '%s'\n",
+                      ch, (unsigned long)sz, path);
+        fclose(f); return false;
+    }
 
     u8* buf = (u8*)malloc(sz);
-    if (!buf) { fclose(f); return false; }
+    if (!buf) {
+        logger_printf("[AUDIO] loadDsnd ch%d: malloc(%lu) FAILED\n",
+                      ch, (unsigned long)sz);
+        fclose(f); return false;
+    }
     fread(buf, 1, sz, f);
     fclose(f);
 
     DsndHeader* hdr = (DsndHeader*)buf;
-    if (hdr->magic != DSND_MAGIC) { free(buf); return false; }
+    if (hdr->magic != DSND_MAGIC) {
+        logger_printf("[AUDIO] loadDsnd ch%d: bad magic 0x%08lX (expected 0x%08lX) '%s'\n",
+                      ch, (unsigned long)hdr->magic,
+                      (unsigned long)DSND_MAGIC, path);
+        free(buf); return false;
+    }
 
     channels[ch].data      = buf;
     channels[ch].dataBytes = sz;
     channels[ch].active    = false;
     channels[ch].streaming = false;
     strncpy(channels[ch].filename, path, AUDIO_MAX_PATH - 1);
+
+    logger_printf("[AUDIO] loadDsnd ch%d: OK '%s' "
+                  "size=%lu rateDiv=%u flags=0x%02X samples=%lu "
+                  "dataAddr=0x%08lX\n",
+                  ch, path, (unsigned long)sz,
+                  (unsigned)hdr->rateDiv, (unsigned)hdr->flags,
+                  (unsigned long)hdr->sampleCount,
+                  (unsigned long)(u32)(buf + sizeof(DsndHeader)));
     return true;
 }
 
@@ -385,30 +527,43 @@ bool AudioSystem::openDsndStream(int ch, const char* path)
     unloadChannel(ch);
 
     FILE* f = fopen(path, "rb");
-    if (!f) return false;
+    if (!f) {
+        logger_printf("[AUDIO] openDsndStream ch%d: FAILED fopen '%s'\n", ch, path);
+        return false;
+    }
 
     DsndHeader hdr;
     if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != DSND_MAGIC) {
+        logger_printf("[AUDIO] openDsndStream ch%d: bad/missing DSND header '%s' "
+                      "magic=0x%08lX\n",
+                      ch, path, (unsigned long)hdr.magic);
         fclose(f); return false;
     }
 
     bool is16   = (hdr.flags & DSND_FLAG_16BIT)  != 0;
     bool isAdpc = (hdr.flags & DSND_FLAG_ADPCM)  != 0;
-    if (isAdpc) is16 = false;   // ADPCM uses its own byte packing
+    if (isAdpc) is16 = false;
 
-    // Total payload bytes in file
     long payloadStart = ftell(f);
     fseek(f, 0, SEEK_END);
     u32 totalPayload = (u32)(ftell(f) - payloadStart);
     fseek(f, payloadStart, SEEK_SET);
 
-    // Grab the stream buffer slot (channel 0 → slot 0, channel 1 → slot 1)
+    logger_printf("[AUDIO] openDsndStream ch%d: '%s'\n"
+                  "  rateDiv=%u flags=0x%02X is16=%d isAdpcm=%d\n"
+                  "  samples=%lu payloadBytes=%lu payloadStart=%ld\n",
+                  ch, path,
+                  (unsigned)hdr.rateDiv, (unsigned)hdr.flags,
+                  (int)is16, (int)isAdpc,
+                  (unsigned long)hdr.sampleCount, (unsigned long)totalPayload,
+                  payloadStart);
+
     int slot = ch & 1;
     StreamBuffer* buf = &s_streamBufs[slot];
     memset(buf, 0, sizeof(StreamBuffer));
-    buf->active   = 1;
-    buf->is16bit  = is16 ? 1 : 0;
-    buf->isAdpcm  = isAdpc ? 1 : 0;
+    buf->active  = 1;
+    buf->is16bit = is16   ? 1 : 0;
+    buf->isAdpcm = isAdpc ? 1 : 0;
 
     AudioChannel& c     = channels[ch];
     c.streaming         = true;
@@ -428,31 +583,45 @@ bool AudioSystem::openDsndStream(int ch, const char* path)
     c.streamFlags       = hdr.flags;
     c.streamLoopStart   = hdr.loopStart;
     c.streamSampleCount = hdr.sampleCount;
+    c.streamRefillAcc   = (float)STREAM_BLOCK_SAMPLES;
     strncpy(c.filename, path, AUDIO_MAX_PATH - 1);
 
-    // Pre-fill both halves before starting playback so ARM7 never reads zeroes
     _streamFillBlock(ch, 0);
     _streamFillBlock(ch, 1);
 
-    // Flush entire buffer
-    u32 totalBytes = is16
-        ? (u32)(STREAM_BUF_BYTES_16)
-        : (u32)(STREAM_BUF_BYTES);
-    DC_FlushRange(buf->data, totalBytes);
+    u32 totalBufBytes = is16 ? (u32)(STREAM_BUF_BYTES_16) : (u32)(STREAM_BUF_BYTES);
+    DC_FlushRange(buf->data, totalBufBytes);
 
-    // Tell ARM7 to play the ring buffer in REPEAT (loop) mode.
-    // sampleCount = total ring size so the channel length covers the full ring;
-    // loopStart   = 0 so it wraps back to the very start of buf->data.
-    // ARM7 decodes ADPCM via SOUND_FORMAT_ADPCM — no software decompression.
+    logger_printf("[AUDIO] openDsndStream ch%d: ringBufAddr=0x%08lX "
+                  "ringBufBytes=%lu ch.volume=%u\n",
+                  ch, (unsigned long)(u32)buf->data,
+                  (unsigned long)totalBufBytes, (unsigned)c.volume);
+
+    // Force LOOP flag — the ring buffer must wrap continuously.
+    u32 sendFlags = (hdr.flags & ~(u8)DSND_FLAG_LOOP) | DSND_FLAG_LOOP;
+    u32 sendSamples = is16
+        ? (u32)(STREAM_BLOCK_SAMPLES * STREAM_BLOCKS)
+        : (u32)(STREAM_BUF_BYTES);
+
     arm7PlayStream(ch, buf,
                    hdr.rateDiv,
-                   // Force LOOP flag so hardware wraps at ring boundary
-                   (hdr.flags & ~DSND_FLAG_LOOP) | DSND_FLAG_LOOP,
-                   0,                       // loopStart = ring start
-                   is16 ? (u32)(STREAM_BLOCK_SAMPLES * STREAM_BLOCKS)
-                        : (u32)(STREAM_BUF_BYTES),
-                   channels[ch].volume);
+                   (u8)sendFlags,
+                   0,            // loopStart = ring start
+                   sendSamples,
+                   c.volume);
+
     c.active = true;
+
+    logger_printf("[AUDIO] openDsndStream ch%d: arm7PlayStream issued — "
+                  "rendezvous[%d] = { dataAddr=0x%08lX samples=%lu "
+                  "rateDiv=%u flags=0x%02X vol=%u }\n",
+                  ch, ch,
+                  (unsigned long)arm9PlayInfo(ch).dataAddr,
+                  (unsigned long)arm9PlayInfo(ch).sampleCount,
+                  (unsigned)arm9PlayInfo(ch).rateDiv,
+                  (unsigned)arm9PlayInfo(ch).flags,
+                  (unsigned)arm9PlayInfo(ch).volume);
+
     return true;
 }
 
@@ -465,15 +634,13 @@ void AudioSystem::_streamFillBlock(int ch, int block)
     if (!c.streamFd || !c.streamBuf) return;
     if (c.streamEof && !c.looping)   return;
 
-    // How many bytes make up one block?
     u32 blockBytes = c.streamIs16
         ? (u32)(STREAM_BLOCK_SAMPLES * 2)
         : (u32)(STREAM_BLOCK_SAMPLES);
-    // ADPCM: 2 nibbles per byte → STREAM_BLOCK_SAMPLES nibbles = half the bytes
     if (c.streamIsAdpcm)
         blockBytes = STREAM_BLOCK_SAMPLES / 2;
 
-    u8* dst = c.streamBuf->data + (u32)block * blockBytes;
+    u8* dst       = c.streamBuf->data + (u32)block * blockBytes;
     u32 remaining = c.streamTotalBytes - c.streamFilePos;
     u32 toRead    = (blockBytes < remaining) ? blockBytes : remaining;
 
@@ -482,14 +649,12 @@ void AudioSystem::_streamFillBlock(int ch, int block)
         c.streamFilePos += toRead;
     }
 
-    // Pad the tail of this block with silence if we hit EOF
     if (toRead < blockBytes) {
-        u8 silence = c.streamIs16 ? 0x00 : 0x80; // 0x80 = silence for unsigned PCM8
+        u8 silence = c.streamIs16 ? 0x00 : 0x80;
         memset(dst + toRead, silence, blockBytes - toRead);
         c.streamEof = true;
 
         if (c.looping) {
-            // Seek back to the start of the payload for the next fill
             fseek(c.streamFd, (long)c.streamDataOffset, SEEK_SET);
             c.streamFilePos = 0;
             c.streamEof     = false;
@@ -502,7 +667,7 @@ void AudioSystem::_streamFillBlock(int ch, int block)
 }
 
 // ---------------------------------------------------------------------------
-// Private: unload channel (handles both streamed and non-streamed)
+// Private: unload channel
 // ---------------------------------------------------------------------------
 void AudioSystem::unloadChannel(int ch)
 {
@@ -511,11 +676,11 @@ void AudioSystem::unloadChannel(int ch)
     if (c.streaming) {
         if (c.streamBuf) c.streamBuf->active = 0;
         if (c.streamFd)  { fclose(c.streamFd); c.streamFd = nullptr; }
-        c.streamBuf      = nullptr;
-        c.streamBufIdx   = 0;
-        c.streamFd       = nullptr;
-        c.streaming      = false;
-        c.streamEof      = false;
+        c.streamBuf    = nullptr;
+        c.streamBufIdx = 0;
+        c.streamFd     = nullptr;
+        c.streaming    = false;
+        c.streamEof    = false;
     }
 
     if (c.data) {
@@ -535,20 +700,28 @@ void AudioSystem::arm7Play(int ch, const DsndHeader* hdr,
 {
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
 
-    s_arm7PlayInfos[ch].dataAddr    = (u32)data;
-    s_arm7PlayInfos[ch].sampleCount = hdr->sampleCount;
-    s_arm7PlayInfos[ch].loopStart   = hdr->loopStart;
-    s_arm7PlayInfos[ch].rateDiv     = hdr->rateDiv;
-    s_arm7PlayInfos[ch].flags       = hdr->flags;
-    s_arm7PlayInfos[ch].volume      = vol;
-    s_arm7PlayInfos[ch].channelId   = (u8)ch;
+    arm9PlayInfo(ch).dataAddr    = (u32)data;
+    arm9PlayInfo(ch).sampleCount = hdr->sampleCount;
+    arm9PlayInfo(ch).loopStart   = hdr->loopStart;
+    arm9PlayInfo(ch).rateDiv     = hdr->rateDiv;
+    arm9PlayInfo(ch).flags       = hdr->flags;
+    arm9PlayInfo(ch).volume      = vol;
+    arm9PlayInfo(ch).channelId   = (u8)ch;
+
+    logger_printf("[AUDIO] arm7Play ch%d: dataAddr=0x%08lX samples=%lu "
+                  "rateDiv=%u flags=0x%02X vol=%u\n",
+                  ch, (unsigned long)(u32)data,
+                  (unsigned long)hdr->sampleCount,
+                  (unsigned)hdr->rateDiv,
+                  (unsigned)hdr->flags,
+                  (unsigned)vol);
 
     channels[ch].active = true;
     sendFifoPlay(ch);
 }
 
 // ---------------------------------------------------------------------------
-// Private: ARM7 IPC — streaming (ring buffer already in EWRAM)
+// Private: ARM7 IPC — streaming
 // ---------------------------------------------------------------------------
 void AudioSystem::arm7PlayStream(int ch, StreamBuffer* buf,
                                   u8 rateDiv, u8 flags,
@@ -556,14 +729,20 @@ void AudioSystem::arm7PlayStream(int ch, StreamBuffer* buf,
 {
     if (ch < 0 || ch >= AUDIO_MAX_CHANNELS) return;
 
-    // Point ARM7 directly at the EWRAM ring buffer
-    s_arm7PlayInfos[ch].dataAddr    = (u32)buf->data;
-    s_arm7PlayInfos[ch].sampleCount = sampleCount;
-    s_arm7PlayInfos[ch].loopStart   = loopStart;
-    s_arm7PlayInfos[ch].rateDiv     = rateDiv;
-    s_arm7PlayInfos[ch].flags       = flags;
-    s_arm7PlayInfos[ch].volume      = vol;
-    s_arm7PlayInfos[ch].channelId   = (u8)ch;
+    arm9PlayInfo(ch).dataAddr    = (u32)buf->data;
+    arm9PlayInfo(ch).sampleCount = sampleCount;
+    arm9PlayInfo(ch).loopStart   = loopStart;
+    arm9PlayInfo(ch).rateDiv     = rateDiv;
+    arm9PlayInfo(ch).flags       = flags;
+    arm9PlayInfo(ch).volume      = vol;
+    arm9PlayInfo(ch).channelId   = (u8)ch;
+
+    logger_printf("[AUDIO] arm7PlayStream ch%d: bufAddr=0x%08lX samples=%lu "
+                  "rateDiv=%u flags=0x%02X loopStart=%u vol=%u\n",
+                  ch, (unsigned long)(u32)buf->data,
+                  (unsigned long)sampleCount,
+                  (unsigned)rateDiv, (unsigned)flags,
+                  (unsigned)loopStart, (unsigned)vol);
 
     sendFifoPlay(ch);
 }
@@ -585,7 +764,7 @@ void AudioSystem::arm7Stop(int ch)
 }
 
 // ---------------------------------------------------------------------------
-// Private: find a free SFX channel (skips music channels 0-1)
+// Private: find a free channel
 // ---------------------------------------------------------------------------
 int AudioSystem::findFreeChannel(bool music)
 {
@@ -594,11 +773,13 @@ int AudioSystem::findFreeChannel(bool music)
         if (!channels[i].active && channels[i].data == nullptr
                 && !channels[i].streaming)
             return i;
+    logger_printf("[AUDIO] findFreeChannel(music=%d): NO FREE CHANNEL\n",
+                  (int)music);
     return -1;
 }
 
 // ---------------------------------------------------------------------------
-// Public: Debug info getters
+// Debug info getters
 // ---------------------------------------------------------------------------
 const char* AudioSystem::getCurrentTrackFilename() const
 {
@@ -608,17 +789,14 @@ const char* AudioSystem::getCurrentTrackFilename() const
 
 u32 AudioSystem::getPlaybackPositionSamples() const
 {
-    // For streaming music (channel 1), calculate sample position from file position
     if (channels[1].streaming && channels[1].streamBuf) {
         if (channels[1].streamIsAdpcm) {
-            // ADPCM: 2 samples per byte, but skip the 4-byte preamble on first read
-            u32 streamBytes = channels[1].streamFilePos;
-            if (streamBytes > 0) streamBytes -= 4;  // Account for preamble
-            return (streamBytes * 2);
+            u32 b = channels[1].streamFilePos;
+            if (b > 0) b -= 4;
+            return b * 2;
         } else {
-            // PCM: calculate from byte position
-            u32 bytesPerSample = channels[1].streamIs16 ? 2 : 1;
-            return channels[1].streamFilePos / bytesPerSample;
+            u32 bps = channels[1].streamIs16 ? 2u : 1u;
+            return channels[1].streamFilePos / bps;
         }
     }
     return 0;
@@ -626,28 +804,24 @@ u32 AudioSystem::getPlaybackPositionSamples() const
 
 u32 AudioSystem::getPlaybackPositionSeconds() const
 {
-    const u32 rateDivTable[] = { 32768, 16384, 8192, 5512 };
+    const u32 rateTable[] = { 32768, 16384, 8192, 5512 };
     if (currentTrack >= trackCount) return 0;
-    
-    // Get the streaming channel's rate info
     if (channels[1].streaming) {
-        u32 sampleRate = rateDivTable[channels[1].streamRateDiv];
-        u32 samples = getPlaybackPositionSamples();
-        return samples / sampleRate;
+        u32 rate = rateTable[channels[1].streamRateDiv];
+        return getPlaybackPositionSamples() / rate;
     }
     return 0;
 }
 
-void AudioSystem::getTrackFormatInfo(int& outSampleRate, int& outBits, bool& outIsAdpcm) const
+void AudioSystem::getTrackFormatInfo(int& outRate, int& outBits,
+                                      bool& outIsAdpcm) const
 {
-    outSampleRate = 0;
-    outBits = 0;
+    outRate    = 0;
+    outBits    = 0;
     outIsAdpcm = false;
-
     if (!channels[1].streaming) return;
-
-    const u32 rateDivTable[] = { 32768, 16384, 8192, 5512 };
-    outSampleRate = rateDivTable[channels[1].streamRateDiv];
-    outBits = channels[1].streamIs16 ? 16 : 8;
+    const u32 rateTable[] = { 32768, 16384, 8192, 5512 };
+    outRate    = (int)rateTable[channels[1].streamRateDiv];
+    outBits    = channels[1].streamIs16 ? 16 : 8;
     outIsAdpcm = channels[1].streamIsAdpcm;
 }

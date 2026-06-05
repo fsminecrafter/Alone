@@ -7,15 +7,28 @@
 // ------------
 //   ARM9 side  (this file + AudioSystem.cpp)
 //     • Manages .dsnd sample data / stream buffers in EWRAM
-//     • Pushes play/stop/volume commands to ARM7 via raw IPC FIFO
+//     • Pushes play/stop/volume commands to ARM7 via calico PXI
 //     • Streams music from SD card using a double-buffer refilled per frame
 //     • Updates positional emitter volumes once per frame
 //
 //   ARM7 side  (AudioArm7.cpp)
-//     • Receives play/stop/volume commands via FIFO_USER_01
+//     • Receives play/stop/volume commands via PxiChannel_User0
 //     • Drives SCHANNEL hardware registers directly
 //     • For streaming channels: plays the ring buffer in SOUND_REPEAT mode;
 //       ARM9 keeps refilling the inactive half each frame
+//
+//   IPC protocol
+//     All commands are single 26-bit PXI packets (calico PxiChannel_User0).
+//     Packet layout:  cmd[25:18] | ch[17:14] | vol[6:0]
+//
+//     For PLAY, ARM9 writes the Arm7PlayInfo struct (defined below) into the
+//     shared EWRAM array s_arm7PlayInfos[ch], flushes the D-cache, then sends
+//     a single AUDIO_CMD_PLAY packet carrying only the channel index.  ARM7
+//     reads s_arm7PlayInfos[ch] directly — no pointer is ever sent over PXI.
+//
+//     WHY NO POINTER: PXI carries only 26 bits.  NDS main RAM starts at
+//     0x02000000; bit 26 of that address is 1 and gets silently truncated,
+//     turning any valid EWRAM pointer into a garbage address on the ARM7 side.
 //
 //   .dsnd format  (produced by the editor's DSify / convert pipeline)
 //     Offset  Size  Field
@@ -57,7 +70,16 @@
 #include <math.h>
 
 // ---------------------------------------------------------------------------
-// IPC command packet  (fits in one 32-bit FIFO word)
+// IPC command packet
+//
+// Calico PXI carries only 26 bits (bits 25:0) per packet.
+// ARM7 decodes the payload as:
+//   cmd = (value >> 18) & 0xFF   → must live at bits 25:18
+//   ch  = (value >> 14) & 0x0F   → must live at bits 17:14
+//   vol = value & 0x7F            → lives at bits  6:0
+//
+// The old packing (cmd<<24) placed cmd at bits 31:24, which are silently
+// truncated by PXI, so every command arrived as garbage on ARM7.
 // ---------------------------------------------------------------------------
 #define AUDIO_CMD_PLAY      0x01
 #define AUDIO_CMD_STOP      0x02
@@ -68,7 +90,48 @@
 #define AUDIO_CMD_PING_ACK  0x11
 
 #define AUDIO_PACK(cmd, ch, vol) \
-    (u32)(((cmd)<<24) | ((ch)<<16) | ((vol)&0x7F))
+    (u32)(((u32)(cmd)<<18) | (((u32)(ch)&0x0F)<<14) | ((u32)(vol)&0x7F))
+
+// ---------------------------------------------------------------------------
+// Shared IPC play-info struct + fixed EWRAM rendezvous address
+//
+// ARM9 and ARM7 are linked as completely separate binaries with separate
+// symbol tables — "extern" across the two executables does not work.
+//
+// Instead, both sides agree on a fixed physical address in main EWRAM that
+// is well above the ARM7 heap and below the typical ARM9 stack.  ARM9 writes
+// the array at that address before sending a PLAY packet; ARM7 reads it by
+// casting the same address.  No pointer is ever sent over PXI.
+//
+// Address choice: 0x023FF000 — top 4 KB of the 4 MB EWRAM window.
+//   • ARM7 heap grows upward from 0x02380000; 0x023FF000 is safely above it.
+//   • ARM9 heap/stack live below 0x023F0000 in a typical devkitPro layout,
+//     but the exact margin depends on your linker scripts.  If you see heap
+//     corruption, move this lower (e.g. 0x023FE000) and recheck both scripts.
+//   • sizeof(Arm7PlayInfo) = 16 bytes; 16 channels = 256 bytes total — well
+//     within the 4 KB page reserved here.
+//
+// ARM9 side: the array is placed here via a volatile pointer cast + DC_Flush.
+// ARM7 side: the array is accessed via the same volatile pointer cast.
+//   No section attribute or linker script change is required on either side.
+// ---------------------------------------------------------------------------
+#define AUDIO_SHARED_EWRAM_ADDR  0x023FF000u
+
+struct Arm7PlayInfo {
+    u32  dataAddr;      // physical address of sample data (in EWRAM)
+    u32  sampleCount;   // total samples (or ADPCM nibbles)
+    u16  loopStart;     // sample index for loop point
+    u8   rateDiv;       // 0=32768 Hz … 3=5512 Hz
+    u8   flags;         // DSND_FLAG_* bitmask
+    u8   volume;        // 0-127
+    u8   channelId;     // which SCHANNEL to use
+    u16  pad;           // explicit padding — sizeof(Arm7PlayInfo) must be 16
+};
+
+// Convenience accessor used by both ARM9 and ARM7.
+// Volatile because ARM7 reads what ARM9 wrote without going through a cache.
+#define AUDIO_PLAY_INFO_ARRAY() \
+    ((volatile Arm7PlayInfo*)(AUDIO_SHARED_EWRAM_ADDR))
 
 // ---------------------------------------------------------------------------
 // DSND header
@@ -140,8 +203,10 @@ struct alignas(4) StreamBuffer {
 };
 
 // ---------------------------------------------------------------------------
-// Runtime types
+// Runtime types  (ARM9 only)
 // ---------------------------------------------------------------------------
+#ifndef ARM7
+
 struct AudioChannel {
     bool    active;
     bool    looping;
@@ -166,6 +231,9 @@ struct AudioChannel {
     u8            streamFlags;
     u16           streamLoopStart;
     u32           streamSampleCount;
+    // Accumulator for sample-accurate refill timing (see update()).
+    // Counts fractional samples consumed by hardware; refill when >= STREAM_BLOCK_SAMPLES.
+    float         streamRefillAcc;
 };
 
 struct RuntimeEmitter {
@@ -278,3 +346,5 @@ private:
 };
 
 extern AudioSystem g_audio;
+
+#endif // !ARM7
