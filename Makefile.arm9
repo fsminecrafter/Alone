@@ -21,6 +21,8 @@ BUILD		:= build_arm9
 SOURCES		:= arm9/source data
 INCLUDES	:= common/include $(BUILD)
 
+CALICO      := /opt/devkitpro/calico
+
 #---------------------------------------------------------------------------------
 # ARM9 uses armv5te / arm946e-s with Thumb interworking.
 # -mthumb here enables Thumb encoding for most functions (THUMB-2 not available
@@ -38,9 +40,9 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions
 ASFLAGS		:= -g $(ARCH)
 LDFLAGS		:= -specs=ds_arm9.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS		:= -lnds9 -lfat
+LIBS		:= -lnds9 -lfat -lcalico_ds9 
 
-LIBDIRS		:= $(LIBNDS)
+LIBDIRS		:= $(CALICO) $(LIBNDS)
 
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))

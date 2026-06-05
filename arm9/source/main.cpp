@@ -1,5 +1,6 @@
 #include <nds.h>
 #include <fat.h>
+#include <calico.h>
 #include <stdio.h>
 #include <math.h>
 #include "MemoryManager.h"
@@ -7,7 +8,8 @@
 #include "ObjectSystem.h"
 #include "AudioSystem.h"
 #include "lighting.h"
-#include "ipc_fifo.h"
+
+#include "../common/include/logger.h"
 
 float g_lightX, g_lightY, g_lightZ;
 float g_ambient, g_diffuse;
@@ -232,6 +234,8 @@ int main()
                 31, 0, false, true);
     consoleSelect(&bottomConsole);
     iprintf("Boot OK\n");
+    logger_init();
+    logger_printf("[BOOT] Boot OK\n");
     for (int i = 0; i < 60; i++) swiWaitForVBlank();  // can you see this?
 
     setup3D();
@@ -240,25 +244,11 @@ int main()
     initLight();
     applyTimeOfDay();
     
-    // Drain any debug messages from ARM7 startup before initializing logger.
-    // ARM7 sends 0x20 command with u16 status code.
-    for (int i = 0; i < 100; i++) {
-        if (fifoCheckValue32(FIFO_USER_01)) {
-            u32 v = fifoGetValue32(FIFO_USER_01);
-            u8 cmd = (u8)((v >> 24) & 0xFF);
-            u16 status = (u16)(v & 0xFFFF);
-            if (cmd == 0x20) {  // AUDIO_CMD_DEBUG
-                iprintf("ARM7 debug: 0x%04X\n", (unsigned)status);
-            }
-        } else {
-            break;  // No more messages waiting
-        }
-    }
+    // ARM7 will signal readiness via calico PXI when it's ready.
+    // AudioArm7 sends: pxiSend(AUDIO_PXI_CHANNEL, (AUDIO_CMD_DEBUG<<18)|0x0099)
+    // Synchronization will happen implicitly when we call startPlaylist().
     
-    // Initialize persistent logger (writes to fat:/Alone/log.txt)
-    iprintf("Initializing logger...\n");
-    logger_init();
-    iprintf("Logger OK\n");
+    logger_printf("[BOOT] 3D, lighting, and logger initialized\n");
 
     static MemoryManager mem;
     mem.setSwappiness(30);
@@ -270,15 +260,20 @@ int main()
     if (testFd) {
         fclose(testFd);
         iprintf("world.world EXISTS on SD\n");
+        logger_printf("[BOOT] world.world exists\n");
     } else {
         iprintf("ERROR: world.world NOT FOUND\n");
         iprintf("Check fat:/Alone/ path\n");
+        logger_printf("[BOOT] ERROR: fat:/Alone/world.world not found\n");
     }
     
     static ChunkLibrary world(&mem);
     bool worldLoaded = world.loadWorld("fat:/Alone/world.world");
     
     iprintf("STAGE 4: world load result=%d\n", worldLoaded);
+    logger_printf("[BOOT] world load result=%d chunks=%lu\n",
+                  worldLoaded,
+                  worldLoaded ? (unsigned long)world.totalChunkCount() : 0UL);
 
     consoleClear();
     if (worldLoaded) {
@@ -349,6 +344,7 @@ int main()
             iprintf("Frame %d: cam=[%.1f, %.1f] vel=[%.2f, %.2f]\n",
                     frame, px, pz, vx, vz);
         }
+        logger_periodic((unsigned int)frame);
         u32 down = keysDown();
         if (held & KEY_START) break;
 

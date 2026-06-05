@@ -5612,12 +5612,14 @@ class AudioPanel(QWidget):
             return None
 
         # Ask for conversion settings
+        # rate_div sets the NDS SCHANNEL_TIMER and MUST match the encoded sample rate.
+        # The old "22050 Hz (rate 0 source)" stored rateDiv=0 (hardware=32768 Hz) but
+        # encoded at 22050 Hz — causing ~1.49x speed playback. That option is removed.
         rate_items = {
             "32768 Hz (rate 0)": (0, 32768),
-            "22050 Hz (rate 0 source)": (0, 22050),
             "16384 Hz (rate 1)": (1, 16384),
-            "8192 Hz (rate 2)": (2, 8192),
-            "5512 Hz (rate 3)": (3, 5512),
+            "8192 Hz (rate 2)":  (2, 8192),
+            "5512 Hz (rate 3)":  (3, 5512),
         }
         rate_str, ok = QInputDialog.getItem(self, "Sample rate", "Output rate:", list(rate_items.keys()), 1, False)
         if not ok:
