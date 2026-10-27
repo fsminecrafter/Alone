@@ -10,7 +10,17 @@ int64_t doorKey(int x, int y, int dir) { return tileKey(x, y) * 2 + dir; }
 }
 
 World::World(const MapData& map, const ItemRegistry& items, uint32_t seed)
-    : map_(map), items_(items), seed_(seed), gen_(map, seed), clock_(seed, map.latitude()) {}
+    : map_(map), items_(items), seed_(seed), gen_(map, seed), clock_(seed, map.latitude()) {
+    // Power fails somewhere between two and twelve days into the game
+    powerOffMinutes_ = clock_.totalMinutes() + (2.0 + 10.0 * hashFloat(hash32(seed ^ 0x90E7))) * 1440.0;
+}
+
+bool World::buildingLightsOn(int id) const {
+    const Building* b = gen_.building(id);
+    if (!b || b->isOutbuilding) return false;
+    float chance = b->type == BuildingType::House || b->type == BuildingType::Apartment ? 0.3f : 0.55f;
+    return hashFloat(hash3(id, 7, 0x116, seed_)) < chance;
+}
 
 // ---------------------------------------------------------------------------
 // Tiles
@@ -344,6 +354,14 @@ float World::temperatureAt(Vec2 p) {
 void World::update(float gameMinutes, Vec2 focus) {
     clock_.advance(gameMinutes);
     clockTime_ += gameMinutes;
+    // Snow settles when it snows below freezing and melts in the thaw; rain wets the ground
+    const Weather& wx = clock_.weather();
+    float t = clock_.outdoorTempC();
+    float hours = gameMinutes / 60.0f;
+    if (wx.kind == WeatherKind::Snow) snowCover_ = std::min(1.0f, snowCover_ + hours * 0.12f * wx.rain);
+    else if (t > 0.5f) snowCover_ = std::max(0.0f, snowCover_ - hours * 0.03f * (t - 0.5f + (wx.rain > 0 ? 2.0f : 0.0f)));
+    if (wx.rain > 0.05f && wx.kind != WeatherKind::Snow) wetness_ = std::min(1.0f, wetness_ + hours * 1.5f * wx.rain);
+    else wetness_ = std::max(0.0f, wetness_ - hours * (0.15f + 0.02f * std::max(0.0f, t)));
     for (auto& f : fires_) {
         if (!f.lit) continue;
         // Rain makes fires burn down faster
@@ -351,8 +369,7 @@ void World::update(float gameMinutes, Vec2 focus) {
         if (f.fuelMinutes <= 0) { f.fuelMinutes = 0; f.lit = false; }
     }
     // Food on the ground and in containers ages too (cheaply, only near the player)
-    float hours = gameMinutes / 60.0f;
-    float temp = clock_.outdoorTempC();
+    float temp = t;
     for (auto& [key, stack] : ground_) {
         for (auto& it : stack)
             if (it.def->spoilHours > 0 && !(it.def->sealed && !it.opened))

@@ -104,6 +104,14 @@ public:
     float temperatureAt(Vec2 p);
     float outdoorTemp() const { return clock_.outdoorTempC(); }
 
+    // The grid keeps running for a while after everyone vanished.
+    bool powerOn() const { return clock_.totalMinutes() < powerOffMinutes_; }
+    double powerOffMinutes() const { return powerOffMinutes_; }
+    // Some people left their lights on (only matters while there is power).
+    bool buildingLightsOn(int buildingId) const;
+    float snowCover() const { return snowCover_; }
+    float groundWetness() const { return wetness_; }
+
     void update(float gameMinutes, Vec2 focus);
     void unloadFarChunks(Vec2 focus, float radius);
     size_t loadedChunks() const { return chunks_.size(); }
@@ -124,7 +132,9 @@ private:
     std::vector<Snare> snares_;
     int nextId_ = 1;
     float clockTime_ = 0;
-    uint32_t versionCounter_ = 1;   // chunk versions are unique, so stale meshes are always rebuilt
+    uint32_t versionCounter_ = 1;
+    double powerOffMinutes_ = 0;
+    float snowCover_ = 0, wetness_ = 0;   // chunk versions are unique, so stale meshes are always rebuilt
 public:
     int newId() { return nextId_++; }
 };

@@ -1,0 +1,4 @@
+#version 330
+// Shadow map pass: only depth matters.
+out vec4 finalColor;
+void main() { finalColor = vec4(1.0); }

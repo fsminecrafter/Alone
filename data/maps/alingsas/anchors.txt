@@ -1,0 +1,5 @@
+# Points used to align OpenStreetMap data with this map.
+# "<OSM name>" <x> <y>   (x/y in map pixels of the reference image)
+"Gerdsken" 737.7 581.3
+"Alingsås lasarett" 527.8 387.6
+"Villa Plantaget" 606 323

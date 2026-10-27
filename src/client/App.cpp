@@ -17,6 +17,8 @@ namespace alone {
 
 namespace {
 
+bool rc_isWater(Ground g) { return g == Ground::WaterShallow || g == Ground::WaterDeep; }
+
 constexpr float kBaseW = 1280, kBaseH = 720;
 
 std::string fmt(const char* f, ...) {
@@ -104,7 +106,11 @@ int App::run(int argc, char** argv) {
         update(dt);
 
         BeginDrawing();
-        renderer_.draw(game_, time_, hover_, state_ == State::Playing && !ui::mouseOverUi() && overlay_ != Overlay::Map);
+        HoverInfo hv;
+        hv.point = hover_;
+        hv.show = state_ == State::Playing && !ui::mouseOverUi() && overlay_ != Overlay::Map && !menu_.open;
+        hv.colour = hoverColour();
+        renderer_.draw(game_, time_, dt, hv);
         if (state_ == State::Menu) drawMenu();
         else {
             drawHud();
@@ -257,6 +263,21 @@ void App::continueGame() {
     overlay_ = Overlay::None;
     menu_.open = false;
     selectedUid_ = 0;
+}
+
+Color App::hoverColour() {
+    // Red over animals, warm over things you can use, white otherwise
+    for (const auto& a : game_.animals().animals())
+        if (distance(a.pos, hover_) < std::max(0.7f, a.def->size * 0.6f)) return a.alive() ? Color{230, 80, 60, 255} : Color{230, 170, 80, 255};
+    int tx = (int)std::floor(hover_.x), ty = (int)std::floor(hover_.y);
+    World& w = game_.world();
+    const Tile& t = w.tile(tx, ty);
+    int dx, dy, dd;
+    if (!w.containerKindAt(tx, ty).empty() || w.findDoorNear(hover_, 0.6f, dx, dy, dd) || t.prop == Prop::LingonBush ||
+        t.prop == Prop::BlueberryBush || t.prop == Prop::RoseBush || t.prop == Prop::Bed || t.prop == Prop::Toilet ||
+        t.prop == Prop::RainBarrel || rc_isWater(t.ground))
+        return Color{240, 200, 110, 255};
+    return Color{235, 235, 230, 255};
 }
 
 void App::newGame() {

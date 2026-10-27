@@ -40,6 +40,7 @@ private:
     void updatePlaying(float dt);
     void worldInput();
     void openItemMenu(const ItemRef& ref, Vector2 at);
+    Color hoverColour();
 
     // drawing
     void drawMenu();
