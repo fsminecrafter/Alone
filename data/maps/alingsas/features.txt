@@ -1,0 +1,74 @@
+# Hand-placed features for Alingsås. Coordinates are map pixels
+# (6.85 m each), same space as terrain.pgm.
+#
+#   railway  x0 y0 x1 y1 ...                      polyline
+#   district "Name" x y radius                    place names shown in the HUD
+#   landmark <kind> "Name" x y [w h]              a special building (w/h in metres)
+#   water    "Name" x y                           a named lake/river label
+#
+#   road     <1 minor|2 major> x0 y0 x1 y1 ...    extra streets (the centre's grid
+#                                                 was hidden under the map label)
+#   plaza    "Name" x y w h                       paved square (w/h in metres)
+#   dense    "Name" x y radius                    old-town block: buildings line the streets
+#
+# Landmark kinds: church, townhall, station, hospital, hostel, manor,
+# grocery, gasstation, school, pharmacy, hardware, police, firestation, sports
+
+# Västra stambanan (Gothenburg - Stockholm main line)
+railway 277 767 273 680 263 640 255 597 263 557 290 513 340 457 373 422 423 413 560 413 630 416 692 410 730 400 780 380 830 333 907 283 973 227 993 163 1003 90 1010 0
+
+# Centrum street grid (traced from the reference, partly reconstructed)
+road 2 597 330 593 345 590 368 583 400 578 420 576 430
+road 2 607 336 640 345 675 352 700 357 720 358
+road 2 700 357 697 375 692 397 687 405
+road 2 570 399 581 401 610 408 640 412 670 410 687 405
+road 1 600 342 650 352 700 362
+road 1 595 356 625 360
+road 1 592 368 620 373 660 378 698 381
+road 1 588 384 640 391 694 394
+road 1 626 350 620 380 614 406
+road 1 652 352 650 380 648 411
+road 1 676 357 674 383 672 409
+road 1 602 357 600 370
+road 1 677 326 676 357
+plaza "Stora torget" 640 362 46 30
+dense "Centrum" 645 375 55
+
+district "Centrum" 650 375 45
+district "Nolhaga" 485 345 45
+district "Noltorp" 455 135 90
+district "Nygård-Nolby" 840 200 90
+district "Stadsskogen-Tuvebo" 515 570 90
+district "Gråbo" 770 590 70
+district "Ängabo" 835 540 60
+district "Lövekulle" 200 580 80
+district "Saxebäcken" 255 165 60
+district "Björkekärr" 60 45 80
+district "Bälinge" 1200 45 80
+district "Maryd" 1155 725 80
+district "Sörhaga" 560 450 50
+district "Kristineberg" 860 380 70
+district "Bjärke" 1100 150 90
+
+water "Mjörn" 150 380
+water "Gerdsken" 735 560
+water "Säveån" 780 345
+
+landmark townhall "Rådhuset" 640 356 22 14
+landmark church "Christinae kyrka" 663 363 32 16
+landmark station "Alingsås station" 640 424 40 12
+landmark hospital "Alingsås lasarett" 525 386 110 45
+landmark hostel "Villa Plantaget" 606 312 20 14
+landmark hostel "Mittes Rum" 673 465 16 12
+landmark manor "Nolhaga slott" 472 330 24 16
+landmark grocery "Centrum livs" 661 401 30 22
+landmark grocery "Noltorp livs" 600 200 34 24
+landmark grocery "Gråbo livs" 790 505 30 22
+landmark pharmacy "Apotek" 632 381 14 12
+landmark gasstation "Bensinstation" 760 418 18 12
+landmark hardware "Järnhandel" 830 425 40 28
+landmark school "Noltorpsskolan" 560 160 50 26
+landmark school "Ängaboskolan" 840 560 46 24
+landmark police "Polisstation" 686 371 26 16
+landmark firestation "Brandstation" 600 440 26 18
+landmark sports "Mjörnvallen" 465 300 20 12

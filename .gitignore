@@ -68,7 +68,7 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# NDS stuff
-*.nds
-*.lst
-*.map
+# Game output
+settings.ini
+screenshot_*.png
+__pycache__/
