@@ -9,8 +9,9 @@ and listen to your body, because it will tell you *how* you feel but never
 
 | | |
 |---|---|
-| ![Forest near Lövekulle](docs/screenshots/forest.jpg) | ![Map of Alingsås](docs/screenshots/map.jpg) |
-| ![Inventory](docs/screenshots/inventory.jpg) | ![Night by the station](docs/screenshots/station_night.jpg) |
+| ![Symptoms with a tooltip](docs/screenshots/symptoms.jpg) | ![Map of Alingsås](docs/screenshots/map.jpg) |
+| ![Forest near Lövekulle](docs/screenshots/forest.jpg) | ![The old town around Stora torget](docs/screenshots/torget.jpg) |
+| ![Inventory](docs/screenshots/inventory.jpg) | ![Cause of death is revealed only when you die](docs/screenshots/death.jpg) |
 
 > Early prototype (v0.1). The game was originally an NDS project; it has been
 > rewritten from scratch in C++17 for PC (Linux and Windows).

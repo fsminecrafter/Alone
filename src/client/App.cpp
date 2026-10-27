@@ -152,6 +152,7 @@ int App::run(int argc, char** argv) {
             else {
                 const Stop& st = stops[idx];
                 if (sub == 0) {
+                    menu_.open = false;
                     if (idx == 1) newGame();
                     if (idx == 2 || idx == 3) {
                         // Find a kitchen container in the start house
