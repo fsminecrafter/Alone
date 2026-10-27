@@ -124,6 +124,7 @@ private:
     std::vector<Snare> snares_;
     int nextId_ = 1;
     float clockTime_ = 0;
+    uint32_t versionCounter_ = 1;   // chunk versions are unique, so stale meshes are always rebuilt
 public:
     int newId() { return nextId_++; }
 };

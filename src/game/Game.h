@@ -182,6 +182,7 @@ private:
     std::deque<Message> messages_;
     std::vector<SoundEvent> sounds_;
     float stepDistance_ = 0;
+    float unloadTimer_ = 0;
     DeathInfo death_;
     uint32_t seed_ = 0;
     float minutesPerSecond_ = 1.0f;   // 1 game minute per real second: a day lasts 24 minutes

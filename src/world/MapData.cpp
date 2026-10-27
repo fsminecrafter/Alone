@@ -2,6 +2,7 @@
 #include "core/Config.h"
 #include "core/Log.h"
 #include "core/Noise.h"
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <fstream>

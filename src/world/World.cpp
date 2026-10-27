@@ -35,6 +35,7 @@ Chunk& World::chunk(int cx, int cy) {
             if (o != overrides_.end() && o->second.hasProp) c->at(lx, ly).prop = o->second.prop;
         }
     c->lastUsed = clockTime_;
+    c->version = ++versionCounter_;
     Chunk& ref = *c;
     chunks_[key] = std::move(c);
     return ref;
@@ -60,7 +61,7 @@ void World::touch(int x, int y) {
     int cx = floorDiv(x, kChunkSize), cy = floorDiv(y, kChunkSize);
     for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx)
-            if (Chunk* c = chunkIfLoaded(cx + dx, cy + dy)) ++c->version;
+            if (Chunk* c = chunkIfLoaded(cx + dx, cy + dy)) c->version = ++versionCounter_;
 }
 
 void World::setProp(int x, int y, Prop p) {

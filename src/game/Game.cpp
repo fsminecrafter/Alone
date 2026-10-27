@@ -2,6 +2,7 @@
 #include "core/Log.h"
 #include "core/Paths.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 
@@ -189,6 +190,11 @@ void Game::update(float dt, const PlayerInput& input) {
     float gameMinutes = dt * minutesPerSecond_ * speed_ * timeScale;
 
     world_->update(gameMinutes, player_.pos);
+    unloadTimer_ += dt;
+    if (unloadTimer_ > 5.0f) {   // keep memory bounded while exploring
+        unloadTimer_ = 0;
+        world_->unloadFarChunks(player_.pos, 420.0f);
+    }
     updatePlayer(dt, gameMinutes, input);
     updateCombat(dt, input);
 

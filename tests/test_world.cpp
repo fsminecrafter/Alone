@@ -94,3 +94,22 @@ TEST(walls_block_movement) {
     Vec2 end = w.moveCircle(outside, {0, 4.0f}, 0.3f);
     CHECK(end.y < b->rect.y);
 }
+
+TEST(chunks_unload_and_keep_changes) {
+    World& w = *fx().world;
+    Vec2 a{3000, 2500};
+    // Find a tree, chop it (permanent change), walk far away, come back
+    int tx = -1, ty = -1;
+    for (int y = 2500; y < 2600 && tx < 0; ++y)
+        for (int x = 3000; x < 3100; ++x)
+            if (isTree(w.tile(x, y).prop)) { tx = x; ty = y; break; }
+    if (tx < 0) return;
+    w.setProp(tx, ty, Prop::Stump);
+    uint32_t v1 = w.chunk(floorDiv(tx, kChunkSize), floorDiv(ty, kChunkSize)).version;
+    w.unloadFarChunks(Vec2{8000, 4000}, 300);
+    CHECK(w.chunkIfLoaded(floorDiv(tx, kChunkSize), floorDiv(ty, kChunkSize)) == nullptr);
+    CHECK(w.tile(tx, ty).prop == Prop::Stump);
+    uint32_t v2 = w.chunk(floorDiv(tx, kChunkSize), floorDiv(ty, kChunkSize)).version;
+    CHECK(v2 != v1);
+    (void)a;
+}
