@@ -15,6 +15,15 @@ struct HoverInfo {
     Color colour = WHITE;
 };
 
+// Graphics settings the renderer understands (chosen in Settings > Graphics).
+struct GraphicsOptions {
+    int shadows = 2;          // 0 off, 1 low (1024), 2 high (2048), 3 ultra (4096)
+    int maxLights = 32;       // 8, 16 or 32 point lights per frame
+    bool weather = true;      // rain and snow particles
+    bool visionCone = true;   // darken what the character can't see
+    float brightness = 1.0f;  // 0.7 .. 1.4
+};
+
 // Draws the world in 3D with an isometric (orthographic) camera, a sun shadow
 // map, many coloured lights, and procedural surface materials.
 class Renderer {
@@ -39,6 +48,8 @@ public:
     Vec2 screenToWorldDir(float sx, float sy) const;
 
     void draw(Game& game, float time, float dt, const HoverInfo& hover);
+    void setOptions(const GraphicsOptions& o);
+    const GraphicsOptions& options() const { return opts_; }
     void invalidateAll();
 
     // Renders the player character alone on a small stage (for the animation showcase)
@@ -108,7 +119,9 @@ private:
     int locSunDir_, locSunColor_, locAmbient_, locSky_, locPlayer_, locViewDir_, locCutRadius_, locCutaway_;
     int locLights_, locLightColors_, locLightCount_, locTime_, locFogColor_, locFogStart_, locFogEnd_, locUnlit_;
     int locSpotPos_, locSpotDir_, locSpotOn_, locSnow_, locWet_, locEmissive_, locLampGlow_, locVision_, locFacing_;
-    int locLightVP_, locShadowMap_, locShadowOn_, locShadowTexel_;
+    int locLightVP_, locShadowMap_, locShadowOn_, locShadowTexel_, locBrightness_;
+    GraphicsOptions opts_;
+    void reloadShadowMap();
     Mesh cube_{}, sphere_{}, cylinder_{}, cone_{};
     std::unordered_map<int64_t, ChunkGfx> chunks_;
     std::unordered_map<int, BuildingGfx> buildings_;

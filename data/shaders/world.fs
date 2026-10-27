@@ -40,6 +40,7 @@ uniform mat4 lightVP;
 uniform sampler2D shadowMap;
 uniform float shadowOn;
 uniform float shadowTexel;
+uniform float brightness;    // player setting, 1 = neutral
 
 out vec4 finalColor;
 
@@ -249,5 +250,5 @@ void main() {
     float fd = length(fragWorld.xz - playerPos.xz);
     float fog = clamp((fd - fogStart) / max(fogEnd - fogStart, 0.01), 0.0, 1.0);
     c = mix(c, fogColor, fog);
-    finalColor = vec4(c, 1.0);
+    finalColor = vec4(c * brightness, 1.0);
 }

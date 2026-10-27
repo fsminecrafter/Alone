@@ -23,7 +23,8 @@ void init();
 void shutdown();
 void beginFrame();           // call once per frame before widgets
 void endFrame();             // draws tooltips
-float scale();               // UI scale factor (screen height / 720)
+float scale();               // UI scale factor (screen height / 720, times the user's choice)
+void setUserScale(float k);  // Settings > Graphics > Interface size
 
 Font& font(bool bold = false);
 void text(const std::string& s, float x, float y, float size, Color c, bool bold = false);

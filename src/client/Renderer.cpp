@@ -65,6 +65,7 @@ bool Renderer::init() {
     locSpotPos_ = loc("spotPos"); locSpotDir_ = loc("spotDir"); locSpotOn_ = loc("spotOn"); locSnow_ = loc("snow"); locWet_ = loc("wet");
     locEmissive_ = loc("emissive"); locLampGlow_ = loc("lampGlow"); locVision_ = loc("visionCone"); locFacing_ = loc("facing");
     locLightVP_ = loc("lightVP"); locShadowMap_ = loc("shadowMap"); locShadowOn_ = loc("shadowOn"); locShadowTexel_ = loc("shadowTexel");
+    locBrightness_ = loc("brightness");
     mat_ = LoadMaterialDefault();
     mat_.shader = shader_;
     depthMat_ = LoadMaterialDefault();
@@ -74,12 +75,34 @@ bool Renderer::init() {
     sphere_ = unitMesh(1);
     cylinder_ = unitMesh(2);
     cone_ = unitMesh(3);
-    shadowMap_ = loadShadowMap(shadowSize_);
-    shadowsReady_ = shadowMap_.id > 0 && depthShader_.id != 0;
+    reloadShadowMap();
+    setOptions(opts_);
     cam_.up = {0, 1, 0};
     cam_.projection = CAMERA_ORTHOGRAPHIC;
     cam_.fovy = zoom_;
     return true;
+}
+
+void Renderer::reloadShadowMap() {
+    if (shadowMap_.id) {
+        rlUnloadTexture(shadowMap_.depth.id);
+        rlUnloadFramebuffer(shadowMap_.id);
+        shadowMap_ = RenderTexture2D{};
+    }
+    shadowsReady_ = false;
+    if (opts_.shadows <= 0) return;
+    shadowSize_ = opts_.shadows == 1 ? 1024 : opts_.shadows == 2 ? 2048 : 4096;
+    shadowMap_ = loadShadowMap(shadowSize_);
+    shadowsReady_ = shadowMap_.id > 0 && depthShader_.id != 0;
+}
+
+void Renderer::setOptions(const GraphicsOptions& o) {
+    bool shadowChange = o.shadows != opts_.shadows || (o.shadows > 0 && !shadowsReady_);
+    opts_ = o;
+    opts_.maxLights = std::clamp(opts_.maxLights, 1, 32);
+    opts_.brightness = std::clamp(opts_.brightness, 0.5f, 1.6f);
+    if (shader_.id && shadowChange) reloadShadowMap();
+    if (shader_.id) SetShaderValue(shader_, locBrightness_, &opts_.brightness, SHADER_UNIFORM_FLOAT);
 }
 
 void Renderer::unloadChunk(ChunkGfx& g) {
@@ -242,7 +265,7 @@ void Renderer::setLighting(Game& game, float time, const std::vector<LightSrc>& 
     float snow = w.snowCover(), wet = w.groundWetness();
     SetShaderValue(shader_, locSnow_, &snow, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shader_, locWet_, &wet, SHADER_UNIFORM_FLOAT);
-    float vision = game.dead() || p.asleep ? 0.0f : 1.0f;
+    float vision = game.dead() || p.asleep || !opts_.visionCone ? 0.0f : 1.0f;
     SetShaderValue(shader_, locVision_, &vision, SHADER_UNIFORM_FLOAT);
     Vector2 facing{std::cos(p.facing), std::sin(p.facing)};
     SetShaderValue(shader_, locFacing_, &facing, SHADER_UNIFORM_VEC2);
@@ -258,7 +281,7 @@ void Renderer::setLighting(Game& game, float time, const std::vector<LightSrc>& 
     Vector4 cols[32];
     int n = 0;
     for (const auto& l : lightList) {
-        if (n >= 32) break;
+        if (n >= opts_.maxLights) break;
         float inten = l.intensity;
         if (l.colour.z > l.colour.x + 0.2f) inten *= 0.6f + 0.4f * std::fabs(std::sin(time * 7.0f + l.pos.x) * std::sin(time * 3.1f));
         lights[n] = {l.pos.x, l.pos.y, l.pos.z, l.radius};
@@ -464,7 +487,7 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     rlDisableBackfaceCulling();
     drawCursor(game, hover, time);
     rlEnableBackfaceCulling();
-    drawWeather(game, time);
+    if (opts_.weather) drawWeather(game, time);
     EndMode3D();
 }
 

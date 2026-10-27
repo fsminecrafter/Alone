@@ -24,11 +24,23 @@ private:
     };
 
     struct Settings {
+        // Audio
+        float masterVolume = 1.0f;
         float musicVolume = 0.45f;
         float sfxVolume = 0.7f;
-        float minutesPerSecond = 1.0f;
+        float ambienceVolume = 0.8f;
+        bool muteUnfocused = true;
+        // Graphics
         bool fullscreen = false;
+        bool vsync = true;
+        int fpsCap = 60;              // 0 = unlimited
+        int msaa = 1;                 // 4x anti-aliasing, applied on restart
+        GraphicsOptions gfx;
+        float uiScale = 1.0f;
+        bool screenEffects = true;    // cold/pain vignette, hallucination tint
         bool showFps = false;
+        // Game
+        float minutesPerSecond = 1.0f;
     };
 
     // flow
@@ -79,6 +91,7 @@ private:
     State state_ = State::Menu;
     Overlay overlay_ = Overlay::None;
     Overlay settingsReturn_ = Overlay::None;
+    int settingsTab_ = 0;              // 0 audio, 1 graphics, 2 game
     ContextMenu menu_;
     Settings settings_;
     bool debug_ = false, showDebug_ = false, quit_ = false;
@@ -89,6 +102,11 @@ private:
     bool tour_ = false;              // --screenshots / --anim-showcase run
     std::string showcaseDir_;
     int runShowcase(const std::string& dir);
+    void frame();                    // one iteration of the main loop
+    void shutdownApp();
+    void persistFiles();             // web: flush saves to browser storage
+    int frame_ = 0;
+    int autoShots_ = 0;
     Vec2 hover_;
     uint32_t seed_ = 1;
 

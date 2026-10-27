@@ -17,7 +17,9 @@ bool g_tip = false;
 
 const Theme& theme() { return g_theme; }
 
-float scale() { return std::max(0.75f, GetScreenHeight() / 720.0f); }
+static float g_userScale = 1.0f;
+void setUserScale(float k) { g_userScale = k; }
+float scale() { return std::max(0.75f, GetScreenHeight() / 720.0f) * g_userScale; }
 
 void init() {
     // Latin-1 so Swedish å ä ö and friends render

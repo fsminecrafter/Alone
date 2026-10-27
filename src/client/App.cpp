@@ -1,4 +1,7 @@
 #include "client/App.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "client/Icons.h"
 #include "client/Ui.h"
 #include "core/Config.h"
@@ -48,8 +51,18 @@ Color symptomColour(SymptomColour c, int level) {
     return c == SymptomColour::Cold ? cold[i] : c == SymptomColour::Neutral ? neutral[i] : warm[i];
 }
 
+// Where saves and settings live: next to the executable, or in the
+// browser's IndexedDB (mounted at /persist) for the web build.
+std::string storageDir() {
+#ifdef __EMSCRIPTEN__
+    return "/persist";
+#else
+    return GetApplicationDirectory();
+#endif
+}
+
 std::string settingsPath() {
-    return (std::filesystem::path(GetApplicationDirectory()) / "settings.ini").string();
+    return (std::filesystem::path(storageDir()) / "settings.ini").string();
 }
 
 } // namespace
@@ -60,24 +73,34 @@ std::string settingsPath() {
 
 int App::run(int argc, char** argv) {
     std::string dataOverride;
-    int autoShots = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--debug") debug_ = true;
         else if (a == "--data" && i + 1 < argc) dataOverride = argv[++i];
         else if (a == "--seed" && i + 1 < argc) seed_ = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
-        else if (a == "--screenshots") autoShots = 1, tour_ = true;
+        else if (a == "--screenshots") autoShots_ = 1, tour_ = true;
         else if (a == "--anim-showcase" && i + 1 < argc) showcaseDir_ = argv[++i], tour_ = true;
     }
-    Log::init((std::filesystem::path(GetApplicationDirectory()) / "alone.log").string());
+#ifdef __EMSCRIPTEN__
+    Log::init("/tmp/alone.log");
+#else
+    Log::init((std::filesystem::path(storageDir()) / "alone.log").string());
+#endif
     Paths::init(argv[0], dataOverride);
     loadSettings();
 
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+    unsigned flags = FLAG_WINDOW_RESIZABLE;
+    if (settings_.msaa) flags |= FLAG_MSAA_4X_HINT;
+#ifndef __EMSCRIPTEN__
+    if (settings_.vsync) flags |= FLAG_VSYNC_HINT;
+#endif
+    SetConfigFlags(flags);
     InitWindow((int)kBaseW, (int)kBaseH, "Alone");
     SetWindowMinSize(960, 540);
     SetExitKey(KEY_NULL);
-    SetTargetFPS(60);
+#ifndef __EMSCRIPTEN__
+    SetTargetFPS(settings_.fpsCap);
+#endif
     ui::init();
     if (!renderer_.init()) { CloseWindow(); return 1; }
     InitAudioDevice();
@@ -109,174 +132,189 @@ int App::run(int argc, char** argv) {
     game_.setBaseTimeScale(settings_.minutesPerSecond);
     game_.newGame(seed_);
     renderer_.snapTo(game_.player().pos);
-    hasSave_ = Paths::exists(savePath()) && !autoShots;
+    hasSave_ = Paths::exists(savePath()) && !autoShots_;
 
-    int frame = 0;
-    while (!WindowShouldClose() && !quit_) {
-        float dt = std::min(GetFrameTime(), 0.1f);
-        time_ += dt;
-        ui::beginFrame();
-        update(dt);
+#ifdef __EMSCRIPTEN__
+    // The browser drives the frames
+    emscripten_set_main_loop_arg([](void* app) { static_cast<App*>(app)->frame(); }, this, 0, true);
+#else
+    while (!WindowShouldClose() && !quit_) frame();
+    shutdownApp();
+#endif
+    return 0;
+}
 
-        BeginDrawing();
-        HoverInfo hv;
-        hv.point = hover_;
-        hv.show = state_ == State::Playing && !ui::mouseOverUi() && overlay_ != Overlay::Map && !menu_.open;
-        hv.colour = hoverColour();
-        renderer_.draw(game_, time_, dt, hv);
-        if (state_ == State::Menu) drawMenu();
-        else {
-            drawHud();
-            switch (overlay_) {
-                case Overlay::Inventory: drawInventory(); break;
-                case Overlay::Health: drawHealth(); break;
-                case Overlay::Map: drawMap(); break;
-                case Overlay::Pause: drawPause(); break;
-                case Overlay::Settings: drawSettings(); break;
-                case Overlay::Help: drawHelp(); break;
-                default: break;
-            }
-            drawContextMenu();
-            if (state_ == State::Dead) drawDeath();
-            if (showDebug_) drawDebug();
+void App::frame() {
+    float dt = std::min(GetFrameTime(), 0.1f);
+    time_ += dt;
+    ui::beginFrame();
+    update(dt);
+
+    BeginDrawing();
+    HoverInfo hv;
+    hv.point = hover_;
+    hv.show = state_ == State::Playing && !ui::mouseOverUi() && overlay_ != Overlay::Map && !menu_.open;
+    hv.colour = hoverColour();
+    renderer_.draw(game_, time_, dt, hv);
+    if (state_ == State::Menu) drawMenu();
+    else {
+        drawHud();
+        switch (overlay_) {
+            case Overlay::Inventory: drawInventory(); break;
+            case Overlay::Health: drawHealth(); break;
+            case Overlay::Map: drawMap(); break;
+            case Overlay::Pause: drawPause(); break;
+            case Overlay::Settings: drawSettings(); break;
+            case Overlay::Help: drawHelp(); break;
+            default: break;
         }
-        if (settings_.showFps) DrawFPS(GetScreenWidth() - 90, GetScreenHeight() - 24);
-        ui::endFrame();
-        drawCursor();
-        EndDrawing();
+        drawContextMenu();
+        if (state_ == State::Dead) drawDeath();
+        if (showDebug_) drawDebug();
+    }
+    if (settings_.showFps) DrawFPS(GetScreenWidth() - 90, GetScreenHeight() - 24);
+    ui::endFrame();
+    drawCursor();
+    EndDrawing();
 
-        // --screenshots: automated tour used for documentation / smoke tests
-        if (autoShots) {
-            ++frame;
-            struct Stop { float px, py, hour; const char* file; Overlay ov; };
-            static const Stop stops[] = {
-                {0, 0, 0, "screenshot_menu.png", Overlay::None},
-                {0, 0, 0, "screenshot_game.png", Overlay::None},
-                {0, 0, 0, "screenshot_context.png", Overlay::None},
-                {0, 0, 0, "screenshot_inventory.png", Overlay::Inventory},
-                {0, 0, 0, "screenshot_map.png", Overlay::Map},
-                {640, 364, 13, "screenshot_torget.png", Overlay::None},
-                {648.3f, 378.5f, 14, "screenshot_storken.png", Overlay::None},
-                {1, 1, 15, "screenshot_storken_inside.png", Overlay::None},
-                {618.9f, 352.5f, 15, "screenshot_church.png", Overlay::None},
-                {300, 520, 11, "screenshot_forest.png", Overlay::None},
-                {474, 352, 16, "screenshot_nolhaga.png", Overlay::None},
-                {700.0f, 510.5f, 18.3f, "screenshot_gerdsken_dusk.png", Overlay::None},
-                {621.3f, 412.0f, 21.5f, "screenshot_station_night.png", Overlay::None},
-                {760, 410, 12, "screenshot_e20.png", Overlay::None},
-                {880, 120, 10, "screenshot_wildlife.png", Overlay::None},
-                {0, 0, 0, "screenshot_watch.png", Overlay::None},
-                {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
-                {0, 0, 0, "screenshot_death.png", Overlay::None},
-            };
-            int n = (int)(sizeof(stops) / sizeof(stops[0]));
-            // ALONE_SHOTS=storken,forest renders only matching stops (plus the menu and new game)
-            static const char* only = getenv("ALONE_SHOTS");
-            if (only && frame % 45 == 0)
-                while (frame / 45 >= 5 && frame / 45 < n && !std::strstr(stops[frame / 45].file, "death") &&
-                       [&] {
-                           std::string f = stops[frame / 45].file;
-                           std::stringstream ss(only);
-                           std::string tok;
-                           while (std::getline(ss, tok, ','))
-                               if (!tok.empty() && f.find(tok) != std::string::npos) return false;
-                           return true;
-                       }())
-                    frame += 45;
-            int idx = frame / 45, sub = frame % 45;
-            if (idx >= n) quit_ = true;
-            else {
-                const Stop& st = stops[idx];
-                if (sub == 0) {
-                    menu_.open = false;
-                    if (idx == 1) newGame();
-                    if (idx == 2 || idx == 3) {
-                        // Find a kitchen container in the start house
-                        Player& pl = game_.player();
-                        const Building* b = game_.world().buildingAt((int)pl.pos.x, (int)pl.pos.y);
-                        if (b) for (const auto& f : b->furniture) {
-                            if (f.container.empty()) continue;
-                            Vec2 fp{f.x + 0.5f, f.y + 0.5f};
-                            pl.pos = fp + Vec2{f.facing == 1 ? 1.0f : f.facing == 3 ? -1.0f : 0.0f, f.facing == 2 ? 1.0f : f.facing == 0 ? -1.0f : 0.0f};
-                            renderer_.snapTo(pl.pos);
-                            if (idx == 2) {
-                                menu_.options = game_.actionsAt(fp);
-                                menu_.open = true;
-                                menu_.title.clear();
-                                menu_.pos = renderer_.toScreen(fp, 1.0f);
-                            } else {
-                                game_.world().container(f.x, f.y).searched = true;
-                                ActionOption o;
-                                o.kind = ActionKind::OpenContainer;
-                                o.x = f.x; o.y = f.y;
-                                game_.perform(o);
-                            }
-                            break;
+    // --screenshots: automated tour used for documentation / smoke tests
+    if (autoShots_) {
+        ++frame_;
+        struct Stop { float px, py, hour; const char* file; Overlay ov; };
+        static const Stop stops[] = {
+            {0, 0, 0, "screenshot_menu.png", Overlay::None},
+            {0, 0, 0, "screenshot_game.png", Overlay::None},
+            {0, 0, 0, "screenshot_context.png", Overlay::None},
+            {0, 0, 0, "screenshot_inventory.png", Overlay::Inventory},
+            {0, 0, 0, "screenshot_map.png", Overlay::Map},
+            {640, 364, 13, "screenshot_torget.png", Overlay::None},
+            {648.3f, 378.5f, 14, "screenshot_storken.png", Overlay::None},
+            {1, 1, 15, "screenshot_storken_inside.png", Overlay::None},
+            {618.9f, 352.5f, 15, "screenshot_church.png", Overlay::None},
+            {300, 520, 11, "screenshot_forest.png", Overlay::None},
+            {474, 352, 16, "screenshot_nolhaga.png", Overlay::None},
+            {700.0f, 510.5f, 18.3f, "screenshot_gerdsken_dusk.png", Overlay::None},
+            {621.3f, 412.0f, 21.5f, "screenshot_station_night.png", Overlay::None},
+            {760, 410, 12, "screenshot_e20.png", Overlay::None},
+            {880, 120, 10, "screenshot_wildlife.png", Overlay::None},
+            {0, 0, 0, "screenshot_watch.png", Overlay::None},
+            {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
+            {0, 0, 0, "screenshot_settings_graphics.png", Overlay::Settings},
+            {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
+            {0, 0, 0, "screenshot_death.png", Overlay::None},
+        };
+        int n = (int)(sizeof(stops) / sizeof(stops[0]));
+        // ALONE_SHOTS=storken,forest renders only matching stops (plus the menu and new game)
+        static const char* only = getenv("ALONE_SHOTS");
+        if (only && frame_ % 45 == 0)
+            while (frame_ / 45 >= 5 && frame_ / 45 < n && !std::strstr(stops[frame_ / 45].file, "death") &&
+                   [&] {
+                       std::string f = stops[frame_ / 45].file;
+                       std::stringstream ss(only);
+                       std::string tok;
+                       while (std::getline(ss, tok, ','))
+                           if (!tok.empty() && f.find(tok) != std::string::npos) return false;
+                       return true;
+                   }())
+                frame_ += 45;
+        int idx = frame_ / 45, sub = frame_ % 45;
+        if (idx >= n) quit_ = true;
+        else {
+            const Stop& st = stops[idx];
+            if (sub == 0) {
+                menu_.open = false;
+                if (idx == 1) newGame();
+                if (idx == 2 || idx == 3) {
+                    // Find a kitchen container in the start house
+                    Player& pl = game_.player();
+                    const Building* b = game_.world().buildingAt((int)pl.pos.x, (int)pl.pos.y);
+                    if (b) for (const auto& f : b->furniture) {
+                        if (f.container.empty()) continue;
+                        Vec2 fp{f.x + 0.5f, f.y + 0.5f};
+                        pl.pos = fp + Vec2{f.facing == 1 ? 1.0f : f.facing == 3 ? -1.0f : 0.0f, f.facing == 2 ? 1.0f : f.facing == 0 ? -1.0f : 0.0f};
+                        renderer_.snapTo(pl.pos);
+                        if (idx == 2) {
+                            menu_.options = game_.actionsAt(fp);
+                            menu_.open = true;
+                            menu_.title.clear();
+                            menu_.pos = renderer_.toScreen(fp, 1.0f);
+                        } else {
+                            game_.world().container(f.x, f.y).searched = true;
+                            ActionOption o;
+                            o.kind = ActionKind::OpenContainer;
+                            o.x = f.x; o.y = f.y;
+                            game_.perform(o);
                         }
-                    }
-                    overlay_ = st.ov;
-                    if (st.px > 0) {
-                        float mpp = game_.map().metresPerPixel();
-                        game_.player().pos = Vec2{st.px * mpp, st.py * mpp};
-                        double now = game_.world().clock().hourOfDay();
-                        double add = st.hour - now;
-                        if (add < 0) add += 24;
-                        game_.world().clock().advance(add * 60);
-                        renderer_.snapTo(game_.player().pos);
-                    }
-                    if (std::string(st.file) == "screenshot_storken_inside.png") {
-                        // Stand in the food court of Gallerian Storken
-                        Vec2 at;
-                        for (const auto& ob : game_.map().osmBuildings())
-                            if (ob.name == "Gallerian Storken") at = ob.centre;
-                        game_.world().tile((int)at.x, (int)at.y);
-                        for (const auto& b : game_.world().gen().allBuildings())
-                            if (b.name == "Gallerian Storken")
-                                for (const auto& r : b.rooms)
-                                    if (r.type == RoomType::Dining) at = r.rect.centre() + Vec2{0.5f, 0.5f};
-                        game_.player().pos = at;
-                        renderer_.snapTo(at);
+                        break;
                     }
                 }
-                if (std::string(st.file) == "screenshot_symptoms.png") {
-                    // A body in trouble: lean-meat diet, a cold, and a bad wound
-                    BodyState& b = game_.player().body.mutableState();
-                    b.ammonia = 0.45f;
-                    b.avgKcalProtein = 1400; b.avgKcalFat = 100; b.avgKcalCarbs = 50;
-                    b.vitaminCMg = 250;
-                    if (sub == 0) {
-                        Wound w; w.severity = 0.5f; w.bleeding = 8; w.part = BodyPart::LeftLeg; w.type = WoundType::Bite;
-                        game_.player().body.addWound(w);
-                    }
-                    SetMousePosition(GetScreenWidth() - 40, 40);
+                overlay_ = st.ov;
+                if (st.px > 0) {
+                    float mpp = game_.map().metresPerPixel();
+                    game_.player().pos = Vec2{st.px * mpp, st.py * mpp};
+                    double now = game_.world().clock().hourOfDay();
+                    double add = st.hour - now;
+                    if (add < 0) add += 24;
+                    game_.world().clock().advance(add * 60);
+                    renderer_.snapTo(game_.player().pos);
                 }
-                if (std::string(st.file) == "screenshot_wildlife.png" && sub == 1) {
-                    Rng rng(4);
-                    Vec2 p0 = game_.player().pos;
-                    const char* ids[] = {"hare", "roe_deer", "wild_boar", "moose", "roe_deer"};
-                    for (int i = 0; i < 5; ++i) {
-                        Animal& a = game_.animals().spawn(game_.animals().find(ids[i]), p0 + Vec2{-6.0f + i * 3.5f, -4.0f + (i % 2) * 3.0f}, rng);
-                        a.state = AnimalState::Idle;
-                        a.stateTimer = 1000;
-                        a.heading = 0.4f * i;
-                    }
-                    Animal& d = game_.animals().spawn(game_.animals().find("roe_deer"), p0 + Vec2{3, 4}, rng);
-                    d.state = AnimalState::Dead;
+                if (std::string(st.file) == "screenshot_storken_inside.png") {
+                    // Stand in the food court of Gallerian Storken
+                    Vec2 at;
+                    for (const auto& ob : game_.map().osmBuildings())
+                        if (ob.name == "Gallerian Storken") at = ob.centre;
+                    game_.world().tile((int)at.x, (int)at.y);
+                    for (const auto& b : game_.world().gen().allBuildings())
+                        if (b.name == "Gallerian Storken")
+                            for (const auto& r : b.rooms)
+                                if (r.type == RoomType::Dining) at = r.rect.centre() + Vec2{0.5f, 0.5f};
+                    game_.player().pos = at;
+                    renderer_.snapTo(at);
                 }
-                if (std::string(st.file) == "screenshot_watch.png" && sub == 0) {
-                    Rng rng(9);
-                    game_.player().inventory.add(game_.items().create("wristwatch", rng));
-                    game_.player().inventory.add(game_.items().create("thermometer", rng));
-                }
-                if (std::string(st.file) == "screenshot_death.png" && sub == 0) {
-                    game_.player().body.mutableState().ammonia = 1.2f;
-                    menu_.open = false;
-                }
-                if (sub == 44) TakeScreenshot(st.file);
             }
+            if (std::string(st.file) == "screenshot_symptoms.png") {
+                // A body in trouble: lean-meat diet, a cold, and a bad wound
+                BodyState& b = game_.player().body.mutableState();
+                b.ammonia = 0.45f;
+                b.avgKcalProtein = 1400; b.avgKcalFat = 100; b.avgKcalCarbs = 50;
+                b.vitaminCMg = 250;
+                if (sub == 0) {
+                    Wound w; w.severity = 0.5f; w.bleeding = 8; w.part = BodyPart::LeftLeg; w.type = WoundType::Bite;
+                    game_.player().body.addWound(w);
+                }
+                SetMousePosition(GetScreenWidth() - 40, 40);
+            }
+            if (std::string(st.file) == "screenshot_wildlife.png" && sub == 1) {
+                Rng rng(4);
+                Vec2 p0 = game_.player().pos;
+                const char* ids[] = {"hare", "roe_deer", "wild_boar", "moose", "roe_deer"};
+                for (int i = 0; i < 5; ++i) {
+                    Animal& a = game_.animals().spawn(game_.animals().find(ids[i]), p0 + Vec2{-6.0f + i * 3.5f, -4.0f + (i % 2) * 3.0f}, rng);
+                    a.state = AnimalState::Idle;
+                    a.stateTimer = 1000;
+                    a.heading = 0.4f * i;
+                }
+                Animal& d = game_.animals().spawn(game_.animals().find("roe_deer"), p0 + Vec2{3, 4}, rng);
+                d.state = AnimalState::Dead;
+            }
+            if (sub == 0 && std::string(st.file).find("settings_") != std::string::npos)
+                settingsTab_ = std::string(st.file).find("graphics") != std::string::npos ? 1 : 0;
+            if (std::string(st.file) == "screenshot_watch.png" && sub == 0) {
+                Rng rng(9);
+                game_.player().inventory.add(game_.items().create("wristwatch", rng));
+                game_.player().inventory.add(game_.items().create("thermometer", rng));
+            }
+            if (std::string(st.file) == "screenshot_death.png" && sub == 0) {
+                game_.player().body.mutableState().ammonia = 1.2f;
+                menu_.open = false;
+            }
+            if (sub == 44) TakeScreenshot(st.file);
         }
     }
-    if (!autoShots) autosave();
+}
+
+void App::shutdownApp() {
+    if (!autoShots_) autosave();
     saveSettings();
     if (musicLoaded_) UnloadMusicStream(music_);
     sound_.shutdown();
@@ -285,17 +323,23 @@ int App::run(int argc, char** argv) {
     renderer_.shutdown();
     ui::shutdown();
     CloseWindow();
-    return 0;
 }
 
 std::string App::savePath() const {
-    return (std::filesystem::path(GetApplicationDirectory()) / "save.txt").string();
+    return (std::filesystem::path(storageDir()) / "save.txt").string();
 }
 
 void App::autosave() {
     if (state_ == State::Playing && game_.running() && !game_.dead()) {
         if (game_.save(savePath())) hasSave_ = true;
+        persistFiles();
     }
+}
+
+void App::persistFiles() {
+#ifdef __EMSCRIPTEN__
+    EM_ASM(if (typeof FS !== 'undefined' && FS.syncfs) FS.syncfs(false, function(err) { if (err) console.warn('save sync failed', err); }););
+#endif
 }
 
 void App::continueGame() {
@@ -342,7 +386,11 @@ void App::newGame() {
 
 void App::update(float dt) {
     updateMusic(dt);
-    sound_.update(game_, state_ == State::Menu ? settings_.sfxVolume * 0.5f : settings_.sfxVolume);
+    if (audio_) {
+        bool mute = settings_.muteUnfocused && !IsWindowFocused() && !tour_;
+        SetMasterVolume(mute ? 0.0f : settings_.masterVolume);
+    }
+    sound_.update(game_, state_ == State::Menu ? settings_.ambienceVolume * 0.5f : settings_.ambienceVolume);
     for (const auto& e : game_.takeSounds())
         if (state_ != State::Menu) sound_.play(e, game_.player().pos, settings_.sfxVolume);
     if (IsKeyPressed(KEY_F11)) { settings_.fullscreen = !settings_.fullscreen; applySettings(); }
@@ -432,6 +480,7 @@ void App::updatePlaying(float dt) {
     if (game_.dead()) {
         // Permadeath: the save goes with you
         std::remove(savePath().c_str());
+        persistFiles();
         hasSave_ = false;
         state_ = State::Dead;
         overlay_ = Overlay::None;
@@ -480,7 +529,9 @@ void App::drawMenu() {
     b.y += 58 * s;
     if (ui::button(b, "Settings", true, 20)) { settingsReturn_ = Overlay::None; overlay_ = Overlay::Settings; }
     b.y += 58 * s;
+#ifndef __EMSCRIPTEN__
     if (ui::button(b, "Quit", true, 20)) quit_ = true;
+#endif
     ui::text("v0.1 - early prototype", x, H - 40 * s, 14 * s, ui::theme().dim);
     if (overlay_ == Overlay::Settings) drawSettings();
 }
@@ -501,43 +552,126 @@ void App::drawPause() {
     b.y += 52 * s;
     if (ui::button(b, "Save and quit to menu")) { autosave(); state_ = State::Menu; overlay_ = Overlay::None; }
     b.y += 52 * s;
+#ifndef __EMSCRIPTEN__
     if (ui::button(b, "Save and quit game")) quit_ = true;
+#endif
 }
 
 void App::drawSettings() {
     float s = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
     DrawRectangle(0, 0, (int)W, (int)H, Color{0, 0, 0, 120});
-    Rectangle p{W / 2 - 230 * s, H / 2 - 215 * s, 460 * s, 430 * s};
+    float pw = std::min(600 * s, W - 20), ph = std::min(640 * s, H - 16);
+    Rectangle p{W / 2 - pw / 2, H / 2 - ph / 2, pw, ph};
     ui::panel(p);
-    ui::textCentered("Settings", W / 2, p.y + 18 * s, 28 * s, ui::theme().text, true);
-    float x = p.x + 30 * s, y = p.y + 80 * s, w = p.width - 60 * s;
-    ui::text(fmt("Music volume: %d%%", (int)(settings_.musicVolume * 100)), x, y, 17 * s, ui::theme().text);
-    if (ui::slider({x, y + 26 * s, w, 16 * s}, settings_.musicVolume, 0, 1) && musicLoaded_) SetMusicVolume(music_, settings_.musicVolume);
-    y += 56 * s;
-    ui::text(fmt("Sound effects: %d%%", (int)(settings_.sfxVolume * 100)), x, y, 17 * s, ui::theme().text);
-    ui::slider({x, y + 26 * s, w, 16 * s}, settings_.sfxVolume, 0, 1);
-    y += 56 * s;
-    ui::text("Length of a day", x, y, 17 * s, ui::theme().text);
-    struct Opt { const char* label; float mps; };
-    Opt opts[] = {{"48 min", 0.5f}, {"24 min", 1.0f}, {"12 min", 2.0f}};
+    ui::claim(p);
+    ui::textCentered("Settings", W / 2, p.y + 14 * s, 28 * s, ui::theme().text, true);
+
+    // Tabs
+    const char* tabs[] = {"Audio", "Graphics", "Game"};
+    float tw = (p.width - 60 * s) / 3;
     for (int i = 0; i < 3; ++i) {
-        Rectangle b{x + i * (w / 3), y + 26 * s, w / 3 - 8 * s, 34 * s};
-        bool active = std::fabs(settings_.minutesPerSecond - opts[i].mps) < 0.01f;
-        if (ui::button(b, std::string(active ? "> " : "") + opts[i].label)) {
-            settings_.minutesPerSecond = opts[i].mps;
-            game_.setBaseTimeScale(settings_.minutesPerSecond);
+        Rectangle tb{p.x + 30 * s + i * tw, p.y + 56 * s, tw - 6 * s, 34 * s};
+        bool cur = i == settingsTab_;
+        if (ui::button(tb, tabs[i], true, 18)) settingsTab_ = i;
+        if (cur) DrawRectangle((int)tb.x, (int)(tb.y + tb.height - 3 * s), (int)tb.width, (int)(3 * s), ui::theme().accent);
+    }
+    float x = p.x + 30 * s, w = p.width - 60 * s, y = p.y + 104 * s;
+    float labelW = w * 0.42f, cx = x + labelW, cw = w - labelW;
+    const float row = 37 * s;
+    bool changed = false;
+
+    auto label = [&](const std::string& t, const std::string& value = "") {
+        ui::text(t, x, y + 8 * s, 16 * s, ui::theme().text);
+        if (!value.empty()) ui::text(value, cx - ui::measure(value, 14 * s).x - 10 * s, y + 9 * s, 14 * s, ui::theme().dim);
+    };
+    auto slider = [&](const std::string& t, float& v, float lo, float hi, const std::string& shown) {
+        label(t, shown);
+        if (ui::slider({cx, y + 12 * s, cw, 14 * s}, v, lo, hi)) changed = true;
+        y += row;
+    };
+    auto choice = [&](const std::string& t, const std::vector<std::string>& opts, int& idx) {
+        label(t);
+        float bw = cw / opts.size();
+        int was = idx;
+        for (size_t i = 0; i < opts.size(); ++i) {
+            Rectangle r{cx + i * bw, y + 2 * s, bw - 4 * s, 30 * s};
+            if (ui::button(r, opts[i], true, 15) && idx != (int)i) { idx = (int)i; changed = true; }
+            if ((int)i == was) {   // the current choice
+                DrawRectangleRec(r, Color{214, 168, 92, 70});
+                DrawRectangleLinesEx(r, 2, ui::theme().accent);
+            }
         }
+        y += row;
+    };
+    auto toggle = [&](const std::string& t, bool& v) {
+        int idx = v ? 1 : 0;
+        choice(t, {"Off", "On"}, idx);
+        v = idx == 1;
+    };
+    auto pct = [](float v) { return fmt("%d%%", (int)std::lround(v * 100)); };
+
+    if (settingsTab_ == 0) {
+        slider("Master volume", settings_.masterVolume, 0, 1, pct(settings_.masterVolume));
+        slider("Music", settings_.musicVolume, 0, 1, pct(settings_.musicVolume));
+        slider("Sound effects", settings_.sfxVolume, 0, 1, pct(settings_.sfxVolume));
+        slider("Ambience (rain, wind)", settings_.ambienceVolume, 0, 1, pct(settings_.ambienceVolume));
+        toggle("Mute in background", settings_.muteUnfocused);
+        if (!audio_) ui::text("No audio device found.", x, y + 8 * s, 15 * s, ui::theme().bad);
+    } else if (settingsTab_ == 1) {
+        toggle("Fullscreen", settings_.fullscreen);
+#ifndef __EMSCRIPTEN__
+        toggle("V-sync", settings_.vsync);
+        {
+            static const int caps[] = {30, 60, 120, 144, 0};
+            int idx = 1;
+            for (int i = 0; i < 5; ++i) if (caps[i] == settings_.fpsCap) idx = i;
+            choice("Frame rate limit", {"30", "60", "120", "144", "None"}, idx);
+            settings_.fpsCap = caps[idx];
+        }
+#endif
+        choice("Shadows", {"Off", "Low", "High", "Ultra"}, settings_.gfx.shadows);
+        {
+            static const int lights[] = {8, 16, 32};
+            int idx = settings_.gfx.maxLights <= 8 ? 0 : settings_.gfx.maxLights <= 16 ? 1 : 2;
+            choice("Night lights", {"8", "16", "32"}, idx);
+            settings_.gfx.maxLights = lights[idx];
+        }
+        toggle("Rain & snow", settings_.gfx.weather);
+        toggle("Vision cone", settings_.gfx.visionCone);
+        toggle("Screen effects", settings_.screenEffects);
+        slider("Brightness", settings_.gfx.brightness, 0.7f, 1.4f, pct(settings_.gfx.brightness));
+        {
+            static const float sizes[] = {0.85f, 1.0f, 1.2f};
+            int idx = settings_.uiScale < 0.95f ? 0 : settings_.uiScale > 1.1f ? 2 : 1;
+            int before = idx;
+            choice("Interface size", {"Small", "Normal", "Large"}, idx);
+            if (idx != before) settings_.uiScale = sizes[idx];
+        }
+#ifndef __EMSCRIPTEN__
+        {
+            int idx = settings_.msaa;
+            choice("Anti-aliasing (restart)", {"Off", "4x"}, idx);
+            settings_.msaa = idx;
+        }
+#endif
+        toggle("Show FPS", settings_.showFps);
+    } else {
+        struct Opt { const char* label; float mps; };
+        Opt opts[] = {{"48 min", 0.5f}, {"24 min", 1.0f}, {"12 min", 2.0f}};
+        int idx = 1;
+        for (int i = 0; i < 3; ++i) if (std::fabs(settings_.minutesPerSecond - opts[i].mps) < 0.01f) idx = i;
+        choice("Length of a day", {opts[0].label, opts[1].label, opts[2].label}, idx);
+        settings_.minutesPerSecond = opts[idx].mps;
+        game_.setBaseTimeScale(settings_.minutesPerSecond);
+        y += 6 * s;
+        ui::paragraph("A day in Alingsås lasts this long in real time. Sleeping and the speed keys (1/2/3) still "
+                      "fast-forward. The game saves automatically every few minutes.",
+                      x, y, w, 14 * s, ui::theme().dim);
     }
-    y += 80 * s;
-    if (ui::button({x, y, w / 2 - 6 * s, 36 * s}, settings_.fullscreen ? "Fullscreen: on" : "Fullscreen: off")) {
-        settings_.fullscreen = !settings_.fullscreen;
-        applySettings();
-    }
-    if (ui::button({x + w / 2 + 6 * s, y, w / 2 - 6 * s, 36 * s}, settings_.showFps ? "Show FPS: on" : "Show FPS: off"))
-        settings_.showFps = !settings_.showFps;
-    y += 60 * s;
-    if (ui::button({x, y, w, 40 * s}, "Back")) { saveSettings(); overlay_ = settingsReturn_; }
+    if (changed) applySettings();
+    Rectangle back{p.x + 30 * s, p.y + p.height - 52 * s, w, 38 * s};
+    if (ui::button(back, "Back")) { applySettings(); saveSettings(); overlay_ = settingsReturn_; }
 }
 
 void App::drawHelp() {
@@ -849,6 +983,7 @@ void App::drawHud() {
     // Screen effects: night & cold vignette, sickness tint
     BodySignals sig = game_.player().body.signals();
     float vig = std::max({sig.cold * 0.6f, sig.weakness * 0.5f, sig.dizziness * 0.6f, sig.pain * 0.4f});
+    if (!settings_.screenEffects) vig = 0;
     if (vig > 0.05f) {
         Color edge = sig.cold > sig.pain ? Color{20, 40, 80, (unsigned char)(vig * 160)} : Color{60, 0, 0, (unsigned char)(vig * 150)};
         int band = (int)(H * 0.25f);
@@ -857,7 +992,7 @@ void App::drawHud() {
         DrawRectangleGradientH(0, 0, band, (int)H, edge, Color{0, 0, 0, 0});
         DrawRectangleGradientH((int)W - band, 0, band, (int)H, Color{0, 0, 0, 0}, edge);
     }
-    if (sig.hallucination > 0.1f) {
+    if (sig.hallucination > 0.1f && settings_.screenEffects) {
         float a = sig.hallucination * (0.5f + 0.5f * std::sin(time_ * 1.3f)) * 50;
         DrawRectangle(0, 0, (int)W, (int)H, Color{(unsigned char)(120 + 100 * std::sin(time_)), 40, (unsigned char)(140 + 100 * std::cos(time_ * 0.7f)), (unsigned char)a});
     }
@@ -1391,37 +1526,80 @@ void App::drawDebug() {
 void App::loadSettings() {
     Config c;
     if (!Paths::exists(settingsPath()) || !c.load(settingsPath())) return;
-    if (const auto* s = c.find("settings")) {
-        settings_.musicVolume = std::clamp(s->num("music_volume", settings_.musicVolume), 0.0f, 1.0f);
-        settings_.sfxVolume = std::clamp(s->num("sfx_volume", settings_.sfxVolume), 0.0f, 1.0f);
-        settings_.minutesPerSecond = std::clamp(s->num("minutes_per_second", settings_.minutesPerSecond), 0.25f, 4.0f);
-        settings_.fullscreen = s->flag("fullscreen", false);
-        settings_.showFps = s->flag("show_fps", false);
-    }
+    const auto* s = c.find("settings");
+    if (!s) return;
+    auto vol = [&](const char* k, float& v) { v = std::clamp(s->num(k, v), 0.0f, 1.0f); };
+    vol("master_volume", settings_.masterVolume);
+    vol("music_volume", settings_.musicVolume);
+    vol("sfx_volume", settings_.sfxVolume);
+    vol("ambience_volume", settings_.ambienceVolume);
+    settings_.muteUnfocused = s->flag("mute_unfocused", settings_.muteUnfocused);
+    settings_.fullscreen = s->flag("fullscreen", false);
+    settings_.vsync = s->flag("vsync", settings_.vsync);
+    settings_.fpsCap = std::clamp((int)s->num("fps_cap", (float)settings_.fpsCap), 0, 360);
+    settings_.msaa = s->flag("msaa", settings_.msaa != 0) ? 1 : 0;
+    settings_.gfx.shadows = std::clamp((int)s->num("shadows", (float)settings_.gfx.shadows), 0, 3);
+    settings_.gfx.maxLights = std::clamp((int)s->num("max_lights", (float)settings_.gfx.maxLights), 8, 32);
+    settings_.gfx.weather = s->flag("weather_effects", settings_.gfx.weather);
+    settings_.gfx.visionCone = s->flag("vision_cone", settings_.gfx.visionCone);
+    settings_.gfx.brightness = std::clamp(s->num("brightness", settings_.gfx.brightness), 0.7f, 1.4f);
+    settings_.uiScale = std::clamp(s->num("ui_scale", settings_.uiScale), 0.8f, 1.3f);
+    settings_.screenEffects = s->flag("screen_effects", settings_.screenEffects);
+    settings_.showFps = s->flag("show_fps", false);
+    settings_.minutesPerSecond = std::clamp(s->num("minutes_per_second", settings_.minutesPerSecond), 0.25f, 4.0f);
 }
 
 void App::saveSettings() {
     Config c;
     auto& s = c.getOrAdd("settings");
     auto set = [&](const std::string& k, const std::string& v) { if (!s.values.count(k)) s.keyOrder.push_back(k); s.values[k] = v; };
+    auto flag = [](bool b) { return std::string(b ? "true" : "false"); };
+    set("master_volume", fmt("%.2f", settings_.masterVolume));
     set("music_volume", fmt("%.2f", settings_.musicVolume));
     set("sfx_volume", fmt("%.2f", settings_.sfxVolume));
+    set("ambience_volume", fmt("%.2f", settings_.ambienceVolume));
+    set("mute_unfocused", flag(settings_.muteUnfocused));
+    set("fullscreen", flag(settings_.fullscreen));
+    set("vsync", flag(settings_.vsync));
+    set("fps_cap", fmt("%d", settings_.fpsCap));
+    set("msaa", flag(settings_.msaa != 0));
+    set("shadows", fmt("%d", settings_.gfx.shadows));
+    set("max_lights", fmt("%d", settings_.gfx.maxLights));
+    set("weather_effects", flag(settings_.gfx.weather));
+    set("vision_cone", flag(settings_.gfx.visionCone));
+    set("brightness", fmt("%.2f", settings_.gfx.brightness));
+    set("ui_scale", fmt("%.2f", settings_.uiScale));
+    set("screen_effects", flag(settings_.screenEffects));
+    set("show_fps", flag(settings_.showFps));
     set("minutes_per_second", fmt("%.2f", settings_.minutesPerSecond));
-    set("fullscreen", settings_.fullscreen ? "true" : "false");
-    set("show_fps", settings_.showFps ? "true" : "false");
     c.save(settingsPath());
+    persistFiles();
 }
 
 void App::applySettings() {
-    if (settings_.fullscreen != IsWindowFullscreen()) {
-        if (settings_.fullscreen) {
-            int mon = GetCurrentMonitor();
-            SetWindowSize(GetMonitorWidth(mon), GetMonitorHeight(mon));
+    if (IsWindowReady()) {
+        if (settings_.fullscreen != IsWindowFullscreen()) {
+#ifndef __EMSCRIPTEN__
+            if (settings_.fullscreen) {
+                int mon = GetCurrentMonitor();
+                SetWindowSize(GetMonitorWidth(mon), GetMonitorHeight(mon));
+            }
+#endif
+            ToggleFullscreen();
+#ifndef __EMSCRIPTEN__
+            if (!settings_.fullscreen) SetWindowSize((int)kBaseW, (int)kBaseH);
+#endif
         }
-        ToggleFullscreen();
-        if (!settings_.fullscreen) SetWindowSize((int)kBaseW, (int)kBaseH);
+#ifndef __EMSCRIPTEN__
+        if (settings_.vsync) SetWindowState(FLAG_VSYNC_HINT);
+        else ClearWindowState(FLAG_VSYNC_HINT);
+        SetTargetFPS(settings_.fpsCap);
+#endif
+        renderer_.setOptions(settings_.gfx);
     }
-    if (musicLoaded_) SetMusicVolume(music_, settings_.musicVolume);
+    ui::setUserScale(settings_.uiScale);
+    if (audio_) SetMasterVolume(settings_.masterVolume);
+    if (musicLoaded_) SetMusicVolume(music_, settings_.musicVolume * musicFade_);
 }
 
 void App::updateMusic(float dt) {
