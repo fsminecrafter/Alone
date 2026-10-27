@@ -98,6 +98,21 @@ void drawItemIcon(const ItemDef* def, Rectangle r) {
         rect(-0.4f, -0.55f, 0.8f, 0.2f, WHITE);
     } else if (i == "log" || i == "stick" || i == "rope" || i == "wire") {
         DrawLineEx({cx - s * 0.7f, cy + s * 0.4f}, {cx + s * 0.7f, cy - s * 0.4f}, s * (i == "log" ? 0.45f : 0.15f), c);
+    } else if (i == "watch" || i == "clock") {
+        if (i == "watch") { rect(-0.18f, -0.9f, 0.36f, 1.8f, Color{60, 45, 35, 255}); }
+        else {
+            DrawCircle((int)(cx - s * 0.45f), (int)(cy - s * 0.62f), s * 0.22f, c);
+            DrawCircle((int)(cx + s * 0.45f), (int)(cy - s * 0.62f), s * 0.22f, c);
+        }
+        float rr = i == "watch" ? 0.48f : 0.62f;
+        DrawCircle((int)cx, (int)cy, s * rr, c);
+        DrawCircle((int)cx, (int)cy, s * rr * 0.8f, Color{240, 236, 220, 255});
+        DrawLineEx({cx, cy}, {cx, cy - s * rr * 0.65f}, std::max(1.0f, s * 0.08f), DARKGRAY);
+        DrawLineEx({cx, cy}, {cx + s * rr * 0.45f, cy + s * 0.05f}, std::max(1.0f, s * 0.08f), DARKGRAY);
+    } else if (i == "thermo") {
+        rect(-0.14f, -0.8f, 0.28f, 1.3f, c);
+        DrawCircle((int)cx, (int)(cy + s * 0.55f), s * 0.25f, Color{200, 40, 40, 255});
+        rect(-0.05f, -0.3f, 0.1f, 0.8f, Color{200, 40, 40, 255});
     } else if (i == "lighter" || i == "flashlight" || i == "tool") {
         rect(-0.25f, -0.6f, 0.5f, 1.2f, c);
         rect(-0.25f, -0.6f, 0.5f, 0.25f, LIGHTGRAY);

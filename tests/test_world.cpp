@@ -25,15 +25,39 @@ Fixture& fx() { static Fixture f; return f; }
 
 TEST(map_loads) {
     auto& m = fx().map;
-    CHECK(m.pixelWidth() == 1365);
+    CHECK(m.pixelWidth() >= 1365);
     CHECK(m.widthM() > 9000 && m.widthM() < 9500);
     CHECK(!m.roads().empty());
     CHECK(!m.rails().empty());
-    CHECK(m.landmarks().size() >= 10);
+    CHECK(m.landmarks().size() >= 10 || m.osmBuildings().size() > 3000);
     // Lake Mjörn is west of town, Gerdsken south of centre
     CHECK(m.zoneAt(100 * 6.85f, 300 * 6.85f) == Zone::Water);
     CHECK(m.zoneAt(735 * 6.85f, 560 * 6.85f) == Zone::Water);
     CHECK(m.districtAt({650 * 6.85f, 375 * 6.85f}) == "Centrum");
+}
+
+TEST(storken_is_a_mall) {
+    // Gallerian Storken, the shopping centre in the middle of town, has a food court
+    auto& w = *fx().world;
+    const MapData& m = fx().map;
+    Vec2 at;
+    for (const auto& b : m.osmBuildings())
+        if (b.name == "Gallerian Storken") at = b.centre;
+    CHECK(at.x > 0);
+    w.tile((int)at.x, (int)at.y);   // generates the area
+    const Building* mall = nullptr;
+    for (const auto& b : w.gen().allBuildings())
+        if (b.name == "Gallerian Storken") mall = &b;
+    CHECK(mall != nullptr);
+    if (!mall) return;
+    CHECK(mall->type == BuildingType::Mall);
+    bool court = false, watches = false;
+    for (const auto& r : mall->rooms) {
+        if (r.type == RoomType::Dining) court = true;
+        if (r.loot == "watch_shelf") watches = true;
+    }
+    CHECK(court);
+    CHECK(watches);
 }
 
 TEST(items_load) {

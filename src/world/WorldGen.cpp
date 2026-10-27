@@ -16,14 +16,15 @@ const char* buildingTypeName(BuildingType t) {
     static const char* n[] = {"House", "Cottage", "Farmhouse", "Barn", "Shed", "Apartment block", "Office",
                               "Warehouse", "Grocery store", "Pharmacy", "Gas station", "Hardware store",
                               "Hospital", "School", "Church", "Town hall", "Police station", "Fire station",
-                              "Railway station", "Hostel", "Manor", "Sports hall", "Shop"};
+                              "Railway station", "Hostel", "Manor", "Sports hall", "Shop", "Shopping centre",
+                              "Restaurant"};
     static_assert(sizeof(n) / sizeof(n[0]) == (size_t)BuildingType::Count, "building names");
     return n[(int)t];
 }
 
 const char* roomTypeName(RoomType t) {
     static const char* n[] = {"Hallway", "Living room", "Kitchen", "Bedroom", "Bathroom", "Storage", "Shop",
-                              "Office", "Ward", "Classroom", "Nave", "Lobby", "Changing room"};
+                              "Office", "Ward", "Classroom", "Nave", "Lobby", "Changing room", "Dining area"};
     return n[(int)t];
 }
 
@@ -75,7 +76,7 @@ BuildingType landmarkType(const std::string& kind) {
 }
 
 bool isUrban(Zone z) {
-    return z == Zone::Residential || z == Zone::Commercial || z == Zone::Hospital;
+    return z == Zone::Residential || z == Zone::Commercial || z == Zone::Hospital || z == Zone::Paved || z == Zone::Parking;
 }
 
 } // namespace
@@ -88,8 +89,118 @@ WorldGen::WorldGen(const MapData& map, uint32_t seed) : map_(map), seed_(seed) {
     gridW_ = (int)(map.widthM() / 64) + 2;
     gridH_ = (int)(map.heightM() / 64) + 2;
     buildingGrid_.assign((size_t)gridW_ * gridH_, {});
+    makeOsmBuildings();
     makeLandmarks();
     makeDenseBlocks();
+    for (const auto& t : map.osmTrees()) osmProps_[tileKey((int)std::floor(t.x), (int)std::floor(t.y))] = 1;
+    for (const auto& l : map.osmLamps()) osmProps_[tileKey((int)std::floor(l.x), (int)std::floor(l.y))] = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Real buildings from OpenStreetMap
+// ---------------------------------------------------------------------------
+
+namespace {
+
+BuildingType osmType(const std::string& k, std::string& shop) {
+    static const std::pair<const char*, BuildingType> direct[] = {
+        {"house", BuildingType::House}, {"terrace", BuildingType::Apartment}, {"apartments", BuildingType::Apartment},
+        {"shed", BuildingType::Shed}, {"garages", BuildingType::Shed}, {"barn", BuildingType::Barn},
+        {"warehouse", BuildingType::Warehouse}, {"office", BuildingType::Office}, {"grocery", BuildingType::Grocery},
+        {"hardware", BuildingType::Hardware}, {"pharmacy", BuildingType::Pharmacy}, {"mall", BuildingType::Mall},
+        {"cafe", BuildingType::Restaurant}, {"restaurant", BuildingType::Restaurant}, {"kiosk", BuildingType::Restaurant},
+        {"clinic", BuildingType::Hospital}, {"hospital", BuildingType::Hospital}, {"school", BuildingType::School},
+        {"townhall", BuildingType::TownHall}, {"police", BuildingType::Police}, {"firestation", BuildingType::FireStation},
+        {"church", BuildingType::Church}, {"gasstation", BuildingType::GasStation}, {"station", BuildingType::Station},
+        {"sports", BuildingType::Sports},
+    };
+    for (const auto& d : direct)
+        if (k == d.first) return d.second;
+    // everything else is a speciality shop
+    shop = k;
+    return BuildingType::Shop;
+}
+
+// Shelf contents for each kind of shop
+const char* shopLoot(const std::string& shop) {
+    if (shop == "clothes") return "clothes_rack";
+    if (shop == "shoes") return "shoe_shelf";
+    if (shop == "books") return "bookstore_shelf";
+    if (shop == "electronics") return "electronics_shelf";
+    if (shop == "outdoor") return "outdoor_shelf";
+    if (shop == "alcohol") return "alcohol_shelf";
+    if (shop == "watches") return "watch_shelf";
+    if (shop == "variety") return "variety_shelf";
+    return nullptr;
+}
+
+} // namespace
+
+void WorldGen::makeOsmBuildings() {
+    const auto& src = map_.osmBuildings();
+    if (src.empty()) return;
+    // Biggest first: small sheds give way to the buildings they were drawn against
+    std::vector<int> order(src.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = (int)i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return src[a].w * src[a].h > src[b].w * src[b].h; });
+
+    const int cell = 64;
+    int gw = gridW_, gh = gridH_;
+    std::vector<std::vector<IRect>> placed((size_t)gw * gh);
+    auto cellsOf = [&](const IRect& r, auto fn) {
+        for (int gy = std::max(0, r.y / cell); gy <= std::min(gh - 1, r.bottom() / cell); ++gy)
+            for (int gx = std::max(0, r.x / cell); gx <= std::min(gw - 1, r.right() / cell); ++gx) fn(placed[(size_t)gy * gw + gx]);
+    };
+    int made = 0, dropped = 0;
+    for (int idx : order) {
+        const OsmBuilding& ob = src[idx];
+        IRect r{(int)std::lround(ob.centre.x - ob.w * 0.5f), (int)std::lround(ob.centre.y - ob.h * 0.5f), ob.w, ob.h};
+        int area0 = r.area();
+        // Trim against buildings already placed, keeping as much as possible
+        bool ok = true;
+        for (int pass = 0; pass < 6 && ok; ++pass) {
+            const IRect* hit = nullptr;
+            cellsOf(r, [&](std::vector<IRect>& v) {
+                for (const auto& o : v)
+                    if (!hit && o.intersects(r)) hit = &o;
+            });
+            if (!hit) break;
+            const IRect o = *hit;
+            IRect cand[4] = {
+                {r.x, r.y, o.x - r.x, r.h},                     // keep the west part
+                {o.right(), r.y, r.right() - o.right(), r.h},   // keep the east part
+                {r.x, r.y, r.w, o.y - r.y},                     // north
+                {r.x, o.bottom(), r.w, r.bottom() - o.bottom()} // south
+            };
+            int best = -1, bestArea = 0;
+            for (int i = 0; i < 4; ++i)
+                if (cand[i].w >= 3 && cand[i].h >= 3 && cand[i].area() > bestArea) { bestArea = cand[i].area(); best = i; }
+            if (best < 0 || bestArea < area0 * 0.45f) ok = false;
+            else r = cand[best];
+        }
+        if (!ok || r.w < 3 || r.h < 3) { ++dropped; continue; }
+        // Snapping can push a building onto a street: drop it
+        RoadHit rh = map_.nearestStreet(r.centre().x, r.centre().y);
+        if (rh.cls != RoadClass::None && rh.distance < rh.halfWidth && r.area() < 400) { ++dropped; continue; }
+        if (map_.waterCoverage(r.centre().x, r.centre().y) > 0.5f) { ++dropped; continue; }
+
+        Building b;
+        b.type = osmType(ob.kind, b.shop);
+        b.name = ob.name;
+        if (b.type == BuildingType::House && r.area() < 45) b.type = BuildingType::Cottage;
+        if (b.type == BuildingType::Shed && r.area() > 160) b.type = BuildingType::Warehouse;
+        if (b.type == BuildingType::Apartment && r.area() < 90) b.type = BuildingType::House;
+        b.rect = r;
+        b.lot = r.expanded(2);
+        b.seed = hash3(idx, 0x05A, 0xB01D, seed_);
+        b.osm = true;
+        b.levels = ob.levels;
+        layout(b);
+        cellsOf(r, [&](std::vector<IRect>& v) { v.push_back(r); });
+        addBuilding(std::move(b));
+        ++made;
+    }
+    Log::info("OpenStreetMap: %d buildings placed, %d dropped as overlaps", made, dropped);
 }
 
 int WorldGen::addBuilding(Building b) {
@@ -228,6 +339,12 @@ bool WorldGen::tryPlace(BuildingType type, const IRect& area, uint32_t h, Buildi
 }
 
 void WorldGen::ensureLot(int lx, int ly) {
+    // Mapped areas only have their real buildings
+    {
+        float ax = (float)(lx * kLot), ay = (float)(ly * kLot), m = 30.0f;
+        if (map_.osmCovered(ax - m, ay - m) || map_.osmCovered(ax + kLot + m, ay - m) ||
+            map_.osmCovered(ax - m, ay + kLot + m) || map_.osmCovered(ax + kLot + m, ay + kLot + m)) return;
+    }
     // Old town: single lots filling the space between the street rows
     {
         Vec2 c{(lx + 0.5f) * kLot, (ly + 0.5f) * kLot};
@@ -405,45 +522,26 @@ void WorldGen::layout(Building& b) {
             break;
         case BuildingType::Apartment: case BuildingType::Office: case BuildingType::School:
         case BuildingType::Hospital: case BuildingType::Hostel: case BuildingType::Police:
-        case BuildingType::TownHall: case BuildingType::FireStation: {
-            // Corridor down the long axis, rooms either side
+        case BuildingType::TownHall: case BuildingType::FireStation:
+            layoutCorridors(b, h);
+            break;
+        case BuildingType::Mall:
+            layoutMall(b, h);
+            break;
+        case BuildingType::Restaurant: {
+            // Dining room at the front, kitchen behind
             bool alongX = r.w >= r.h;
-            int len = alongX ? r.w : r.h, depth = alongX ? r.h : r.w;
-            int cw = 2;
-            int c0 = (depth - cw) / 2;
-            IRect corridor = alongX ? IRect{r.x, r.y + c0, r.w, cw} : IRect{r.x + c0, r.y, cw, r.h};
-            b.rooms.push_back({corridor, RoomType::Hall});
-            for (int side = 0; side < 2; ++side) {
-                int sd = side == 0 ? c0 : depth - c0 - cw;
-                if (sd < 2) continue;
-                int pos = 0;
-                while (pos < len) {
-                    int rl = std::min(len - pos, rint(h, 4, 6));
-                    if (len - pos - rl < 3) rl = len - pos;
-                    IRect room = alongX ? IRect{r.x + pos, side == 0 ? r.y : r.y + c0 + cw, rl, sd}
-                                        : IRect{side == 0 ? r.x : r.x + c0 + cw, r.y + pos, sd, rl};
-                    b.rooms.push_back({room, RoomType::Office});
-                    // wall between this room and the next along the corridor
-                    if (pos + rl < len) {
-                        for (int i = 0; i < sd; ++i) {
-                            if (alongX) b.edges.push_back({r.x + pos + rl, room.y + i, WallW});
-                            else b.edges.push_back({room.x + i, r.y + pos + rl, WallN});
-                        }
-                    }
-                    // wall to the corridor with a door
-                    int door = rint(h, 1, std::max(1, rl - 2));
-                    for (int i = 0; i < rl; ++i) {
-                        uint8_t bits = (uint8_t)(i == door ? 1 : 0);
-                        if (alongX) {
-                            int wy = side == 0 ? r.y + c0 : r.y + c0 + cw;
-                            b.edges.push_back({r.x + pos + i, wy, (uint8_t)(WallN | (bits ? DoorN : 0))});
-                        } else {
-                            int wx = side == 0 ? r.x + c0 : r.x + c0 + cw;
-                            b.edges.push_back({wx, r.y + pos + i, (uint8_t)(WallW | (bits ? DoorW : 0))});
-                        }
-                    }
-                    pos += rl;
-                }
+            int depth = alongX ? r.h : r.w;
+            int back = std::max(3, depth / 3);
+            IRect dine = alongX ? IRect{r.x, r.y + back, r.w, r.h - back} : IRect{r.x + back, r.y, r.w - back, r.h};
+            IRect kitchen = alongX ? IRect{r.x, r.y, r.w, back} : IRect{r.x, r.y, back, r.h};
+            b.rooms.push_back({dine, RoomType::Dining});
+            b.rooms.push_back({kitchen, RoomType::Kitchen});
+            int len = alongX ? r.w : r.h;
+            int door = rint(h, 1, len - 2);
+            for (int i = 0; i < len; ++i) {
+                if (alongX) b.edges.push_back({r.x + i, r.y + back, (uint8_t)(WallN | (i == door ? DoorN : 0))});
+                else b.edges.push_back({r.x + back, r.y + i, (uint8_t)(WallW | (i == door ? DoorW : 0))});
             }
             break;
         }
@@ -475,6 +573,144 @@ void WorldGen::layout(Building& b) {
     addExteriorDoor(b, h);
     furnish(b, h);
     styleBuilding(b, h);
+    if (b.levels > 0) b.floors = std::clamp(b.levels, 1, 8);
+    else if (b.osm && b.type == BuildingType::Apartment && r.area() > 300) b.floors = std::max(b.floors, 3);
+    // A pitched roof over a wide building would be taller than the house: hip or flatten it
+    float span = (float)std::min(r.w, r.h);
+    if (b.roof == RoofKind::Gable && span > 13) b.roof = (span > 20 || !(b.type == BuildingType::House || b.type == BuildingType::Farmhouse || b.type == BuildingType::Barn)) ? RoofKind::Flat : RoofKind::Hip;
+    if (b.roof == RoofKind::Hip && span > 26) b.roof = RoofKind::Flat;
+}
+
+// Corridors down the long axis with rooms either side. Deep buildings get
+// several parallel corridors so rooms stay a sensible size.
+void WorldGen::layoutCorridors(Building& b, uint32_t& h) {
+    const IRect& r = b.rect;
+    bool alongX = r.w >= r.h;
+    int len = alongX ? r.w : r.h, depth = alongX ? r.h : r.w;
+    int strips = depth > 18 ? std::max(1, (int)std::lround(depth / 14.0f)) : 1;
+    int cw = 2;
+    auto rect = [&](int a, int d, int al, int dl) { return alongX ? IRect{r.x + a, r.y + d, al, dl} : IRect{r.x + d, r.y + a, dl, al}; };
+    // wall running along the length at depth d
+    auto lenWall = [&](int a, int d, uint8_t extra) {
+        if (alongX) b.edges.push_back({r.x + a, r.y + d, (uint8_t)(WallN | (extra ? DoorN : 0))});
+        else b.edges.push_back({r.x + d, r.y + a, (uint8_t)(WallW | (extra ? DoorW : 0))});
+    };
+    // wall across at length position a
+    auto crossWall = [&](int a, int d) {
+        if (alongX) b.edges.push_back({r.x + a, r.y + d, WallW});
+        else b.edges.push_back({r.x + d, r.y + a, WallN});
+    };
+    for (int s = 0; s < strips; ++s) {
+        int s0 = depth * s / strips, s1 = depth * (s + 1) / strips;
+        int sd = s1 - s0;
+        if (s > 0)
+            for (int a = 0; a < len; ++a) lenWall(a, s0, (a == len / 2 || a == len / 4) ? 1 : 0);
+        int c0 = s0 + (sd - cw) / 2;
+        b.rooms.push_back({rect(0, c0, len, cw), RoomType::Hall});
+        for (int side = 0; side < 2; ++side) {
+            int d0 = side == 0 ? s0 : c0 + cw;
+            int dl = side == 0 ? c0 - s0 : s1 - c0 - cw;
+            if (dl < 2) continue;
+            int pos = 0;
+            while (pos < len) {
+                int rl = std::min(len - pos, rint(h, 4, 6));
+                if (len - pos - rl < 3) rl = len - pos;
+                b.rooms.push_back({rect(pos, d0, rl, dl), RoomType::Office});
+                if (pos + rl < len)
+                    for (int i = 0; i < dl; ++i) crossWall(pos + rl, d0 + i);
+                int door = rint(h, 1, std::max(1, rl - 2));
+                int wallD = side == 0 ? c0 : c0 + cw;
+                for (int i = 0; i < rl; ++i) lenWall(pos + i, wallD, i == door ? 1 : 0);
+                pos += rl;
+            }
+        }
+    }
+}
+
+// A shopping centre: glass-roofed walkways with shop units either side, a
+// food court, and doors at the ends of every walkway.
+void WorldGen::layoutMall(Building& b, uint32_t& h) {
+    const IRect& r = b.rect;
+    bool alongX = r.w >= r.h;
+    int len = alongX ? r.w : r.h, depth = alongX ? r.h : r.w;
+    int strips = std::max(1, (int)std::lround(depth / 32.0f));
+    const int ww = 4;   // walkway width
+    auto rect = [&](int a, int d, int al, int dl) { return alongX ? IRect{r.x + a, r.y + d, al, dl} : IRect{r.x + d, r.y + a, dl, al}; };
+    auto lenWall = [&](int a, int d) {
+        if (alongX) b.edges.push_back({r.x + a, r.y + d, WallN});
+        else b.edges.push_back({r.x + d, r.y + a, WallW});
+    };
+    auto crossWall = [&](int a, int d) {
+        if (alongX) b.edges.push_back({r.x + a, r.y + d, WallW});
+        else b.edges.push_back({r.x + d, r.y + a, WallN});
+    };
+    auto exteriorDoor = [&](int a, int d) {   // a = 0 or len (end walls)
+        int tx = alongX ? r.x + a : r.x + d, ty = alongX ? r.y + d : r.y + a;
+        uint8_t bits = alongX ? (WallW | DoorW) : (WallN | DoorN);
+        for (auto& e : b.edges)
+            if (e.x == tx && e.y == ty && (e.bits & (bits & (WallN | WallW)))) e.bits = bits;
+    };
+    struct Unit { const char* label; RoomType type; const char* loot; };
+    static const Unit units[] = {
+        {"Livs", RoomType::ShopFloor, "grocery_shelf"},        {"Kläder", RoomType::ShopFloor, "clothes_rack"},
+        {"Apotek", RoomType::ShopFloor, "pharmacy_shelf"},     {"Ur & Optik", RoomType::ShopFloor, "watch_shelf"},
+        {"Skor", RoomType::ShopFloor, "shoe_shelf"},           {"Elektronik", RoomType::ShopFloor, "electronics_shelf"},
+        {"Kläder", RoomType::ShopFloor, "clothes_rack"},       {"Bokhandel", RoomType::ShopFloor, "bookstore_shelf"},
+        {"Sport & Fritid", RoomType::ShopFloor, "outdoor_shelf"}, {"Järnhandel", RoomType::ShopFloor, "hardware_shelf"},
+        {"Kafé", RoomType::Dining, "cafe_counter"},            {"Systembolaget", RoomType::ShopFloor, "alcohol_shelf"},
+        {"Kläder", RoomType::ShopFloor, "clothes_rack"},       {"Presenter", RoomType::ShopFloor, "variety_shelf"},
+    };
+    const int nUnits = (int)(sizeof(units) / sizeof(units[0]));
+    int next = rint(h, 0, nUnits - 1);
+    bool foodCourt = false;
+    for (int s = 0; s < strips; ++s) {
+        int s0 = depth * s / strips, s1 = depth * (s + 1) / strips;
+        int sd = s1 - s0;
+        if (s > 0)
+            for (int a = 0; a < len; ++a) lenWall(a, s0);
+        int c0 = s0 + (sd - ww) / 2;
+        Room walk{rect(0, c0, len, ww), RoomType::Hall};
+        walk.label = "Gallerian";
+        b.rooms.push_back(walk);
+        for (int side = 0; side < 2; ++side) {
+            int d0 = side == 0 ? s0 : c0 + ww;
+            int dl = side == 0 ? c0 - s0 : s1 - c0 - ww;
+            if (dl < 3) continue;
+            int pos = 0;
+            while (pos < len) {
+                bool court = !foodCourt && side == 0 && pos > len / 3 && len - pos > 18;
+                int rl = court ? std::min(18, len - pos) : std::min(len - pos, rint(h, 7, 12));
+                if (len - pos - rl < 5) rl = len - pos;
+                Room room{rect(pos, d0, rl, dl), RoomType::ShopFloor};
+                if (court) {
+                    room.type = RoomType::Dining;
+                    room.loot = "food_court_counter";
+                    room.label = "Food court";
+                    foodCourt = true;
+                } else {
+                    const Unit& u = units[next++ % nUnits];
+                    room.type = u.type;
+                    room.loot = u.loot;
+                    room.label = u.label;
+                }
+                b.rooms.push_back(room);
+                if (pos + rl < len)
+                    for (int i = 0; i < dl; ++i) crossWall(pos + rl, d0 + i);
+                // Shop front: wall with a wide open entrance (the food court is open)
+                int wallD = side == 0 ? c0 : c0 + ww;
+                int open0 = rl / 2 - 1, open1 = rl / 2 + 1;
+                if (!court)
+                    for (int i = 0; i < rl; ++i)
+                        if (i < open0 || i > open1) lenWall(pos + i, wallD);
+                pos += rl;
+            }
+        }
+        // Entrances at both ends of the walkway
+        for (int k = 1; k < ww - 1; ++k) {
+            exteriorDoor(0, c0 + k);
+            exteriorDoor(len, c0 + k);
+        }
+    }
 }
 
 void WorldGen::splitRooms(Building& b, IRect r, int depth, uint32_t& h) {
@@ -560,7 +796,8 @@ void WorldGen::addExteriorDoor(Building& b, uint32_t& h) {
     // Prefer a door into a living space
     auto goodRoom = [](RoomType t) {
         return t == RoomType::Living || t == RoomType::Hall || t == RoomType::Lobby || t == RoomType::ShopFloor ||
-               t == RoomType::Kitchen || t == RoomType::Nave || t == RoomType::Locker || t == RoomType::Storage;
+               t == RoomType::Kitchen || t == RoomType::Nave || t == RoomType::Locker || t == RoomType::Storage ||
+               t == RoomType::Dining;
     };
     std::vector<int> candidates;
     int len = (best == 0 || best == 2) ? r.w : r.h;
@@ -649,15 +886,18 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
             }
         }
     };
+    // Rows of shelves with a cross aisle every 10 tiles
     auto rows = [&](const Room& room, Prop p, const std::string& container, int spacing) {
         const IRect& r = room.rect;
         bool alongX = r.w >= r.h;
         if (alongX) {
             for (int y = r.y + 2; y < r.bottom() - 2; y += spacing)
-                for (int x = r.x + 2; x < r.right() - 2; ++x) place(x, y, p, 2, container);
+                for (int x = r.x + 2; x < r.right() - 2; ++x)
+                    if ((x - r.x) % 10 != 6) place(x, y, p, 2, container);
         } else {
             for (int x = r.x + 2; x < r.right() - 2; x += spacing)
-                for (int y = r.y + 2; y < r.bottom() - 2; ++y) place(x, y, p, 1, container);
+                for (int y = r.y + 2; y < r.bottom() - 2; ++y)
+                    if ((y - r.y) % 10 != 6) place(x, y, p, 1, container);
         }
     };
 
@@ -669,6 +909,7 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
         case BuildingType::GasStation: shelfLoot = "gas_shelf"; break;
         case BuildingType::Shed: shelfLoot = "toolbox"; break;
         case BuildingType::Shop: {
+            if (const char* l = shopLoot(b.shop)) { shelfLoot = l; break; }
             static const std::vector<std::string> shops = {"gas_shelf", "wardrobe", "bookshelf", "hardware_shelf",
                                                            "grocery_shelf", "pharmacy_shelf", "dresser"};
             shelfLoot = pick(h, shops);
@@ -711,6 +952,8 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                     b.type == BuildingType::GasStation || b.type == BuildingType::Shop) {
                     alongWalls(room, {{Prop::Shelf, shelfLoot}, {Prop::Shelf, shelfLoot}, {Prop::Shelf, shelfLoot},
                                       {Prop::Desk, b.type == BuildingType::Pharmacy ? "pharmacy_back" : "desk"}});
+                } else if (b.type == BuildingType::Warehouse && room.rect.area() > 120) {
+                    rows(room, Prop::Shelf, "warehouse_shelf", 5);
                 } else if (b.type == BuildingType::Barn) {
                     alongWalls(room, {{Prop::HayBale, ""}, {Prop::HayBale, ""}, {Prop::Workbench, ""}, {Prop::Woodpile, ""}});
                 } else {
@@ -721,9 +964,11 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                 }
                 break;
             case RoomType::ShopFloor: {
-                rows(room, Prop::Shelf, shelfLoot, 3);
+                const std::string& loot = room.loot.empty() ? shelfLoot : room.loot;
+                bool clothes = loot == "clothes_rack" || loot == "shoe_shelf";
+                rows(room, clothes ? Prop::Wardrobe : Prop::Shelf, loot, 3);
                 std::vector<std::pair<Prop, std::string>> wall;
-                if (b.type == BuildingType::Grocery || b.type == BuildingType::GasStation)
+                if (b.type == BuildingType::Grocery || b.type == BuildingType::GasStation || loot == "grocery_shelf")
                     for (int i = 0; i < 4; ++i) wall.push_back({Prop::Cooler, "grocery_cooler"});
                 wall.push_back({Prop::Checkout, "checkout"});
                 alongWalls(room, wall);
@@ -746,11 +991,37 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                 rows(room, Prop::Pew, "", 2);
                 alongWalls(room, {{Prop::Altar, ""}});
                 break;
+            case RoomType::Dining: {
+                // Tables with chairs, a counter, and bins nobody emptied
+                const IRect& r = room.rect;
+                bool court = room.loot == "food_court_counter";
+                for (int y = r.y + 2; y < r.bottom() - 2; y += 3)
+                    for (int x = r.x + 2; x < r.right() - 2; x += 3) {
+                        place(x, y, Prop::Table, 0, court || rnd(h) < 0.5f ? "food_court_table" : "");
+                        place(x + 1, y, Prop::Chair, 3);
+                        if (rnd(h) < 0.6f) place(x - 1, y, Prop::Chair, 1);
+                    }
+                std::string counter = room.loot.empty() ? "cafe_counter" : room.loot;
+                alongWalls(room, {{Prop::Counter, counter}, {Prop::Counter, counter}, {Prop::Fridge, court ? "restaurant_fridge" : ""},
+                                  {Prop::Bin, "food_court_bin"}, {Prop::Bin, "food_court_bin"}});
+                if (court) alongWalls(room, {{Prop::Counter, counter}, {Prop::Stove, ""}, {Prop::Bin, "food_court_bin"}});
+                break;
+            }
             case RoomType::Lobby:
                 alongWalls(room, {{Prop::Bench, ""}, {Prop::Bench, ""}, {Prop::Desk, ""}, {Prop::Bin, ""}});
                 break;
             case RoomType::Hall:
                 if (b.type == BuildingType::Hospital) alongWalls(room, {{Prop::MedicalCabinet, ""}});
+                if (b.type == BuildingType::Mall) {
+                    // benches and litter bins down the middle of the walkway
+                    const IRect& r = room.rect;
+                    bool ax = r.w >= r.h;
+                    int len = ax ? r.w : r.h;
+                    for (int a = 5; a < len - 4; a += 9) {
+                        int x = ax ? r.x + a : r.x + r.w / 2, y = ax ? r.y + r.h / 2 : r.y + a;
+                        place(x, y, (a / 9) % 3 == 2 ? Prop::Bin : Prop::Bench, ax ? 0 : 1, (a / 9) % 3 == 2 ? "food_court_bin" : "");
+                    }
+                }
                 break;
             default: break;
         }
@@ -790,6 +1061,14 @@ void WorldGen::styleBuilding(Building& b, uint32_t& h) {
             static const std::vector<uint32_t> shopWalls = {0xe3c565, 0xf0ede4, 0x8b2a1e, 0xd9cbb0, 0xa9b9c4, 0xe8d38a};
             b.wallColour = pick(h, shopWalls); b.roofColour = pick(h, roofs); b.floors = 2;
             b.trimColour = 0xf2efe6; b.floor = Ground::FloorWood; b.roof = RoofKind::Gable;
+            break;
+        }
+        case BuildingType::Mall:
+            b.wallColour = rnd(h) < 0.5f ? 0xd8d2c4 : 0xb85c3c; b.trimColour = 0x2a5a8a; b.roofColour = 0x45474a;
+            b.roof = RoofKind::Flat; b.floors = 2; b.floor = Ground::FloorTile; break;
+        case BuildingType::Restaurant: {
+            static const std::vector<uint32_t> w = {0xe3c565, 0xf0ede4, 0x8b2a1e, 0xd9cbb0};
+            b.wallColour = pick(h, w); b.roofColour = pick(h, roofs); b.floor = Ground::FloorTile; b.floors = 1;
             break;
         }
         case BuildingType::Grocery: case BuildingType::Pharmacy: case BuildingType::Hardware: case BuildingType::GasStation:
@@ -844,20 +1123,21 @@ void WorldGen::groundFor(Tile& t, int x, int y, Zone z, float water) {
     switch (z) {
         case Zone::Forest:
             t.ground = n > 0.55f ? Ground::Moss : (n < 0.35f ? Ground::Dirt : Ground::ForestFloor);
-            if (r < 0.085f) t.prop = pickTree(0.5f, 0.3f, 0.15f, 0.02f);
-            else if (r < 0.17f) t.prop = Prop::BlueberryBush;
-            else if (r < 0.215f) t.prop = Prop::LingonBush;
-            else if (r < 0.222f) t.prop = Prop::Rock;
-            else if (r < 0.2245f) t.prop = Prop::Boulder;
-            else if (r < 0.227f) t.prop = Prop::Stump;
+            // Dense Swedish spruce forest with thicker and thinner stands
+            if (r < 0.10f + n * 0.09f) t.prop = pickTree(0.55f, 0.27f, 0.14f, 0.02f);
+            else if (r < 0.25f) t.prop = Prop::BlueberryBush;
+            else if (r < 0.29f) t.prop = Prop::LingonBush;
+            else if (r < 0.297f) t.prop = Prop::Rock;
+            else if (r < 0.2995f) t.prop = Prop::Boulder;
+            else if (r < 0.303f) t.prop = Prop::Stump;
             break;
         case Zone::Woodland:
             t.ground = n > 0.6f ? Ground::TallGrass : (n < 0.3f ? Ground::ForestFloor : Ground::Grass);
-            if (r < 0.03f) t.prop = pickTree(0.15f, 0.15f, 0.5f, 0.15f);
-            else if (r < 0.045f) t.prop = Prop::Shrub;
-            else if (r < 0.05f) t.prop = Prop::RoseBush;
-            else if (r < 0.07f) t.prop = Prop::BlueberryBush;
-            else if (r < 0.072f) t.prop = Prop::Boulder;
+            if (r < 0.055f) t.prop = pickTree(0.2f, 0.15f, 0.45f, 0.15f);
+            else if (r < 0.075f) t.prop = Prop::Shrub;
+            else if (r < 0.08f) t.prop = Prop::RoseBush;
+            else if (r < 0.10f) t.prop = Prop::BlueberryBush;
+            else if (r < 0.102f) t.prop = Prop::Boulder;
             break;
         case Zone::Park:
             t.ground = Ground::Grass;
@@ -894,6 +1174,20 @@ void WorldGen::groundFor(Tile& t, int x, int y, Zone z, float water) {
             t.ground = n > 0.5f ? Ground::Grass : Ground::Concrete;
             if (t.ground == Ground::Grass && r < 0.01f) t.prop = Prop::Maple;
             break;
+        case Zone::Paved:     // squares and pedestrian streets
+            t.ground = Ground::Cobble;
+            if (r < 0.0015f) t.prop = Prop::Bench;
+            else if (r < 0.0025f) t.prop = Prop::Bin;
+            break;
+        case Zone::Parking: {
+            t.ground = Ground::Asphalt;
+            // parked cars in bays
+            if (((x / 3) + (y / 5)) % 2 == 0 && (x % 3) == 1 && (y % 5) == 2 && r < 0.3f) {
+                t.prop = Prop::Car;
+                t.variant = (uint8_t)(r2 < 0.5f ? 0 : 1);
+            }
+            break;
+        }
         default:
             t.ground = Ground::Grass;
             break;
@@ -919,6 +1213,26 @@ void WorldGen::applyRoads(Tile& t, int x, int y, Zone z) {
     if (road.cls == RoadClass::None) return;
     float d = road.distance, hw = road.halfWidth;
     bool urban = isUrban(z) || z == Zone::Park;
+    if (isFootpath(road.cls)) {
+        // Footpaths and forest tracks: paved in town, gravel or dirt outside
+        if (d < hw) {
+            if (road.cls == RoadClass::Track) t.ground = (std::fabs(d - hw * 0.55f) < 0.35f) ? Ground::Dirt : Ground::Gravel;
+            else t.ground = urban ? Ground::Sidewalk : (z == Zone::Forest ? Ground::Dirt : Ground::Gravel);
+            if (t.prop != Prop::Lamppost) t.prop = Prop::None;
+        } else if (d < hw + 1.0f && (isTree(t.prop) || t.prop == Prop::Boulder || t.prop == Prop::Rock)) {
+            t.prop = Prop::None;
+        }
+        return;
+    }
+    if (road.cls == RoadClass::Service && d < hw) {
+        t.ground = Ground::Asphalt;
+        if (t.prop != Prop::Car) t.prop = Prop::None;
+        return;
+    }
+    if (road.cls == RoadClass::Service) {
+        if (d < hw + 1.5f && isTree(t.prop)) t.prop = Prop::None;
+        return;
+    }
     if (d < hw) {
         t.ground = Ground::Asphalt;
         t.prop = Prop::None;
@@ -1066,6 +1380,14 @@ void WorldGen::generateChunk(Chunk& c) {
                 }
             }
             applyRoads(t, x, y, z);
+            if (!osmProps_.empty()) {
+                auto it = osmProps_.find(tileKey(x, y));
+                if (it != osmProps_.end() && t.ground != Ground::Asphalt && t.ground != Ground::Rail && water < 0.3f) {
+                    uint32_t hh = hash2(x, y, seed_ ^ 0x7EE);
+                    if (it->second == 1) t.prop = (hh & 3) == 0 ? Prop::Birch : (hh & 3) == 1 ? Prop::Oak : Prop::Maple;
+                    else t.prop = Prop::Lamppost;
+                }
+            }
             if (const Plaza* pl = map_.plazaAt(p)) {
                 t.ground = Ground::Cobble;
                 t.prop = Prop::None;

@@ -204,6 +204,8 @@ std::vector<ItemInstance> ItemRegistry::rollLoot(const std::string& containerId,
                     ItemInstance it = create(le.itemId, rng);
                     // Things in abandoned houses have been sitting for a while
                     if (it.def && it.def->spoilHours > 0) it.ageHours = rng.range(0.0f, it.def->spoilHours * 0.7f);
+                    // Scraps were left behind when everyone went: already well on their way
+                    if (it.def && it.def->hasTag("leftovers")) it.ageHours = rng.range(0.3f, 0.95f) * it.def->spoilHours;
                     out.push_back(it);
                 }
                 break;

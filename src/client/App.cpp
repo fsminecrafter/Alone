@@ -142,6 +142,8 @@ int App::run(int argc, char** argv) {
                 {0, 0, 0, "screenshot_inventory.png", Overlay::Inventory},
                 {0, 0, 0, "screenshot_map.png", Overlay::Map},
                 {640, 364, 13, "screenshot_torget.png", Overlay::None},
+                {648.3f, 378.5f, 14, "screenshot_storken.png", Overlay::None},
+                {1, 1, 15, "screenshot_storken_inside.png", Overlay::None},
                 {663, 372, 15, "screenshot_church.png", Overlay::None},
                 {300, 520, 11, "screenshot_forest.png", Overlay::None},
                 {474, 352, 16, "screenshot_nolhaga.png", Overlay::None},
@@ -153,6 +155,19 @@ int App::run(int argc, char** argv) {
                 {0, 0, 0, "screenshot_death.png", Overlay::None},
             };
             int n = (int)(sizeof(stops) / sizeof(stops[0]));
+            // ALONE_SHOTS=storken,forest renders only matching stops (plus the menu and new game)
+            static const char* only = getenv("ALONE_SHOTS");
+            if (only && frame % 45 == 0)
+                while (frame / 45 >= 5 && frame / 45 < n && !std::strstr(stops[frame / 45].file, "death") &&
+                       [&] {
+                           std::string f = stops[frame / 45].file;
+                           std::stringstream ss(only);
+                           std::string tok;
+                           while (std::getline(ss, tok, ','))
+                               if (!tok.empty() && f.find(tok) != std::string::npos) return false;
+                           return true;
+                       }())
+                    frame += 45;
             int idx = frame / 45, sub = frame % 45;
             if (idx >= n) quit_ = true;
             else {
@@ -193,6 +208,19 @@ int App::run(int argc, char** argv) {
                         if (add < 0) add += 24;
                         game_.world().clock().advance(add * 60);
                         renderer_.snapTo(game_.player().pos);
+                    }
+                    if (std::string(st.file) == "screenshot_storken_inside.png") {
+                        // Stand in the food court of Gallerian Storken
+                        Vec2 at;
+                        for (const auto& ob : game_.map().osmBuildings())
+                            if (ob.name == "Gallerian Storken") at = ob.centre;
+                        game_.world().tile((int)at.x, (int)at.y);
+                        for (const auto& b : game_.world().gen().allBuildings())
+                            if (b.name == "Gallerian Storken")
+                                for (const auto& r : b.rooms)
+                                    if (r.type == RoomType::Dining) at = r.rect.centre() + Vec2{0.5f, 0.5f};
+                        game_.player().pos = at;
+                        renderer_.snapTo(at);
                     }
                 }
                 if (std::string(st.file) == "screenshot_symptoms.png") {
@@ -946,6 +974,8 @@ void App::buildMapTexture() {
                 case Zone::Meadow: c = {176, 182, 128, 255}; break;
                 case Zone::Commercial: c = {204, 186, 170, 255}; break;
                 case Zone::Hospital: c = {214, 176, 170, 255}; break;
+                case Zone::Paved: c = {214, 206, 192, 255}; break;
+                case Zone::Parking: c = {196, 196, 196, 255}; break;
                 default: c = {120, 120, 120, 255}; break;
             }
             px[y * w + x] = c;
@@ -980,12 +1010,26 @@ void App::drawMap() {
     auto toScreen = [&](float px, float py) { return Vector2{c.x + (px - mapCentre_.x) * k, c.y + (py - mapCentre_.y) * k}; };
     BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
     Vector2 o = toScreen(0, 0);
-    DrawTextureEx(mapTex_, o, 0, k, WHITE);
-    for (const auto& r : m.roads()) {
-        float wdt = r.cls == RoadClass::Motorway ? 4.0f : r.cls == RoadClass::Major ? 2.6f : 1.6f;
-        Color col = r.cls == RoadClass::Motorway ? Color{226, 190, 110, 255} : Color{250, 250, 246, 255};
-        DrawLineEx(toScreen(r.a.x / mpp, r.a.y / mpp), toScreen(r.b.x / mpp, r.b.y / mpp), wdt * std::sqrt(mapZoom_) * s, col);
-    }
+    DrawTextureEx(mapTex_, o, 0, k * m.terrainMetresPerPixel() / mpp, WHITE);
+    // Buildings once zoomed in
+    if (mapZoom_ > 1.8f)
+        for (const auto& b : m.osmBuildings()) {
+            Vector2 a = toScreen((b.centre.x - b.w * 0.5f) / mpp, (b.centre.y - b.h * 0.5f) / mpp);
+            float bw = b.w / mpp * k, bh = b.h / mpp * k;
+            if (a.x > area.x + area.width || a.y > area.y + area.height || a.x + bw < area.x || a.y + bh < area.y) continue;
+            DrawRectangleV(a, {bw, bh}, b.kind == "mall" ? Color{170, 120, 100, 255} : Color{160, 150, 140, 255});
+        }
+    for (int pass = 0; pass < 2; ++pass)
+        for (const auto& r : m.roads()) {
+            bool path = isFootpath(r.cls);
+            if ((pass == 0) != path) continue;   // paths underneath
+            if (path && mapZoom_ < 1.5f) continue;
+            float wdt = r.cls == RoadClass::Motorway ? 4.0f : r.cls == RoadClass::Major ? 2.6f : path ? 0.7f
+                      : r.cls == RoadClass::Service ? 1.0f : 1.6f;
+            Color col = r.cls == RoadClass::Motorway ? Color{226, 190, 110, 255}
+                      : path ? Color{150, 130, 100, 200} : Color{250, 250, 246, 255};
+            DrawLineEx(toScreen(r.a.x / mpp, r.a.y / mpp), toScreen(r.b.x / mpp, r.b.y / mpp), wdt * std::sqrt(mapZoom_) * s, col);
+        }
     for (const auto& r : m.rails())
         DrawLineEx(toScreen(r.a.x / mpp, r.a.y / mpp), toScreen(r.b.x / mpp, r.b.y / mpp), 2.0f * s, Color{90, 80, 80, 255});
     for (const auto& l : m.landmarks()) {

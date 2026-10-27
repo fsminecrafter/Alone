@@ -113,10 +113,14 @@ std::string Game::location() const {
                 if (b->name.empty() && (b->type == BuildingType::House || b->type == BuildingType::Apartment ||
                                         b->type == BuildingType::Cottage || b->type == BuildingType::Farmhouse))
                     what = roomTypeName(r->type);
+                else if (!r->label.empty() && r->type != RoomType::Hall)
+                    what = r->label + " \xE2\x80\x93 " + what;   // "Kläder – Gallerian Storken"
             }
             return what + ", " + district;
         }
     }
+    std::string street = map_.streetAt(player_.pos);
+    if (!street.empty() && street != district) return street + ", " + district;
     return district;
 }
 

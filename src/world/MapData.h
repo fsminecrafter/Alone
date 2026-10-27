@@ -1,17 +1,21 @@
 #pragma once
 #include "core/Math.h"
 #include "world/Terrain.h"
+#include <array>
 #include <string>
 #include <vector>
 
 namespace alone {
 
-enum class RoadClass : uint8_t { None = 0, Minor = 1, Major = 2, Motorway = 3, Railway = 4 };
+enum class RoadClass : uint8_t { None = 0, Minor = 1, Major = 2, Motorway = 3, Railway = 4, Path = 5, Service = 6, Track = 7 };
+
+inline bool isFootpath(RoadClass c) { return c == RoadClass::Path || c == RoadClass::Track; }
 
 struct RoadSegment {
     Vec2 a, b;           // metres
     RoadClass cls = RoadClass::Minor;
     float halfWidth = 3;
+    int name = -1;       // index into MapData::roadNames()
 };
 
 struct RoadHit {
@@ -20,10 +24,14 @@ struct RoadHit {
     float halfWidth = 0;
     float along = 0;         // metres along the segment (for dashed lines)
     Vec2 dir;                // segment direction
+    int name = -1;
 };
 
 struct District { std::string name; Vec2 centre; float radius; };
 struct WaterName { std::string name; Vec2 pos; };
+// A real building from OpenStreetMap, already snapped to the grid.
+struct OsmBuilding { std::string kind; int levels = 0; Vec2 centre; int w = 0, h = 0; std::string name; };
+
 struct MapLabel { std::string text; Vec2 pos; float angle = 0; };
 struct Plaza { std::string name; Vec2 centre; Vec2 size; };
 struct DenseArea { std::string name; Vec2 centre; float radius; };
@@ -43,9 +51,10 @@ public:
     bool load(const std::string& mapDir);
 
     const std::string& name() const { return name_; }
-    float widthM() const { return width_ * mpp_; }
-    float heightM() const { return height_ * mpp_; }
+    float widthM() const { return width_ * tmpp_; }
+    float heightM() const { return height_ * tmpp_; }
     float metresPerPixel() const { return mpp_; }
+    // terrain grid (see terrainMetresPerPixel)
     int pixelWidth() const { return width_; }
     int pixelHeight() const { return height_; }
     Zone zoneAtPixel(int px, int py) const;
@@ -58,6 +67,8 @@ public:
     float waterCoverage(float x, float y) const;
     // Nearest road (or railway when rail = true) centre line.
     RoadHit nearestRoad(float x, float y, bool rail = false) const;
+    // Ignores footpaths and tracks
+    RoadHit nearestStreet(float x, float y) const;
 
     const std::vector<RoadSegment>& roads() const { return roads_; }
     const std::vector<RoadSegment>& rails() const { return rails_; }
@@ -70,6 +81,15 @@ public:
     const DenseArea* denseAreaAt(Vec2 p) const;
     const Plaza* plazaAt(Vec2 p) const;
     std::string districtAt(Vec2 p) const;
+    std::string streetAt(Vec2 p) const;             // street name within a few metres, or ""
+    const std::vector<std::string>& roadNames() const { return roadNames_; }
+
+    // OpenStreetMap detail
+    bool osmCovered(float x, float y) const;
+    const std::vector<OsmBuilding>& osmBuildings() const { return osmBuildings_; }
+    const std::vector<Vec2>& osmTrees() const { return osmTrees_; }
+    const std::vector<Vec2>& osmLamps() const { return osmLamps_; }
+    float terrainMetresPerPixel() const { return tmpp_; }
 
 private:
     void index(const std::vector<RoadSegment>& segs, std::vector<std::vector<int>>& grid);
@@ -90,6 +110,11 @@ private:
     std::vector<WaterName> waterNames_;
     std::vector<Landmark> landmarks_;
     std::vector<Plaza> plazas_;
+    std::vector<std::string> roadNames_;
+    std::vector<OsmBuilding> osmBuildings_;
+    std::vector<Vec2> osmTrees_, osmLamps_;
+    std::vector<std::array<float, 4>> coverage_;
+    float tmpp_ = 1;        // terrain metres per pixel (may differ from feature units)
     std::vector<MapLabel> labels_;
     std::vector<DenseArea> dense_;
 };

@@ -31,6 +31,9 @@ private:
     void ensureLot(int lx, int ly);
     void makeLandmarks();
     void makeDenseBlocks();
+    void makeOsmBuildings();
+    void layoutMall(Building& b, uint32_t& h);
+    void layoutCorridors(Building& b, uint32_t& h);
     bool siteIsClear(const IRect& r, bool allowRoads = false) const;
     bool tryPlace(BuildingType type, const IRect& area, uint32_t h, Building& out);
     void layout(Building& b);
@@ -53,6 +56,7 @@ private:
     std::vector<IRect> denseRects_;              // old-town buildings placed along streets
     std::vector<std::vector<int>> buildingGrid_; // 64 m cells -> building ids
     int gridW_ = 0, gridH_ = 0;
+    std::unordered_map<int64_t, uint8_t> osmProps_;  // tile -> 1 tree, 2 street lamp
 };
 
 } // namespace alone

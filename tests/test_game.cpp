@@ -135,10 +135,13 @@ TEST(fire_cooking_and_hunting_flow) {
     Animal* dead = g.animals().find(targetId);
     CHECK(dead && !dead->alive());
     if (!dead) return;
-    p.pos = dead->pos + Vec2{1, 0};
-    for (auto& o : g.actionsAt(dead->pos))
+    Vec2 carcass = dead->pos;
+    p.pos = carcass + Vec2{1, 0};
+    for (auto& o : g.actionsAt(carcass))
         if (o.kind == ActionKind::Butcher && o.enabled) { g.perform(o); runFor(20); }
-    CHECK(dead->butchered);
+    // (butchered carcasses are cleared away, so look the animal up again)
+    dead = g.animals().find(targetId);
+    CHECK(!dead || dead->butchered);
     auto near = g.world().groundItemsNear(p.pos, 2.5f);
     CHECK(!near.empty());
     for (auto& [key, idx] : near) {

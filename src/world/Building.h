@@ -21,10 +21,10 @@ struct IRect {
 enum class BuildingType {
     House, Cottage, Farmhouse, Barn, Shed, Apartment, Office, Warehouse,
     Grocery, Pharmacy, GasStation, Hardware, Hospital, School, Church, TownHall,
-    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Count
+    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, Count
 };
 
-enum class RoomType { Hall, Living, Kitchen, Bedroom, Bathroom, Storage, ShopFloor, Office, Ward, Classroom, Nave, Lobby, Locker, Count };
+enum class RoomType { Hall, Living, Kitchen, Bedroom, Bathroom, Storage, ShopFloor, Office, Ward, Classroom, Nave, Lobby, Locker, Dining, Count };
 
 enum class RoofKind { Gable, Flat, Hip };
 
@@ -34,6 +34,8 @@ const char* roomTypeName(RoomType t);
 struct Room {
     IRect rect;
     RoomType type = RoomType::Living;
+    std::string loot;            // shop units: what the shelves hold
+    std::string label;           // shop units: sign text
 };
 
 struct Furniture {
@@ -52,6 +54,7 @@ struct Building {
     int id = -1;
     BuildingType type = BuildingType::House;
     std::string name;            // for landmarks, e.g. "Christinae kyrka"
+    std::string shop;            // speciality of a Shop (clothes, books, ...)
     IRect rect;
     int floors = 1;              // visual storeys (only the ground floor is enterable)
     RoofKind roof = RoofKind::Gable;
@@ -69,6 +72,8 @@ struct Building {
     IRect lot;                   // garden / plot around the building
     uint8_t lotBorder = 0;       // 0 none, 1 hedge, 2 fence
     bool isOutbuilding = false;  // shed/barn belonging to another building's lot
+    bool osm = false;            // a real building from OpenStreetMap
+    int levels = 0;              // storeys from OpenStreetMap (0 unknown)
     uint32_t seed = 0;
 
     const Room* roomAt(int x, int y) const;

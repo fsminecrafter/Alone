@@ -12,12 +12,20 @@ namespace alone {
 
 namespace {
 
+bool fileExists(const std::string& p) {
+    std::ifstream f(p, std::ios::binary);
+    return (bool)f;
+}
+
 float halfWidthFor(RoadClass c) {
     switch (c) {
         case RoadClass::Minor: return 3.0f;
         case RoadClass::Major: return 4.5f;
         case RoadClass::Motorway: return 11.0f;
         case RoadClass::Railway: return 2.6f;
+        case RoadClass::Path: return 0.9f;
+        case RoadClass::Service: return 2.2f;
+        case RoadClass::Track: return 1.4f;
         default: return 0;
     }
 }
@@ -56,7 +64,14 @@ bool MapData::load(const std::string& dir) {
     auto sp = split(m->str("spawn", "0 0"), ' ');
 
     // --- terrain.pgm ---------------------------------------------------------
-    std::ifstream f(dir + "/" + m->str("terrain", "terrain.pgm"), std::ios::binary);
+    std::string osmTerrain = m->str("terrain_osm", "");
+    tmpp_ = mpp_;
+    std::string terrainFile = m->str("terrain", "terrain.pgm");
+    if (!osmTerrain.empty() && fileExists(dir + "/" + osmTerrain)) {
+        terrainFile = osmTerrain;
+        tmpp_ = m->num("terrain_osm_metres_per_pixel", 2.0f);
+    }
+    std::ifstream f(dir + "/" + terrainFile, std::ios::binary);
     if (!f) { Log::error("Missing terrain for map %s", name_.c_str()); return false; }
     std::string magic;
     int maxv = 0;
@@ -72,8 +87,39 @@ bool MapData::load(const std::string& dir) {
     gridW_ = (int)std::ceil(widthM() / kGridCell) + 1;
     gridH_ = (int)std::ceil(heightM() / kGridCell) + 1;
 
-    // --- roads.txt -----------------------------------------------------------
-    {
+    // --- roads ------------------------------------------------------------------
+    std::string roadsM = m->str("roads_metres", "");
+    bool osm = !roadsM.empty() && fileExists(dir + "/" + roadsM);
+    if (osm) {
+        std::string text;
+        readTextFile(dir + "/" + roadsM, text);
+        std::istringstream in(text);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream ls(line);
+            int cls;
+            std::string nm;
+            ls >> cls >> nm;
+            int nameIdx = -1;
+            if (nm != "-") {
+                for (auto& ch : nm) if (ch == '_') ch = ' ';
+                for (int i = 0; i < (int)roadNames_.size(); ++i)
+                    if (roadNames_[i] == nm) { nameIdx = i; break; }
+                if (nameIdx < 0) { nameIdx = (int)roadNames_.size(); roadNames_.push_back(nm); }
+            }
+            std::vector<Vec2> pts;
+            float x, y;
+            while (ls >> x >> y) pts.push_back(Vec2{x, y});
+            RoadClass rc = (RoadClass)std::clamp(cls, 1, 7);
+            if (rc == RoadClass::Railway) continue;
+            for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                RoadSegment sg{pts[i], pts[i + 1], rc, halfWidthFor(rc)};
+                sg.name = nameIdx;
+                roads_.push_back(sg);
+            }
+        }
+    } else {
         std::string text;
         if (readTextFile(dir + "/" + m->str("roads", "roads.txt"), text)) {
             std::istringstream in(text);
@@ -107,6 +153,9 @@ bool MapData::load(const std::string& dir) {
                 auto t = tokenize(line);
                 if (t.empty() || t[0][0] == '#') continue;
                 auto num = [&](size_t i) { return i < t.size() ? (float)atof(t[i].c_str()) : 0.0f; };
+                // The OSM import supersedes the hand-traced streets, squares and old-town blocks
+                if (osm && (t[0] == "road" || t[0] == "dense" || t[0] == "plaza" || t[0] == "railway" || t[0] == "landmark"))
+                    continue;
                 if (t[0] == "railway") {
                     std::vector<Vec2> pts;
                     for (size_t i = 1; i + 1 < t.size(); i += 2) pts.push_back(Vec2{num(i) * mpp_, num(i + 1) * mpp_});
@@ -142,6 +191,45 @@ bool MapData::load(const std::string& dir) {
         }
     }
 
+    // --- osm_features.txt (metres) ----------------------------------------------
+    if (osm) {
+        std::string text;
+        if (readTextFile(dir + "/" + m->str("osm_features", "osm_features.txt"), text)) {
+            std::istringstream in(text);
+            std::string line;
+            while (std::getline(in, line)) {
+                auto t = tokenize(line);
+                if (t.empty() || t[0][0] == '#') continue;
+                auto num = [&](size_t i) { return i < t.size() ? (float)atof(t[i].c_str()) : 0.0f; };
+                if (t[0] == "coverage" && t.size() >= 5) {
+                    coverage_.push_back({num(1), num(2), num(3), num(4)});
+                } else if (t[0] == "railway") {
+                    std::vector<Vec2> pts;
+                    for (size_t i = 1; i + 1 < t.size(); i += 2) pts.push_back(Vec2{num(i), num(i + 1)});
+                    for (size_t i = 0; i + 1 < pts.size(); ++i)
+                        rails_.push_back({pts[i], pts[i + 1], RoadClass::Railway, halfWidthFor(RoadClass::Railway)});
+                } else if (t[0] == "district" && t.size() >= 5) {
+                    bool dup = false;
+                    for (const auto& d : districts_) if (d.name == t[1]) dup = true;
+                    if (!dup) districts_.push_back({t[1], Vec2{num(2), num(3)}, num(4)});
+                } else if (t[0] == "tree" && t.size() >= 3) {
+                    osmTrees_.push_back(Vec2{num(1), num(2)});
+                } else if (t[0] == "lamp" && t.size() >= 3) {
+                    osmLamps_.push_back(Vec2{num(1), num(2)});
+                } else if (t[0] == "building" && t.size() >= 7) {
+                    OsmBuilding b;
+                    b.kind = t[1];
+                    b.levels = atoi(t[2].c_str());
+                    b.centre = Vec2{num(3), num(4)};
+                    b.w = atoi(t[5].c_str());
+                    b.h = atoi(t[6].c_str());
+                    b.name = t.size() >= 8 ? t[7] : "";
+                    osmBuildings_.push_back(b);
+                }
+            }
+        }
+    }
+
     // Inside hand-drawn old-town areas the traced streets replace the digitised ones
     if (!dense_.empty()) {
         std::vector<RoadSegment> kept;
@@ -157,8 +245,9 @@ bool MapData::load(const std::string& dir) {
     }
     index(roads_, roadGrid_);
     index(rails_, railGrid_);
-    Log::info("Map %s: %.1f x %.1f km, %d road segments, %d landmarks", name_.c_str(), widthM() / 1000,
-              heightM() / 1000, (int)roads_.size(), (int)landmarks_.size());
+    Log::info("Map %s: %.1f x %.1f km, %d road segments, %d landmarks, %d OSM buildings", name_.c_str(),
+              widthM() / 1000, heightM() / 1000, (int)roads_.size(), (int)landmarks_.size(),
+              (int)osmBuildings_.size());
     return true;
 }
 
@@ -194,6 +283,7 @@ RoadHit MapData::query(const std::vector<RoadSegment>& segs, const std::vector<s
             best.distance = d;
             best.halfWidth = s.halfWidth;
             best.dir = (s.b - s.a).normalized();
+            best.name = s.name;
             best.along = t * (s.b - s.a).length() + std::fabs(s.a.x * 0.37f + s.a.y * 0.61f);
         }
     }
@@ -202,6 +292,48 @@ RoadHit MapData::query(const std::vector<RoadSegment>& segs, const std::vector<s
 
 RoadHit MapData::nearestRoad(float x, float y, bool rail) const {
     return rail ? query(rails_, railGrid_, x, y) : query(roads_, roadGrid_, x, y);
+}
+
+RoadHit MapData::nearestStreet(float x, float y) const {
+    RoadHit best;
+    int gx = (int)(x / kGridCell), gy = (int)(y / kGridCell);
+    if (gx < 0 || gy < 0 || gx >= gridW_ || gy >= gridH_) return best;
+    float bestScore = 1e9f;
+    for (int i : roadGrid_[(size_t)gy * gridW_ + gx]) {
+        const auto& s = roads_[i];
+        if (isFootpath(s.cls)) continue;
+        float t;
+        float d = distToSegment(Vec2{x, y}, s.a, s.b, &t);
+        if (d - s.halfWidth < bestScore) {
+            bestScore = d - s.halfWidth;
+            best.cls = s.cls;
+            best.distance = d;
+            best.halfWidth = s.halfWidth;
+            best.dir = (s.b - s.a).normalized();
+            best.name = s.name;
+        }
+    }
+    return best;
+}
+
+bool MapData::osmCovered(float x, float y) const {
+    for (const auto& c : coverage_)
+        if (x >= c[0] && y >= c[1] && x <= c[2] && y <= c[3]) return true;
+    return false;
+}
+
+std::string MapData::streetAt(Vec2 p) const {
+    int gx = (int)(p.x / kGridCell), gy = (int)(p.y / kGridCell);
+    if (gx < 0 || gy < 0 || gx >= gridW_ || gy >= gridH_) return "";
+    float best = 25.0f;
+    int name = -1;
+    for (int i : roadGrid_[(size_t)gy * gridW_ + gx]) {
+        const auto& s = roads_[i];
+        if (s.name < 0) continue;
+        float d = distToSegment(p, s.a, s.b, nullptr) - s.halfWidth;
+        if (d < best) { best = d; name = s.name; }
+    }
+    return name >= 0 ? roadNames_[name] : "";
 }
 
 Zone MapData::zoneAtPixel(int px, int py) const {
@@ -215,10 +347,11 @@ float MapData::waterAtPixel(int px, int py) const {
 }
 
 float MapData::waterCoverage(float x, float y) const {
-    float fx = x / mpp_ - 0.5f, fy = y / mpp_ - 0.5f;
+    float fx = x / tmpp_ - 0.5f, fy = y / tmpp_ - 0.5f;
     // wobble the shoreline a bit
-    fx += (fbm(x * 0.05f, y * 0.05f, 77, 3) - 0.5f) * 0.9f;
-    fy += (fbm(x * 0.05f + 31.7f, y * 0.05f, 78, 3) - 0.5f) * 0.9f;
+    float wob = 6.2f / tmpp_;   // about 6 m of shoreline wobble
+    fx += (fbm(x * 0.05f, y * 0.05f, 77, 3) - 0.5f) * wob;
+    fy += (fbm(x * 0.05f + 31.7f, y * 0.05f, 78, 3) - 0.5f) * wob;
     int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
     float tx = fx - ix, ty = fy - iy;
     float a = waterAtPixel(ix, iy), b = waterAtPixel(ix + 1, iy);
@@ -229,8 +362,10 @@ float MapData::waterCoverage(float x, float y) const {
 Zone MapData::zoneAt(float x, float y) const {
     float w = waterCoverage(x, y);
     if (w >= 0.5f) return Zone::Water;
-    float fx = x / mpp_ + (fbm(x * 0.03f, y * 0.03f, 11, 3) - 0.5f) * 1.6f;
-    float fy = y / mpp_ + (fbm(x * 0.03f, y * 0.03f + 91.3f, 12, 3) - 0.5f) * 1.6f;
+    // wobble zone borders by roughly 5 m, whatever the terrain resolution
+    float wb = 5.5f / tmpp_ * 2.0f;
+    float fx = x / tmpp_ + (fbm(x * 0.03f, y * 0.03f, 11, 3) - 0.5f) * wb;
+    float fy = y / tmpp_ + (fbm(x * 0.03f, y * 0.03f + 91.3f, 12, 3) - 0.5f) * wb;
     Zone z = zoneAtPixel((int)std::floor(fx), (int)std::floor(fy));
     if (z == Zone::Water) {
         // warped into a water pixel but the smooth shoreline says land: use a neighbour

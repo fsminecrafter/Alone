@@ -87,7 +87,12 @@ def way_xy(nodes, refs):
     return pts
 
 
-def join_rings(segments):
+def complete(nodes, refs):
+    """True when every node of the ring is in the export."""
+    return all(r in nodes for r in refs)
+
+
+def join_rings(segments, closed_only=True):
     """Join multipolygon member ways into closed rings."""
     rings, open_ = [], [list(s) for s in segments if len(s) >= 2]
     while open_:
@@ -109,11 +114,12 @@ def join_rings(segments):
                 open_.pop(i)
                 changed = True
                 break
-        rings.append(ring)
+        if not closed_only or (len(ring) >= 4 and ring[0] == ring[-1]):
+            rings.append(ring)   # unclosed rings (members outside the export) would draw chords
     return rings
 
 
-def areas(nodes, ways, rels):
+def areas(nodes, ways, rels, closed_only=True):
     """All closed areas as (tags, outer rings [refs], inner rings [refs])."""
     out = []
     for wid, (refs, tags) in ways.items():
@@ -129,7 +135,7 @@ def areas(nodes, ways, rels):
         t.pop("type", None)
         if not t and outer:
             t = ways.get(next(m[1] for m in mem if m[2] == "outer"), ([], {}))[1]
-        out.append((t, join_rings(outer), join_rings(inner)))
+        out.append((t, join_rings(outer, closed_only), join_rings(inner, closed_only)))
     return out
 
 
@@ -196,7 +202,7 @@ def align(base_zones, base_mpp, base_roads, nodes, ways, water_polys):
 def align_anchors(path, base_mpp, nodes, ways, rels):
     """Least-squares fit of world = s * xy + t from named OSM features."""
     found = {}
-    for tags, outers, inners in areas(nodes, ways, rels):
+    for tags, outers, inners in areas(nodes, ways, rels, closed_only=False):
         n = tags.get("name")
         if n and outers:
             xy = way_xy(nodes, max(outers, key=len))
@@ -365,7 +371,7 @@ def main():
         sys.exit(1)
     map_dir, osm_paths = sys.argv[1], sys.argv[2:]
     ini = open(os.path.join(map_dir, "map.ini"), encoding="utf-8").read()
-    base_mpp = float(re.search(r"metres_per_pixel\s*=\s*([\d.]+)", ini).group(1))
+    base_mpp = float(re.search(r"^metres_per_pixel\s*=\s*([\d.]+)", ini, re.M).group(1))
     base = read_pgm(os.path.join(map_dir, "terrain.pgm"))
     H, W = base.shape
     world_w, world_h = W * base_mpp, H * base_mpp
@@ -461,10 +467,14 @@ def main():
         return (q[0] / OUT_MPP, q[1] / OUT_MPP)
     for prio, z, outers, inners in layered:
         for r in outers:
+            if not complete(nodes, r):
+                continue
             pts = [opx(p) for p in way_xy(nodes, r)]
             if len(pts) >= 3:
                 draw.polygon(pts, fill=z)
         for r in inners:
+            if not complete(nodes, r):
+                continue
             pts = [opx(p) for p in way_xy(nodes, r)]
             if len(pts) >= 3:
                 draw.polygon(pts, fill=RESIDENTIAL if z != WATER else FOREST)

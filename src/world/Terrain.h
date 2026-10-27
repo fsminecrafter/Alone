@@ -6,7 +6,7 @@ namespace alone {
 // Land-cover classes from the digitised map (terrain.pgm values).
 // Must match tools/mapgen/digitize.py.
 enum class Zone : uint8_t {
-    Unknown = 0, Water, Forest, Woodland, Park, Residential, Field, Meadow, Commercial, Hospital, Count
+    Unknown = 0, Water, Forest, Woodland, Park, Residential, Field, Meadow, Commercial, Hospital, Paved, Parking, Count
 };
 
 // Surface of a 1x1 m tile.
