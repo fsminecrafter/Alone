@@ -78,6 +78,7 @@ int App::run(int argc, char** argv) {
     if (!renderer_.init()) { CloseWindow(); return 1; }
     InitAudioDevice();
     audio_ = IsAudioDeviceReady();
+    sound_.init();
     if (audio_) {
         std::error_code ec;
         for (const auto& e : std::filesystem::directory_iterator(Paths::data("assets/audio"), ec))
@@ -223,6 +224,7 @@ int App::run(int argc, char** argv) {
     if (!autoShots) autosave();
     saveSettings();
     if (musicLoaded_) UnloadMusicStream(music_);
+    sound_.shutdown();
     if (audio_) CloseAudioDevice();
     if (mapReady_) UnloadTexture(mapTex_);
     renderer_.shutdown();
@@ -270,6 +272,9 @@ void App::newGame() {
 
 void App::update(float dt) {
     updateMusic(dt);
+    sound_.update(game_, state_ == State::Menu ? settings_.sfxVolume * 0.5f : settings_.sfxVolume);
+    for (const auto& e : game_.takeSounds())
+        if (state_ != State::Menu) sound_.play(e, game_.player().pos, settings_.sfxVolume);
     if (IsKeyPressed(KEY_F11)) { settings_.fullscreen = !settings_.fullscreen; applySettings(); }
     if (state_ == State::Menu) {
         menuOrbit_ += dt;
@@ -433,13 +438,16 @@ void App::drawSettings() {
     float s = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
     DrawRectangle(0, 0, (int)W, (int)H, Color{0, 0, 0, 120});
-    Rectangle p{W / 2 - 230 * s, H / 2 - 190 * s, 460 * s, 380 * s};
+    Rectangle p{W / 2 - 230 * s, H / 2 - 215 * s, 460 * s, 430 * s};
     ui::panel(p);
     ui::textCentered("Settings", W / 2, p.y + 18 * s, 28 * s, ui::theme().text, true);
     float x = p.x + 30 * s, y = p.y + 80 * s, w = p.width - 60 * s;
     ui::text(fmt("Music volume: %d%%", (int)(settings_.musicVolume * 100)), x, y, 17 * s, ui::theme().text);
     if (ui::slider({x, y + 26 * s, w, 16 * s}, settings_.musicVolume, 0, 1) && musicLoaded_) SetMusicVolume(music_, settings_.musicVolume);
-    y += 66 * s;
+    y += 56 * s;
+    ui::text(fmt("Sound effects: %d%%", (int)(settings_.sfxVolume * 100)), x, y, 17 * s, ui::theme().text);
+    ui::slider({x, y + 26 * s, w, 16 * s}, settings_.sfxVolume, 0, 1);
+    y += 56 * s;
     ui::text("Length of a day", x, y, 17 * s, ui::theme().text);
     struct Opt { const char* label; float mps; };
     Opt opts[] = {{"48 min", 0.5f}, {"24 min", 1.0f}, {"12 min", 2.0f}};
@@ -1034,6 +1042,7 @@ void App::loadSettings() {
     if (!Paths::exists(settingsPath()) || !c.load(settingsPath())) return;
     if (const auto* s = c.find("settings")) {
         settings_.musicVolume = std::clamp(s->num("music_volume", settings_.musicVolume), 0.0f, 1.0f);
+        settings_.sfxVolume = std::clamp(s->num("sfx_volume", settings_.sfxVolume), 0.0f, 1.0f);
         settings_.minutesPerSecond = std::clamp(s->num("minutes_per_second", settings_.minutesPerSecond), 0.25f, 4.0f);
         settings_.fullscreen = s->flag("fullscreen", false);
         settings_.showFps = s->flag("show_fps", false);
@@ -1045,6 +1054,7 @@ void App::saveSettings() {
     auto& s = c.getOrAdd("settings");
     auto set = [&](const std::string& k, const std::string& v) { if (!s.values.count(k)) s.keyOrder.push_back(k); s.values[k] = v; };
     set("music_volume", fmt("%.2f", settings_.musicVolume));
+    set("sfx_volume", fmt("%.2f", settings_.sfxVolume));
     set("minutes_per_second", fmt("%.2f", settings_.minutesPerSecond));
     set("fullscreen", settings_.fullscreen ? "true" : "false");
     set("show_fps", settings_.showFps ? "true" : "false");

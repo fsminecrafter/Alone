@@ -1,4 +1,5 @@
 #pragma once
+#include "client/Audio.h"
 #include "client/Renderer.h"
 #include "game/Game.h"
 #include "raylib.h"
@@ -24,6 +25,7 @@ private:
 
     struct Settings {
         float musicVolume = 0.45f;
+        float sfxVolume = 0.7f;
         float minutesPerSecond = 1.0f;
         bool fullscreen = false;
         bool showFps = false;
@@ -66,6 +68,7 @@ private:
 
     Game game_;
     Renderer renderer_;
+    Audio sound_;
     State state_ = State::Menu;
     Overlay overlay_ = Overlay::None;
     Overlay settingsReturn_ = Overlay::None;

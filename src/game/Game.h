@@ -55,6 +55,10 @@ struct CurrentAction {
 };
 
 enum class MessageKind { Info, Good, Bad, Body };
+
+// Things the client may want to play a sound for.
+enum class Sfx { Footstep, Gunshot, Swing, Hit, Door, Click, Chop, Eat, Drink, Hurt };
+struct SoundEvent { Sfx type; Vec2 pos; };
 struct Message {
     std::string text;
     MessageKind kind = MessageKind::Info;
@@ -144,6 +148,8 @@ public:
     std::string itemName(const ItemInstance& it) const { return it.displayName(knowsMushrooms()); }
 
     void log(const std::string& text, MessageKind kind = MessageKind::Info);
+    std::vector<SoundEvent> takeSounds() { std::vector<SoundEvent> s; s.swap(sounds_); return s; }
+    void sound(Sfx s, Vec2 at) { if (sounds_.size() < 64) sounds_.push_back({s, at}); }
 
     // Saving: one file, plain text. Returns false (and logs why) on failure.
     bool save(const std::string& path);
@@ -174,6 +180,8 @@ private:
     Rng rng_;
     CurrentAction action_;
     std::deque<Message> messages_;
+    std::vector<SoundEvent> sounds_;
+    float stepDistance_ = 0;
     DeathInfo death_;
     uint32_t seed_ = 0;
     float minutesPerSecond_ = 1.0f;   // 1 game minute per real second: a day lasts 24 minutes

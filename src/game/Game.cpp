@@ -268,7 +268,11 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
 
     if (wantsMove) {
         Vec2 dir = in.move * (1.0f / std::max(1.0f, len));
+        Vec2 before = p.pos;
         p.pos = world_->moveCircle(p.pos, dir * (speed * dt), 0.28f);
+        stepDistance_ += distance(before, p.pos);
+        float stride = p.running ? 1.5f : p.sneaking ? 0.6f : 0.85f;
+        if (stepDistance_ > stride) { stepDistance_ = 0; sound(Sfx::Footstep, p.pos); }
         p.facing = std::atan2(dir.y, dir.x);
     }
 
@@ -360,6 +364,7 @@ void Game::handleBodyEvents() {
 }
 
 void Game::playerHurt(float severity, const AnimalDef* by) {
+    sound(Sfx::Hurt, player_.pos);
     if (player_.asleep) { cancelAction(); log("You wake with a start!", MessageKind::Bad); }
     static const BodyPart parts[] = {BodyPart::LeftLeg, BodyPart::RightLeg, BodyPart::LeftFoot, BodyPart::RightFoot,
                                      BodyPart::LeftArm, BodyPart::RightArm, BodyPart::Torso, BodyPart::LeftHand, BodyPart::RightHand};
@@ -412,6 +417,7 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
             if (off < an.def->size * 0.6f && world_->lineOfSight(p.pos, an.pos)) { bestT = t; hit = &an; }
         }
         animals_.scare(p.pos, 350.0f);
+        sound(Sfx::Gunshot, p.pos);
         log("BANG!");
         if (hit) {
             hit->hp -= w->def->damage * rng_.range(0.6f, 1.2f);
@@ -426,6 +432,7 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     p.attackTimer = w ? w->def->cooldown : 0.7f;
     p.stamina = std::max(0.0f, p.stamina - 0.08f);
     p.noise = w ? w->def->noise : 5.0f;
+    sound(Sfx::Swing, p.pos);
     Animal* target = nullptr;
     float best = 1e9f;
     for (auto& an : animals_.animals()) {
@@ -439,6 +446,7 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     if (!target) return;
     if (!rng_.chance(0.8f * cap.accuracy)) { log("You miss."); return; }
     target->hp -= damage * rng_.range(0.7f, 1.3f);
+    sound(Sfx::Hit, target->pos);
     if (target->hp <= 0) {
         target->state = AnimalState::Dead;
         log("The " + lower(target->def->name) + " collapses.", MessageKind::Good);
@@ -784,11 +792,13 @@ void Game::perform(const ActionOption& o) {
         // instant ------------------------------------------------------------
         case ActionKind::ToggleDoor:
             world_->toggleDoor(o.x, o.y, o.dir);
+            sound(Sfx::Door, Vec2{(float)o.x, (float)o.y});
             return;
         case ActionKind::OpenContainer:
             openContainer_ = true; openX_ = o.x; openY_ = o.y;
             return;
         case ActionKind::PickUp:
+            sound(Sfx::Click, player_.pos);
             transfer(o.item, ItemLoc::Player);
             return;
         case ActionKind::Drop:
@@ -1029,6 +1039,7 @@ void Game::finishAction() {
             break;
         }
         case ActionKind::ChopTree: {
+            sound(Sfx::Chop, player_.pos);
             world_->setProp(o.x, o.y, Prop::Stump);
             int n = rng_.rangeInt(2, 4);
             for (int i = 0; i < n; ++i) world_->dropItem(Vec2{o.x + 0.5f, o.y + 0.5f}, items_.create("firewood", rng_));
@@ -1146,9 +1157,11 @@ void Game::finishAction() {
             break;
         }
         case ActionKind::Eat:
+            sound(Sfx::Eat, player_.pos);
             if (it) { eat(*it, o.amount); removeIfUsedUp(o.item); }
             break;
         case ActionKind::Drink:
+            sound(Sfx::Drink, player_.pos);
             if (it) { drinkFrom(*it); removeIfUsedUp(o.item); }
             break;
         case ActionKind::OpenCan:

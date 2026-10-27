@@ -64,6 +64,13 @@ weapons or a moose rifle; butcher carcasses; bandage and disinfect wounds; take
 painkillers, antibiotics and vitamins; wear clothing for warmth and rain;
 sleep (beds are warmer); read the map.
 
+**Saving:** the game autosaves every few minutes and when you quit; continue
+from the main menu. Death is permanent - the save goes with you.
+
+**Sound:** your music plays in the background; rain, wind, campfires,
+footsteps, gunshots, doors and the rest are synthesised on the fly, so the
+game needs no sound files.
+
 **Items:** ~90 items with real nutrition values per 100 g (from food
 composition tables), defined in plain text in `data/items/*.ini`. Store food has
 a nutrition label you can read; wild food doesn't.
@@ -155,12 +162,10 @@ procedural Sweden can later generate the same files.
 
 ## Roadmap
 
-* Saving and loading
 * Procedural Swedish countryside beyond the map edge
 * Upper floors, basements, more building types (farms, summer cottages)
 * Fishing, trapping more animals, preserving food (smoking, drying, salting)
 * Other survivors
-* Sound effects
 
 ## License
 
