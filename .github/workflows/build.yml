@@ -46,3 +46,21 @@ jobs:
           path: |
             build/Release/alone.exe
             build/Release/data
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+      - name: Configure
+        run: emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-web -j4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alone-web
+          path: |
+            build-web/alone.html
+            build-web/alone.js
+            build-web/alone.wasm
+            build-web/alone.data

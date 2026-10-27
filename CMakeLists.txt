@@ -10,6 +10,10 @@ endif()
 
 option(ALONE_BUILD_CLIENT "Build the game client (needs raylib, fetched automatically)" ON)
 option(ALONE_BUILD_TESTS  "Build the backend unit tests" ON)
+if(EMSCRIPTEN)
+    # Web build (emcmake cmake ...): browser game only
+    set(ALONE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+endif()
 
 if(MSVC)
     add_compile_options(/W3 /utf-8)
@@ -37,6 +41,10 @@ if(ALONE_BUILD_CLIENT)
         set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(BUILD_GAMES    OFF CACHE BOOL "" FORCE)
         set(CUSTOMIZE_BUILD OFF CACHE BOOL "" FORCE)
+        if(EMSCRIPTEN)
+            set(PLATFORM "Web" CACHE STRING "" FORCE)
+            set(OPENGL_VERSION "ES 3.0" CACHE STRING "" FORCE)   # WebGL 2
+        endif()
         FetchContent_Declare(raylib
             GIT_REPOSITORY https://github.com/raysan5/raylib.git
             GIT_TAG        5.5
@@ -63,10 +71,25 @@ if(ALONE_BUILD_CLIENT)
         endif()
     endif()
 
-    # Ship the data folder next to the executable.
-    add_custom_command(TARGET alone POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:alone>/data)
+    if(EMSCRIPTEN)
+        # alone.html + alone.js + alone.wasm + alone.data (the data folder, packed)
+        set_target_properties(alone PROPERTIES SUFFIX ".html")
+        target_link_options(alone PRIVATE
+            -sUSE_GLFW=3 -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
+            -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sSTACK_SIZE=5242880
+            -sFORCE_FILESYSTEM=1 -lidbfs.js
+            -sEXPORTED_RUNTIME_METHODS=FS,IDBFS,addRunDependency,removeRunDependency,HEAPF32,HEAP32,HEAPU8,HEAP16,HEAP8
+            --preload-file ${CMAKE_SOURCE_DIR}/data@/data
+            --pre-js ${CMAKE_SOURCE_DIR}/web/pre.js
+            --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html)
+        set_property(TARGET alone APPEND PROPERTY LINK_DEPENDS
+            ${CMAKE_SOURCE_DIR}/web/shell.html ${CMAKE_SOURCE_DIR}/web/pre.js)
+    else()
+        # Ship the data folder next to the executable.
+        add_custom_command(TARGET alone POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${CMAKE_SOURCE_DIR}/data $<TARGET_FILE_DIR:alone>/data)
+    endif()
 
     install(TARGETS alone RUNTIME DESTINATION .)
     install(DIRECTORY data DESTINATION .)

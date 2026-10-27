@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alone</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0f12; color: #e2ded4; overflow: hidden;
+               font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; background: #0d0f12; cursor: none; }
+  #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+             justify-content: center; gap: 14px; background: #0d0f12; }
+  #loading h1 { margin: 0; font-size: 56px; letter-spacing: 6px; font-weight: 700; }
+  #loading p { margin: 0; color: #d6a85c; }
+  #bar { width: min(420px, 80vw); height: 6px; background: #2a2d31; border-radius: 3px; overflow: hidden; }
+  #fill { width: 0; height: 100%; background: #d6a85c; transition: width .2s; }
+  #status { color: #96948c; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="loading">
+  <h1>ALONE</h1>
+  <p>Alingsås, Västra Götaland. Autumn.</p>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="status">Loading…</div>
+</div>
+<canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+<script>
+  var fill = document.getElementById('fill'), statusEl = document.getElementById('status');
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.warn(t); },
+    setStatus: function (t) {
+      if (!t) return;
+      var m = t.match(/\((\d+(?:\.\d+)?)\/(\d+)\)/);
+      if (m) fill.style.width = (100 * m[1] / m[2]) + '%';
+      statusEl.textContent = t.replace(/\(.*\)/, '').trim() || 'Loading…';
+    },
+    onRuntimeInitialized: function () {
+      document.getElementById('loading').style.display = 'none';
+      Module.canvas.focus();
+    }
+  };
+  window.onerror = function (msg) { statusEl.textContent = 'Something went wrong: ' + msg; };
+  // Browsers only allow sound after a click or key press
+  ['mousedown', 'keydown', 'touchstart'].forEach(function (e) {
+    window.addEventListener(e, function () { Module.canvas.focus(); }, { once: true });
+  });
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

@@ -9,6 +9,7 @@
 #include "core/Paths.h"
 #include "raymath.h"
 #include <algorithm>
+#include <sstream>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -812,7 +813,9 @@ int App::runShowcase(const std::string& dir) {
 // Our own mouse cursor: a small outlined arrow, a crosshair when a firearm is ready.
 void App::drawCursor() {
     if (tour_ || (!IsWindowFocused() && !IsCursorOnScreen())) return;
-    if (!IsCursorHidden()) HideCursor();
+#ifndef __EMSCRIPTEN__
+    if (!IsCursorHidden()) HideCursor();   // (the web page hides it with CSS: raylib's HideCursor locks the pointer there)
+#endif
     float s = std::max(1.0f, ui::scale());
     Vector2 m = GetMousePosition();
     const ItemInstance* wpn = state_ == State::Playing ? game_.weapon() : nullptr;

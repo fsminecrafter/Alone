@@ -80,7 +80,7 @@ struct Player {
     bool moving = false, running = false, sneaking = false, asleep = false;
     float attackTimer = 0;
     float swing = 0;             // animation 0..1 after an attack
-    Body body;
+    Body body = Body(1);
     Inventory inventory;
     std::array<ItemInstance, (size_t)ClothingSlot::Count> worn{};
     uint32_t weaponUid = 0;      // equipped weapon (in inventory)

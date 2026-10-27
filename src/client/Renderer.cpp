@@ -4,6 +4,9 @@
 #include "core/Paths.h"
 #include "core/Rng.h"
 #include "raymath.h"
+#ifdef __EMSCRIPTEN__
+#include <GLES3/gl3.h>
+#endif
 #include "rlgl.h"
 #include <algorithm>
 #include <cmath>
@@ -25,7 +28,21 @@ RenderTexture2D loadShadowMap(int size) {
     t.texture.height = size;
     if (t.id > 0) {
         rlEnableFramebuffer(t.id);
+#ifdef __EMSCRIPTEN__
+        // WebGL 2 wants a sized depth format
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        t.depth.id = tex;
+#else
         t.depth.id = rlLoadTextureDepth(size, size, false);
+#endif
         t.depth.width = size;
         t.depth.height = size;
         t.depth.format = 19;
@@ -52,10 +69,31 @@ Mesh unitMesh(int kind) {
 
 } // namespace
 
+// The shaders are written for desktop OpenGL 3.3. WebGL 2 (OpenGL ES 3.0)
+// takes the same code with a different header and explicit precision.
+static Shader loadShaderPair(const std::string& vsPath, const std::string& fsPath) {
+#ifdef __EMSCRIPTEN__
+    auto convert = [](const std::string& path) {
+        char* text = LoadFileText(path.c_str());
+        if (!text) return std::string();
+        std::string src = text;
+        UnloadFileText(text);
+        size_t v = src.find("#version 330");
+        if (v != std::string::npos)
+            src.replace(v, 12, "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;");
+        return src;
+    };
+    std::string vs = convert(vsPath), fs = convert(fsPath);
+    return LoadShaderFromMemory(vs.c_str(), fs.c_str());
+#else
+    return LoadShader(vsPath.c_str(), fsPath.c_str());
+#endif
+}
+
 bool Renderer::init() {
-    shader_ = LoadShader(Paths::data("shaders/world.vs").c_str(), Paths::data("shaders/world.fs").c_str());
+    shader_ = loadShaderPair(Paths::data("shaders/world.vs"), Paths::data("shaders/world.fs"));
     if (shader_.id == 0 || shader_.id == rlGetShaderIdDefault()) { Log::error("Failed to load world shader"); return false; }
-    depthShader_ = LoadShader(Paths::data("shaders/depth.vs").c_str(), Paths::data("shaders/depth.fs").c_str());
+    depthShader_ = loadShaderPair(Paths::data("shaders/depth.vs"), Paths::data("shaders/depth.fs"));
     shader_.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(shader_, "matModel");
     auto loc = [&](const char* n) { return GetShaderLocation(shader_, n); };
     locSunDir_ = loc("sunDir"); locSunColor_ = loc("sunColor"); locAmbient_ = loc("ambientColor"); locSky_ = loc("skyColor");

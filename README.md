@@ -21,7 +21,7 @@ and listen to your body, because it will tell you *how* you feel but never
 ![Character animations: idle, walk, run, sneak, axe swing, rifle aim, eat, search, sleep](docs/media/character_animations.gif)
 
 > Early prototype (v0.1). The game was originally an NDS project; it has been
-> rewritten from scratch in C++17 for PC (Linux and Windows).
+> rewritten from scratch in C++17 for PC (Linux and Windows), with a browser version on the side.
 
 ## What's in it
 
@@ -132,6 +132,21 @@ Or cross-compile from Linux with MinGW-w64 (`sudo apt install mingw-w64`):
 
 The `data/` folder must sit next to the executable (the build copies it).
 
+### Web (browser)
+
+A WebAssembly build runs in any browser with WebGL 2 (Chrome, Edge, Firefox,
+Safari 15+). It is the same game, built with [Emscripten](https://emscripten.org):
+
+```sh
+source /path/to/emsdk/emsdk_env.sh
+./scripts/build-web.sh --serve      # then open http://localhost:8080/alone.html
+```
+
+The output is `build-web/alone.html`, `.js`, `.wasm` and `.data` (the packed
+`data/` folder, about 28 MB); put the four files on any static web host.
+Saves and settings are kept in the browser's storage (IndexedDB). The browser
+only allows sound after your first click or key press.
+
 ### Options
 
 * `-DALONE_BUILD_CLIENT=OFF` builds only the backend library and tests (no graphics).
@@ -157,7 +172,7 @@ The `data/` folder must sit next to the executable (the build copies it).
 | L | Flashlight |
 | Q / E, wheel | Rotate / zoom camera |
 | 1 / 2 / 3 | Time x1 / x5 / x20 |
-| Esc | Pause |
+| Esc | Pause (Settings: audio, graphics, length of a day) |
 
 A day lasts 24 real minutes by default (changeable in Settings).
 
