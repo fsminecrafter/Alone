@@ -43,6 +43,7 @@ bool Game::loadData() {
 }
 
 void Game::newGame(uint32_t seed) {
+    seed_ = seed;
     world_ = std::make_unique<World>(map_, items_, seed);
     rng_.reseed(seed * 7919ULL + 17);
     player_ = Player{};
@@ -233,7 +234,7 @@ void Game::update(float dt, const PlayerInput& input) {
 
     if (dead()) {
         death_.cause = player_.body.deathCause();
-        death_.daysSurvived = player_.body.state().minutesAlive / 1440.0f;
+        death_.daysSurvived = (float)((world_->clock().totalMinutes() - 9 * 60) / 1440.0);
         death_.place = location();
         action_.active = false;
         log("You died.", MessageKind::Bad);
@@ -313,13 +314,26 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     if (symptomMsgTimer_ <= 0) {
         symptomMsgTimer_ = 1.0f;
         std::map<std::string, int> now;
+        for (const auto& s : syms) now[s.def->id] = s.level;
+        // Announce a symptom when it gets worse than it has been lately;
+        // it has to stay better for a while before it can be announced again.
         for (const auto& s : syms) {
-            now[s.def->id] = s.level;
-            auto it = lastSymptomLevels_.find(s.def->id);
-            int before = it == lastSymptomLevels_.end() ? 0 : it->second;
-            if (s.level > before && s.def->id != "full") log(s.name() + ".", MessageKind::Body);
+            Announced& a = lastSymptomLevels_[s.def->id];
+            if (s.level > a.level) {
+                if (s.def->id != "full") log(s.name() + ".", MessageKind::Body);
+                a.level = s.level;
+                a.calm = 0;
+            }
         }
-        lastSymptomLevels_ = now;
+        for (auto& [id, a] : lastSymptomLevels_) {
+            int cur = now.count(id) ? now[id] : 0;
+            if (cur < a.level) {
+                a.calm += 1.0f;
+                if (a.calm > 90.0f) { a.level = cur; a.calm = 0; }
+            } else {
+                a.calm = 0;
+            }
+        }
     }
 }
 

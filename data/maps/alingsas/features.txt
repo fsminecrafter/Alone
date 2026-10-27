@@ -10,6 +10,7 @@
 #                                                 was hidden under the map label)
 #   plaza    "Name" x y w h                       paved square (w/h in metres)
 #   dense    "Name" x y radius                    old-town block: buildings line the streets
+#   label    "Text" x y [angle]                   text shown on the map (roads etc.)
 #
 # Landmark kinds: church, townhall, station, hospital, hostel, manor,
 # grocery, gasstation, school, pharmacy, hardware, police, firestation, sports
@@ -72,3 +73,12 @@ landmark school "Ängaboskolan" 840 560 46 24
 landmark police "Polisstation" 686 371 26 16
 landmark firestation "Brandstation" 600 440 26 18
 landmark sports "Mjörnvallen" 465 300 20 12
+
+# Road names shown on the map
+label "E20" 560 492 -48
+label "E20" 1150 160 -35
+label "Rv 180" 525 186 35
+label "Rv 180" 722 392 0
+label "Vänersborgsvägen" 862 150 -47
+label "Svedenborgsgatan" 488 498 -84
+label "Västra stambanan" 300 480 -50

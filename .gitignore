@@ -72,3 +72,4 @@ Testing/
 settings.ini
 screenshot_*.png
 __pycache__/
+save.txt

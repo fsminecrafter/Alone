@@ -24,6 +24,7 @@ struct RoadHit {
 
 struct District { std::string name; Vec2 centre; float radius; };
 struct WaterName { std::string name; Vec2 pos; };
+struct MapLabel { std::string text; Vec2 pos; float angle = 0; };
 struct Plaza { std::string name; Vec2 centre; Vec2 size; };
 struct DenseArea { std::string name; Vec2 centre; float radius; };
 
@@ -64,6 +65,7 @@ public:
     const std::vector<WaterName>& waterNames() const { return waterNames_; }
     const std::vector<Landmark>& landmarks() const { return landmarks_; }
     const std::vector<Plaza>& plazas() const { return plazas_; }
+    const std::vector<MapLabel>& labels() const { return labels_; }
     const std::vector<DenseArea>& denseAreas() const { return dense_; }
     const DenseArea* denseAreaAt(Vec2 p) const;
     const Plaza* plazaAt(Vec2 p) const;
@@ -88,6 +90,7 @@ private:
     std::vector<WaterName> waterNames_;
     std::vector<Landmark> landmarks_;
     std::vector<Plaza> plazas_;
+    std::vector<MapLabel> labels_;
     std::vector<DenseArea> dense_;
 };
 

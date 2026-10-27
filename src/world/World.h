@@ -35,7 +35,10 @@ struct TileOverride {
     float harvestedAtDay = -1;   // berries / forage: day picked
 };
 
+class SaveGame;
+
 class World {
+    friend class SaveGame;
 public:
     World(const MapData& map, const ItemRegistry& items, uint32_t seed);
 

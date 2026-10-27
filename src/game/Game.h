@@ -94,7 +94,10 @@ struct DeathInfo {
 
 // The whole simulation. Owns the world, the player and the wildlife.
 // The client only feeds it input and draws what it exposes.
+class SaveGame;
+
 class Game {
+    friend class SaveGame;
 public:
     bool loadData();                 // items, map, symptoms, animals (once)
     void newGame(uint32_t seed);
@@ -142,6 +145,11 @@ public:
 
     void log(const std::string& text, MessageKind kind = MessageKind::Info);
 
+    // Saving: one file, plain text. Returns false (and logs why) on failure.
+    bool save(const std::string& path);
+    bool load(const std::string& path);
+    uint32_t seed() const { return seed_; }
+
 private:
     void updatePlayer(float dt, float gameMinutes, const PlayerInput& in);
     void updateCombat(float dt, const PlayerInput& in);
@@ -167,13 +175,15 @@ private:
     CurrentAction action_;
     std::deque<Message> messages_;
     DeathInfo death_;
+    uint32_t seed_ = 0;
     float minutesPerSecond_ = 1.0f;   // 1 game minute per real second: a day lasts 24 minutes
     float speed_ = 1.0f;
     bool openContainer_ = false;
     int openX_ = 0, openY_ = 0;
     float sneezeTimer_ = 0;
     float symptomMsgTimer_ = 0;
-    std::map<std::string, int> lastSymptomLevels_;
+    struct Announced { int level = 0; float calm = 0; };   // calm: seconds spent below that level
+    std::map<std::string, Announced> lastSymptomLevels_;
     float flashlightAcc_ = 0;
 };
 

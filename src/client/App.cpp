@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -92,6 +93,7 @@ int App::run(int argc, char** argv) {
     game_.setBaseTimeScale(settings_.minutesPerSecond);
     game_.newGame(seed_);
     renderer_.snapTo(game_.player().pos);
+    hasSave_ = Paths::exists(savePath()) && !autoShots;
 
     int frame = 0;
     while (!WindowShouldClose() && !quit_) {
@@ -129,6 +131,7 @@ int App::run(int argc, char** argv) {
             static const Stop stops[] = {
                 {0, 0, 0, "screenshot_menu.png", Overlay::None},
                 {0, 0, 0, "screenshot_game.png", Overlay::None},
+                {0, 0, 0, "screenshot_context.png", Overlay::None},
                 {0, 0, 0, "screenshot_inventory.png", Overlay::Inventory},
                 {0, 0, 0, "screenshot_map.png", Overlay::Map},
                 {640, 364, 13, "screenshot_torget.png", Overlay::None},
@@ -138,6 +141,9 @@ int App::run(int argc, char** argv) {
                 {722, 515, 18.3f, "screenshot_gerdsken_dusk.png", Overlay::None},
                 {640, 418, 22, "screenshot_station_night.png", Overlay::None},
                 {760, 410, 12, "screenshot_e20.png", Overlay::None},
+                {880, 120, 10, "screenshot_wildlife.png", Overlay::None},
+                {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
+                {0, 0, 0, "screenshot_death.png", Overlay::None},
             };
             int n = (int)(sizeof(stops) / sizeof(stops[0]));
             int idx = frame / 45, sub = frame % 45;
@@ -146,6 +152,30 @@ int App::run(int argc, char** argv) {
                 const Stop& st = stops[idx];
                 if (sub == 0) {
                     if (idx == 1) newGame();
+                    if (idx == 2 || idx == 3) {
+                        // Find a kitchen container in the start house
+                        Player& pl = game_.player();
+                        const Building* b = game_.world().buildingAt((int)pl.pos.x, (int)pl.pos.y);
+                        if (b) for (const auto& f : b->furniture) {
+                            if (f.container.empty()) continue;
+                            Vec2 fp{f.x + 0.5f, f.y + 0.5f};
+                            pl.pos = fp + Vec2{f.facing == 1 ? 1.0f : f.facing == 3 ? -1.0f : 0.0f, f.facing == 2 ? 1.0f : f.facing == 0 ? -1.0f : 0.0f};
+                            renderer_.snapTo(pl.pos);
+                            if (idx == 2) {
+                                menu_.options = game_.actionsAt(fp);
+                                menu_.open = true;
+                                menu_.title.clear();
+                                menu_.pos = renderer_.toScreen(fp, 1.0f);
+                            } else {
+                                game_.world().container(f.x, f.y).searched = true;
+                                ActionOption o;
+                                o.kind = ActionKind::OpenContainer;
+                                o.x = f.x; o.y = f.y;
+                                game_.perform(o);
+                            }
+                            break;
+                        }
+                    }
                     overlay_ = st.ov;
                     if (st.px > 0) {
                         float mpp = game_.map().metresPerPixel();
@@ -157,10 +187,40 @@ int App::run(int argc, char** argv) {
                         renderer_.snapTo(game_.player().pos);
                     }
                 }
+                if (std::string(st.file) == "screenshot_symptoms.png") {
+                    // A body in trouble: lean-meat diet, a cold, and a bad wound
+                    BodyState& b = game_.player().body.mutableState();
+                    b.ammonia = 0.45f;
+                    b.avgKcalProtein = 1400; b.avgKcalFat = 100; b.avgKcalCarbs = 50;
+                    b.vitaminCMg = 250;
+                    if (sub == 0) {
+                        Wound w; w.severity = 0.5f; w.bleeding = 8; w.part = BodyPart::LeftLeg; w.type = WoundType::Bite;
+                        game_.player().body.addWound(w);
+                    }
+                    SetMousePosition(GetScreenWidth() - 40, 40);
+                }
+                if (std::string(st.file) == "screenshot_wildlife.png" && sub == 1) {
+                    Rng rng(4);
+                    Vec2 p0 = game_.player().pos;
+                    const char* ids[] = {"hare", "roe_deer", "wild_boar", "moose", "roe_deer"};
+                    for (int i = 0; i < 5; ++i) {
+                        Animal& a = game_.animals().spawn(game_.animals().find(ids[i]), p0 + Vec2{-6.0f + i * 3.5f, -4.0f + (i % 2) * 3.0f}, rng);
+                        a.state = AnimalState::Idle;
+                        a.stateTimer = 1000;
+                        a.heading = 0.4f * i;
+                    }
+                    Animal& d = game_.animals().spawn(game_.animals().find("roe_deer"), p0 + Vec2{3, 4}, rng);
+                    d.state = AnimalState::Dead;
+                }
+                if (std::string(st.file) == "screenshot_death.png" && sub == 0) {
+                    game_.player().body.mutableState().ammonia = 1.2f;
+                    menu_.open = false;
+                }
                 if (sub == 44) TakeScreenshot(st.file);
             }
         }
     }
+    if (!autoShots) autosave();
     saveSettings();
     if (musicLoaded_) UnloadMusicStream(music_);
     if (audio_) CloseAudioDevice();
@@ -169,6 +229,31 @@ int App::run(int argc, char** argv) {
     ui::shutdown();
     CloseWindow();
     return 0;
+}
+
+std::string App::savePath() const {
+    return (std::filesystem::path(GetApplicationDirectory()) / "save.txt").string();
+}
+
+void App::autosave() {
+    if (state_ == State::Playing && game_.running() && !game_.dead()) {
+        if (game_.save(savePath())) hasSave_ = true;
+    }
+}
+
+void App::continueGame() {
+    game_.setBaseTimeScale(settings_.minutesPerSecond);
+    if (!game_.load(savePath())) {
+        hasSave_ = false;
+        newGame();
+        return;
+    }
+    renderer_.invalidateAll();
+    renderer_.snapTo(game_.player().pos);
+    state_ = State::Playing;
+    overlay_ = Overlay::None;
+    menu_.open = false;
+    selectedUid_ = 0;
 }
 
 void App::newGame() {
@@ -211,7 +296,7 @@ void App::updatePlaying(float dt) {
     }
     bool blocking = overlay_ == Overlay::Pause || overlay_ == Overlay::Settings || overlay_ == Overlay::Help || overlay_ == Overlay::Map;
     if (!blocking || overlay_ == Overlay::Map) {
-        if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I)) overlay_ = overlay_ == Overlay::Inventory ? Overlay::None : Overlay::Inventory;
+        if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I)) { overlay_ = overlay_ == Overlay::Inventory ? Overlay::None : Overlay::Inventory; menu_.open = false; }
         if (IsKeyPressed(KEY_M)) overlay_ = overlay_ == Overlay::Map ? Overlay::None : Overlay::Map;
         if (IsKeyPressed(KEY_H)) overlay_ = overlay_ == Overlay::Health ? Overlay::None : Overlay::Health;
     }
@@ -266,7 +351,13 @@ void App::updatePlaying(float dt) {
     Vec2 target = game_.player().pos + Vec2{std::sin(time_ * 0.9f) * sway, std::cos(time_ * 0.7f) * sway};
     renderer_.follow(target, dt);
 
+    autosaveTimer_ += dt;
+    if (autosaveTimer_ > 180.0f) { autosaveTimer_ = 0; autosave(); }
+
     if (game_.dead()) {
+        // Permadeath: the save goes with you
+        std::remove(savePath().c_str());
+        hasSave_ = false;
         state_ = State::Dead;
         overlay_ = Overlay::None;
         menu_.open = false;
@@ -306,6 +397,10 @@ void App::drawMenu() {
                   "but not what.", x + 4 * s, y + 140 * s, 460 * s, 17 * s, ui::theme().dim);
     float by = y + 230 * s;
     Rectangle b{x, by, 260 * s, 46 * s};
+    if (hasSave_) {
+        if (ui::button(b, "Continue", true, 20)) continueGame();
+        b.y += 58 * s;
+    }
     if (ui::button(b, "New game", true, 20)) newGame();
     b.y += 58 * s;
     if (ui::button(b, "Settings", true, 20)) { settingsReturn_ = Overlay::None; overlay_ = Overlay::Settings; }
@@ -329,9 +424,9 @@ void App::drawPause() {
     b.y += 52 * s;
     if (ui::button(b, "Settings")) { settingsReturn_ = Overlay::Pause; overlay_ = Overlay::Settings; }
     b.y += 52 * s;
-    if (ui::button(b, "Quit to main menu")) { state_ = State::Menu; overlay_ = Overlay::None; }
+    if (ui::button(b, "Save and quit to menu")) { autosave(); state_ = State::Menu; overlay_ = Overlay::None; }
     b.y += 52 * s;
-    if (ui::button(b, "Quit game")) quit_ = true;
+    if (ui::button(b, "Save and quit game")) quit_ = true;
 }
 
 void App::drawSettings() {
@@ -872,6 +967,12 @@ void App::drawMap() {
         Vector2 sp = toScreen(d.centre.x / mpp, d.centre.y / mpp);
         Vector2 ms = ui::measure(d.name, 16 * s, true);
         ui::text(d.name, sp.x - ms.x / 2, sp.y - ms.y / 2, 16 * s, Color{50, 50, 56, 230}, true);
+    }
+    for (const auto& lb : m.labels()) {
+        Vector2 sp = toScreen(lb.pos.x / mpp, lb.pos.y / mpp);
+        float size = 13 * s;
+        Vector2 ms = ui::measure(lb.text, size);
+        DrawTextPro(ui::font(), lb.text.c_str(), sp, {ms.x / 2, ms.y / 2}, lb.angle, size, 0.5f, Color{70, 60, 50, 255});
     }
     for (const auto& wn : m.waterNames()) {
         Vector2 sp = toScreen(wn.pos.x / mpp, wn.pos.y / mpp);

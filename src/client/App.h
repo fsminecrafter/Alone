@@ -31,6 +31,9 @@ private:
 
     // flow
     void newGame();
+    void continueGame();
+    void autosave();
+    std::string savePath() const;
     void update(float dt);
     void updatePlaying(float dt);
     void worldInput();
@@ -71,6 +74,8 @@ private:
     bool debug_ = false, showDebug_ = false, quit_ = false;
     float time_ = 0;
     float menuOrbit_ = 0;
+    float autosaveTimer_ = 0;
+    bool hasSave_ = false;
     Vec2 hover_;
     uint32_t seed_ = 1;
 

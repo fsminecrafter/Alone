@@ -119,6 +119,8 @@ bool MapData::load(const std::string& dir) {
                         roads_.push_back({pts[i], pts[i + 1], rc, halfWidthFor(rc)});
                 } else if (t[0] == "plaza" && t.size() >= 6) {
                     plazas_.push_back({t[1], Vec2{num(2) * mpp_, num(3) * mpp_}, Vec2{num(4), num(5)}});
+                } else if (t[0] == "label" && t.size() >= 4) {
+                    labels_.push_back({t[1], Vec2{num(2) * mpp_, num(3) * mpp_}, t.size() >= 5 ? num(4) : 0.0f});
                 } else if (t[0] == "dense" && t.size() >= 5) {
                     dense_.push_back({t[1], Vec2{num(2) * mpp_, num(3) * mpp_}, num(4) * mpp_});
                 } else if (t[0] == "district" && t.size() >= 5) {

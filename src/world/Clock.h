@@ -21,6 +21,7 @@ public:
     Clock(uint32_t seed, float latitude, int startDayOfYear = 264, float startHour = 9.0f);
 
     void advance(double minutes);
+    void setTotalMinutes(double m) { minutes_ = m; weatherBlock_ = -1; updateWeather(); }
     double totalMinutes() const { return minutes_; }
     int day() const { return (int)(minutes_ / 1440.0) + 1; }       // day 1, 2, ...
     float hourOfDay() const;                                        // 0..24

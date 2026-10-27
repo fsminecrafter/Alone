@@ -37,6 +37,7 @@ public:
 
     // Roll the loot for a container. `seed` makes it repeatable.
     std::vector<ItemInstance> rollLoot(const std::string& containerId, uint32_t seed) const;
+    void ensureUidAbove(uint32_t uid) const { if (nextUid_ <= uid) nextUid_ = uid + 1; }
 
 private:
     std::vector<std::unique_ptr<ItemDef>> items_;
