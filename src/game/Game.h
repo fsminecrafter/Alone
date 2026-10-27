@@ -113,6 +113,8 @@ public:
     Player& player() { return player_; }
     const Player& player() const { return player_; }
     AnimalSystem& animals() { return animals_; }
+    // 0..1: how much the player is being hunted right now (drives the danger music)
+    float threat() const;
     const ItemRegistry& items() const { return items_; }
     const MapData& map() const { return map_; }
     const Symptoms& symptoms() const { return symptoms_; }

@@ -86,6 +86,10 @@ int App::run(int argc, char** argv) {
         for (const auto& e : std::filesystem::directory_iterator(Paths::data("assets/audio"), ec))
             if (e.path().extension() == ".mp3" || e.path().extension() == ".ogg") tracks_.push_back(e.path().string());
         std::sort(tracks_.begin(), tracks_.end());
+        for (const auto& e : std::filesystem::directory_iterator(Paths::data("assets/audio/danger"), ec))
+            if (e.path().extension() == ".mp3" || e.path().extension() == ".ogg") dangerTracks_.push_back(e.path().string());
+        std::sort(dangerTracks_.begin(), dangerTracks_.end());
+        Log::info("Music: %d tracks, %d danger tracks", (int)tracks_.size(), (int)dangerTracks_.size());
     }
     applySettings();
 
@@ -1140,29 +1144,63 @@ void App::applySettings() {
 }
 
 void App::updateMusic(float dt) {
-    if (!audio_ || tracks_.empty()) return;
+    if (!audio_ || (tracks_.empty() && dangerTracks_.empty())) return;
+    // Being hunted switches to the danger music (if there is any)
+    float threat = state_ == State::Playing ? game_.threat() : 0.0f;
+    if (threat > 0.3f) dangerHold_ = 10.0f;
+    else dangerHold_ = std::max(0.0f, dangerHold_ - dt);
+    bool wantDanger = dangerHold_ > 0 && !dangerTracks_.empty();
+
+    auto start = [&](const std::string& path, bool loop) {
+        music_ = LoadMusicStream(path.c_str());
+        if (!music_.ctxData) return false;
+        music_.looping = loop;
+        musicFade_ = loop ? 0.0f : 1.0f;   // danger fades in quickly, calm starts at full volume
+        SetMusicVolume(music_, settings_.musicVolume * musicFade_);
+        PlayMusicStream(music_);
+        musicLoaded_ = true;
+        return true;
+    };
+    auto stop = [&] {
+        StopMusicStream(music_);
+        UnloadMusicStream(music_);
+        musicLoaded_ = false;
+    };
+
     if (musicLoaded_) {
         UpdateMusicStream(music_);
-        if (!IsMusicStreamPlaying(music_) || GetMusicTimePlayed(music_) >= GetMusicTimeLength(music_) - 0.05f) {
-            StopMusicStream(music_);
-            UnloadMusicStream(music_);
-            musicLoaded_ = false;
+        if (playingDanger_ != wantDanger) {
+            // fade out whatever is playing before switching
+            musicFade_ -= dt / (wantDanger ? 1.2f : 4.0f);
+            SetMusicVolume(music_, settings_.musicVolume * std::max(0.0f, musicFade_));
+            if (musicFade_ <= 0) {
+                stop();
+                musicGap_ = wantDanger ? 0.0f : (float)GetRandomValue(8, 20);
+            }
+            return;
+        }
+        if (musicFade_ < 1) {
+            musicFade_ = std::min(1.0f, musicFade_ + dt / 1.5f);
+            SetMusicVolume(music_, settings_.musicVolume * musicFade_);
+        }
+        if (!IsMusicStreamPlaying(music_) || (!music_.looping && GetMusicTimePlayed(music_) >= GetMusicTimeLength(music_) - 0.05f)) {
+            stop();
             musicGap_ = (float)GetRandomValue(20, 90);
         }
         return;
     }
+    if (wantDanger) {
+        dangerTrack_ = (dangerTrack_ + 1) % (int)dangerTracks_.size();
+        playingDanger_ = true;
+        if (!start(dangerTracks_[dangerTrack_], true)) dangerHold_ = 0;
+        return;
+    }
+    playingDanger_ = false;
+    if (tracks_.empty()) return;
     musicGap_ -= dt;
     if (musicGap_ > 0) return;
     track_ = (track_ + 1 + GetRandomValue(0, (int)tracks_.size() - 1)) % (int)tracks_.size();
-    music_ = LoadMusicStream(tracks_[track_].c_str());
-    if (music_.ctxData) {
-        music_.looping = false;
-        SetMusicVolume(music_, settings_.musicVolume);
-        PlayMusicStream(music_);
-        musicLoaded_ = true;
-    } else {
-        musicGap_ = 60;
-    }
+    if (!start(tracks_[track_], false)) musicGap_ = 60;
 }
 
 } // namespace alone

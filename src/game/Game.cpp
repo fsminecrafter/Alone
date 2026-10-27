@@ -124,6 +124,18 @@ std::string Game::location() const {
     return district;
 }
 
+float Game::threat() const {
+    float t = 0;
+    for (const auto& a : const_cast<AnimalSystem&>(animals_).animals()) {
+        if (!a.alive()) continue;
+        if (a.state != AnimalState::Charge && a.state != AnimalState::Recover) continue;
+        float d = distance(a.pos, player_.pos);
+        t = std::max(t, std::clamp(1.0f - (d - 15.0f) / 30.0f, 0.0f, 1.0f));
+    }
+    // Later: other survivors hunting you
+    return t;
+}
+
 bool Game::knowsMushrooms() const {
     return player_.inventory.findTag("field_guide") >= 0;
 }

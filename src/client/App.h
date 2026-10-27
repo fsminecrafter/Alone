@@ -100,8 +100,12 @@ private:
     Music music_{};
     bool musicLoaded_ = false;
     float musicGap_ = 4;
-    std::vector<std::string> tracks_;
-    int track_ = -1;
+    std::vector<std::string> tracks_;        // calm exploration music
+    std::vector<std::string> dangerTracks_;  // data/assets/audio/danger: when hunted
+    int track_ = -1, dangerTrack_ = -1;
+    bool playingDanger_ = false;
+    float musicFade_ = 1;                    // volume multiplier for cross-fades
+    float dangerHold_ = 0;                   // keeps the danger music going a little after the threat
 };
 
 } // namespace alone
