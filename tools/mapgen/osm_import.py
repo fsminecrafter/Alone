@@ -577,9 +577,29 @@ def main():
             return int(zones[iy, ix])
         return UNKNOWN
 
+    # Railway stations are usually mapped as a node on the platform: the
+    # nearest building within 80 m is the station house
+    forced = {}
+    stations = [project(lat, lon) for (lat, lon, t) in nodes.values()
+                if t.get("railway") == "station" and t.get("station") != "subway"]
+    for sp in stations:
+        best, bd = None, 80.0
+        for ai, (tags, outers, inners) in enumerate(all_areas):
+            if "building" not in tags or not outers:
+                continue
+            xy = way_xy(nodes, max(outers, key=len))
+            if len(xy) < 3:
+                continue
+            a, cx, cy = poly_area_centroid(xy)
+            d = math.hypot(cx - sp[0], cy - sp[1])
+            if a > 60 and d < bd:
+                best, bd = ai, d
+        if best is not None:
+            forced[best] = "station"
+
     nb = 0
     kinds_count = {}
-    for tags, outers, inners in all_areas:
+    for ai, (tags, outers, inners) in enumerate(all_areas):
         if "building" not in tags or not outers:
             continue
         ring = max(outers, key=len)
@@ -592,7 +612,7 @@ def main():
         inside = [k for (p, k, n) in pois if point_in_poly(p[0], p[1], xy)]
         names = [n for (p, k, n) in pois if n and point_in_poly(p[0], p[1], xy)]
         wx, wy = W_((cx, cy))
-        kind = building_kind(tags, inside, area, zone_at(wx, wy))
+        kind = forced.get(ai) or building_kind(tags, inside, area, zone_at(wx, wy))
         if kind == "skip":
             continue
         L, Wd, ang = min_rect(xy)

@@ -90,8 +90,10 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
         float ph = in.distance / stride * 2.0f * PI;
         float sL = std::sin(ph), sR = std::sin(ph + PI);
         float cL = std::cos(ph), cR = std::cos(ph + PI);
-        p.rot[BThighL] = {0.02f, 0, thighAmp * sL + lean * 0.3f};
-        p.rot[BThighR] = {-0.02f, 0, thighAmp * sR + lean * 0.3f};
+        // legs reach further forward than back
+        auto swingOf = [&](float sn) { return sn > 0 ? thighAmp * sn : thighAmp * 0.55f * sn; };
+        p.rot[BThighL] = {0.02f, 0, swingOf(sL) + lean * 0.3f};
+        p.rot[BThighR] = {-0.02f, 0, swingOf(sR) + lean * 0.3f};
         p.rot[BShinL] = {0, 0, -(0.08f + kneeAmp * std::max(0.0f, cL))};
         p.rot[BShinR] = {0, 0, -(0.08f + kneeAmp * std::max(0.0f, cR))};
         p.rot[BFootL] = {0, 0, 0.25f * sL - 0.1f};
@@ -108,7 +110,7 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
         return p;
     };
     Pose walk = gait(1.35f, 0.42f, 0.7f, 0.32f, 0.25f, 0.05f, 0.025f);
-    Pose run = gait(2.5f, 0.75f, 1.35f, 0.75f, 1.35f, 0.28f, 0.06f);
+    Pose run = gait(2.3f, 0.68f, 1.45f, 0.7f, 1.35f, 0.24f, 0.05f);
 
     // --- sneaking: crouched, short careful steps ----------------------------
     Pose sneak;
@@ -155,8 +157,8 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
     Pose aim = idle;
     aim.rot[BUpperArmL] = {-0.45f, 0, 1.45f};
     aim.rot[BForearmL] = {0, 0, 0.15f};
-    aim.rot[BUpperArmR] = {0.1f, 0, 1.05f};
-    aim.rot[BForearmR] = {0, 0, 1.0f};
+    aim.rot[BUpperArmR] = {0.3f, 0, 0.75f};    // right hand up at the cheek
+    aim.rot[BForearmR] = {0, 0, 1.6f};
     aim.rot[BChest] = {0, -0.25f, 0};
     aim.rot[BHead] = {0, 0.2f, 0.05f};
 

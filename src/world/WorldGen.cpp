@@ -577,7 +577,8 @@ void WorldGen::layout(Building& b) {
     else if (b.osm && b.type == BuildingType::Apartment && r.area() > 300) b.floors = std::max(b.floors, 3);
     // A pitched roof over a wide building would be taller than the house: hip or flatten it
     float span = (float)std::min(r.w, r.h);
-    if (b.roof == RoofKind::Gable && span > 13) b.roof = (span > 20 || !(b.type == BuildingType::House || b.type == BuildingType::Farmhouse || b.type == BuildingType::Barn)) ? RoofKind::Flat : RoofKind::Hip;
+    bool keepsPitch = b.type == BuildingType::Church || b.type == BuildingType::Station || b.type == BuildingType::Barn;
+    if (b.roof == RoofKind::Gable && span > 13 && !keepsPitch) b.roof = (span > 20 || !(b.type == BuildingType::House || b.type == BuildingType::Farmhouse || b.type == BuildingType::Barn)) ? RoofKind::Flat : RoofKind::Hip;
     if (b.roof == RoofKind::Hip && span > 26) b.roof = RoofKind::Flat;
 }
 
@@ -1176,7 +1177,8 @@ void WorldGen::groundFor(Tile& t, int x, int y, Zone z, float water) {
             break;
         case Zone::Paved:     // squares and pedestrian streets
             t.ground = Ground::Cobble;
-            if (r < 0.0015f) t.prop = Prop::Bench;
+            if ((x % 16) == 0 && (y % 16) == 0) t.prop = Prop::Lamppost;
+            else if (r < 0.0015f) t.prop = Prop::Bench;
             else if (r < 0.0025f) t.prop = Prop::Bin;
             break;
         case Zone::Parking: {
@@ -1252,6 +1254,8 @@ void WorldGen::applyRoads(Tile& t, int x, int y, Zone z) {
         t.ground = Ground::Sidewalk;
         t.prop = Prop::None;
         if (road.cls == RoadClass::Major && d > hw + 1.0f && std::fmod(road.along, 28.0f) < 1.0f) t.prop = Prop::Lamppost;
+        // town streets are lit too, a bit more sparsely
+        else if (road.cls == RoadClass::Minor && d > hw + 1.0f && std::fmod(road.along, 34.0f) < 1.0f) t.prop = Prop::Lamppost;
         return;
     }
     if (!urban && d < hw + 1.0f) {

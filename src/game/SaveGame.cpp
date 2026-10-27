@@ -10,7 +10,7 @@ namespace alone {
 
 class SaveGame {
 public:
-    static constexpr int kVersion = 1;
+    static constexpr int kVersion = 2;
 
     // --- writing -------------------------------------------------------------
     static void item(std::ostream& o, const ItemInstance& it) {
@@ -30,7 +30,7 @@ public:
         o.precision(9);
         World& w = *g.world_;
         o << "ALONE_SAVE " << kVersion << '\n';
-        o << g.seed_ << ' ' << w.clock().totalMinutes() << '\n';
+        o << g.seed_ << ' ' << w.clock().totalMinutes() << ' ' << w.snowCover_ << ' ' << w.wetness_ << '\n';
         // player
         const Player& p = g.player_;
         o << p.pos.x << ' ' << p.pos.y << ' ' << p.facing << ' ' << p.stamina << ' ' << p.weaponUid << ' ' << p.flashlightOn << '\n';
@@ -115,11 +115,14 @@ public:
         if (magic != "ALONE_SAVE" || version != kVersion) { Log::warn("Not a compatible save file"); return false; }
         uint32_t seed = 0;
         double minutes = 0;
-        in >> seed >> minutes;
+        float snow = 0, wet = 0;
+        in >> seed >> minutes >> snow >> wet;
         g.newGame(seed);
         g.messages_.clear();
         World& w = *g.world_;
         w.clock().setTotalMinutes(minutes);
+        w.snowCover_ = snow;
+        w.wetness_ = wet;
         uint32_t maxUid = 0;
         Player& p = g.player_;
         int flash = 0;

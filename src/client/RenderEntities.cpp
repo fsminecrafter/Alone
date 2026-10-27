@@ -139,11 +139,19 @@ void Renderer::drawCharacter(const CharacterRig& rig, const Player& p, const Ite
         float len = weapon->firearm ? 1.1f : std::max(0.28f, weapon->reach * 0.6f);
         const Matrix& hand = rig.bone(BHandR);
         if (weapon->firearm) {
-            drawOnBone(cube_, hand, V(0.25f, -0.08f, 0), V(len, 0.06f, 0.05f), hexColor(0x2a2a2a));
-            drawOnBone(cube_, hand, V(-0.05f, -0.1f, 0), V(0.4f, 0.1f, 0.06f), wc);
+            // Aiming: the rifle lies level along the chest's forward axis, stock in the right hand
+            Matrix frame = hand;
+            float k = rig.aimWeight();
+            if (k > 0.5f) {
+                frame = rig.bone(BChest);
+                frame.m12 = hand.m12; frame.m13 = hand.m13; frame.m14 = hand.m14;
+            }
+            float dy = k > 0.5f ? 0.0f : -0.08f;
+            drawOnBone(cube_, frame, V(0.45f, dy + 0.02f, 0), V(len, 0.05f, 0.045f), hexColor(0x2a2a2a));
+            drawOnBone(cube_, frame, V(0.05f, dy, 0), V(0.42f, 0.09f, 0.06f), wc);
         } else {
             drawOnBone(cube_, hand, V(0, -0.08f - len * 0.5f, 0), V(0.04f, len, 0.04f), wc);
-            if (weapon->hasTag("axe")) drawOnBone(cube_, hand, V(0.06f, -0.08f - len * 0.95f, 0), V(0.14f, 0.1f, 0.02f), hexColor(0xb0b0b4));
+            if (weapon->hasTag("axe")) drawOnBone(cube_, hand, V(0.07f, -0.08f - len * 0.93f, 0), V(0.18f, 0.12f, 0.035f), hexColor(0xb0b0b4));
         }
     }
 }

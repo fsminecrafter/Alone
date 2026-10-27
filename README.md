@@ -11,20 +11,43 @@ and listen to your body, because it will tell you *how* you feel but never
 |---|---|
 | ![Symptoms with a tooltip](docs/screenshots/symptoms.jpg) | ![Map of Alingsås](docs/screenshots/map.jpg) |
 | ![Forest near Lövekulle](docs/screenshots/forest.jpg) | ![The old town around Stora torget](docs/screenshots/torget.jpg) |
+| ![Gallerian Storken's food court](docs/screenshots/storken_inside.jpg) | ![Alingsås station at night](docs/screenshots/station_night.jpg) |
+| ![Gerdsken at dusk](docs/screenshots/gerdsken_dusk.jpg) | ![You only know the time once you find a watch](docs/screenshots/watch.jpg) |
 | ![Inventory](docs/screenshots/inventory.jpg) | ![Cause of death is revealed only when you die](docs/screenshots/death.jpg) |
+
+**The player** is a bone-based rig with procedural animations
+([MP4](docs/media/character_animations.mp4)):
+
+![Character animations: idle, walk, run, sneak, axe swing, rifle aim, eat, search, sleep](docs/media/character_animations.gif)
 
 > Early prototype (v0.1). The game was originally an NDS project; it has been
 > rewritten from scratch in C++17 for PC (Linux and Windows).
 
 ## What's in it
 
-**A real place.** The map is digitised from a map of Alingsås: Lake Mjörn,
-Gerdsken, Säveån winding through Nolhaga, the E20, the railway (Västra
-stambanan) and the station, the old-town street grid around Stora torget,
-Christinae kyrka, the hospital, Villa Plantaget, and the districts around them
-(Noltorp, Nygård-Nolby, Stadsskogen-Tuvebo, Gråbo, Ängabo...). One tile is one
-metre; the map covers about 9.4 x 5.3 km. Buildings, furniture, trees and loot
-are generated deterministically on top of it.
+**A real place.** Alingsås is built from OpenStreetMap data: more than 4,000
+real buildings with their real size and use, every named street, footpath and
+forest track, the railway and the station, parks, car parks, squares, single
+trees and street lamps. Lake Mjörn, Gerdsken and Säveån winding through
+Nolhaga; Christinae kyrka; the hospital; the E20. **Gallerian Storken** in the
+centre is a two-storey shopping centre with walkways, shop units (clothes,
+shoes, a watchmaker, electronics, books, sport & outdoor, Systembolaget, a
+pharmacy, a grocer) and a food court where you can find leftover burgers,
+cold fries and kebab - edible, if you're desperate and lucky. Forests are as
+thick as the real ones around town. One tile is one metre; the map covers
+about 9.4 x 5.3 km. Interiors, furniture and loot are generated
+deterministically on top of the real footprints, and areas outside the
+mapped part are filled in procedurally.
+
+**Light.** Sun and moon cast real shadows; at night street lamps, lit windows
+and flickering TVs make warm pools of light (while the power lasts - it goes
+out within the first two weeks). A flashlight cone, see-through walls around
+you, wet ground after rain and snow cover in winter.
+
+**Know only what you can know.** There's no clock on screen until you find a
+wristwatch or an alarm clock - before that you only see roughly what part of
+the day it is from the sun. The temperature is "Chilly" or "Freezing" until you
+carry a thermometer.
 
 **A body that works like a body.** The survival model tracks real quantities:
 stomach contents, blood sugar, liver and muscle glycogen, body fat, lean mass,
@@ -68,9 +91,11 @@ sleep (beds are warmer); read the map.
 **Saving:** the game autosaves every few minutes and when you quit; continue
 from the main menu. Death is permanent - the save goes with you.
 
-**Sound:** your music plays in the background; rain, wind, campfires,
-footsteps, gunshots, doors and the rest are synthesised on the fly, so the
-game needs no sound files.
+**Sound:** the soundtrack (`data/assets/audio/`) plays in the background with
+pauses in between. When something hunts you, the music cross-fades to the
+danger tracks in `data/assets/audio/danger/` (prompts for making them are in
+[docs/music_prompts.md](docs/music_prompts.md)). Rain, wind, campfires,
+footsteps, gunshots, doors and the rest are synthesised on the fly.
 
 **Items:** ~90 items with real nutrition values per 100 g (from food
 composition tables), defined in plain text in `data/items/*.ini`. Store food has
@@ -113,6 +138,9 @@ The `data/` folder must sit next to the executable (the build copies it).
 * `alone --debug` enables the F3 debug overlay with the real body values.
 * `alone --seed N` picks a world seed; `--data DIR` points to another data folder.
 * `alone --screenshots` runs an automated tour and saves screenshots (used as a smoke test in CI).
+  `ALONE_SHOTS=storken,forest` limits it to some stops.
+* `alone --anim-showcase DIR` renders the character animations to PNG frames
+  (`ffmpeg -framerate 30 -i DIR/frame_%04d.png out.mp4`).
 
 ## Controls
 
@@ -144,7 +172,7 @@ src/game/       Game (simulation, actions, combat), wildlife AI
 src/client/     raylib renderer, UI, app (menus, HUD, inventory, map)
 tests/          unit tests for the backend (diet scenarios, world, gameplay)
 data/           everything moddable: items, loot, animals, symptoms, map, shaders, fonts, music
-tools/mapgen/   digitize.py: turns a map image into terrain + roads
+tools/mapgen/   digitize.py: map image -> terrain + roads; osm_import.py: OpenStreetMap -> buildings, streets, land use
 tools/worlddump world generation preview tool
 ```
 
@@ -161,6 +189,14 @@ under the municipal border line, and vectorises the road network. The output
 streets, plazas, landmarks, district names) and `map.ini` make up a map. A
 procedural Sweden can later generate the same files.
 
+`tools/mapgen/osm_import.py <map dir> <file.osm[.gz]>...` adds the detail from
+OpenStreetMap exports (the Alingsås ones are in `tools/mapgen/osm/alingsas/`).
+It aligns them to the map with the named points in `anchors.txt`, then writes
+a 2 m land-use grid (`terrain2m.pgm`), named streets and paths in metres
+(`roads_m.txt`) and every building, tree and street lamp
+(`osm_features.txt`). Building use comes from OSM tags and the shops and
+amenities inside each building.
+
 ## Roadmap
 
 * Procedural Swedish countryside beyond the map edge
@@ -171,4 +207,5 @@ procedural Sweden can later generate the same files.
 ## License
 
 GPL-3.0 (see `LICENSE`). Fonts: DejaVu (see `data/fonts/LICENSE-DejaVu.txt`).
-raylib is zlib-licensed.
+raylib is zlib-licensed. Map data © OpenStreetMap contributors, available
+under the Open Database License (ODbL).

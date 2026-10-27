@@ -46,6 +46,12 @@ private:
     void drawMenu();
     void drawHud();
     void drawSymptoms();
+    void drawCursor();
+    void drawClockFace(Vector2 centre, float radius, bool alarmClock);
+    void drawSkyDial(Vector2 centre, float radius);
+    void drawThermometer(Rectangle r, float celsius);
+    static std::string roughTimeOfDay(float hour);
+    static std::string feelOfTemperature(float celsius);
     void drawMessages();
     void drawActionBar();
     void drawContextMenu();
@@ -80,6 +86,9 @@ private:
     float menuOrbit_ = 0;
     float autosaveTimer_ = 0;
     bool hasSave_ = false;
+    bool tour_ = false;              // --screenshots / --anim-showcase run
+    std::string showcaseDir_;
+    int runShowcase(const std::string& dir);
     Vec2 hover_;
     uint32_t seed_ = 1;
 

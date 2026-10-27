@@ -43,6 +43,7 @@ class CharacterRig {
 public:
     CharacterRig();
     void update(const AnimInput& in, float dt);   // blends towards the target pose
+    float aimWeight() const { return wAim_; }
 
     // World transform of a bone (origin at the joint, +y along the bone)
     const Matrix& bone(int b) const { return world_[b]; }

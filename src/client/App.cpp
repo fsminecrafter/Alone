@@ -10,6 +10,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include "rlgl.h"
 #include <ctime>
 #include <filesystem>
 
@@ -65,7 +66,8 @@ int App::run(int argc, char** argv) {
         if (a == "--debug") debug_ = true;
         else if (a == "--data" && i + 1 < argc) dataOverride = argv[++i];
         else if (a == "--seed" && i + 1 < argc) seed_ = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
-        else if (a == "--screenshots") autoShots = 1;
+        else if (a == "--screenshots") autoShots = 1, tour_ = true;
+        else if (a == "--anim-showcase" && i + 1 < argc) showcaseDir_ = argv[++i], tour_ = true;
     }
     Log::init((std::filesystem::path(GetApplicationDirectory()) / "alone.log").string());
     Paths::init(argv[0], dataOverride);
@@ -95,6 +97,13 @@ int App::run(int argc, char** argv) {
 
     if (!game_.loadData()) {
         Log::error("Game data failed to load");
+    }
+    if (!showcaseDir_.empty()) {
+        int r = runShowcase(showcaseDir_);
+        renderer_.shutdown();
+        ui::shutdown();
+        CloseWindow();
+        return r;
     }
     if (seed_ == 1) seed_ = (uint32_t)std::time(nullptr);
     game_.setBaseTimeScale(settings_.minutesPerSecond);
@@ -133,6 +142,7 @@ int App::run(int argc, char** argv) {
         }
         if (settings_.showFps) DrawFPS(GetScreenWidth() - 90, GetScreenHeight() - 24);
         ui::endFrame();
+        drawCursor();
         EndDrawing();
 
         // --screenshots: automated tour used for documentation / smoke tests
@@ -148,13 +158,14 @@ int App::run(int argc, char** argv) {
                 {640, 364, 13, "screenshot_torget.png", Overlay::None},
                 {648.3f, 378.5f, 14, "screenshot_storken.png", Overlay::None},
                 {1, 1, 15, "screenshot_storken_inside.png", Overlay::None},
-                {663, 372, 15, "screenshot_church.png", Overlay::None},
+                {618.9f, 352.5f, 15, "screenshot_church.png", Overlay::None},
                 {300, 520, 11, "screenshot_forest.png", Overlay::None},
                 {474, 352, 16, "screenshot_nolhaga.png", Overlay::None},
-                {722, 515, 18.3f, "screenshot_gerdsken_dusk.png", Overlay::None},
-                {640, 418, 22, "screenshot_station_night.png", Overlay::None},
+                {700.0f, 510.5f, 18.3f, "screenshot_gerdsken_dusk.png", Overlay::None},
+                {621.3f, 412.0f, 21.5f, "screenshot_station_night.png", Overlay::None},
                 {760, 410, 12, "screenshot_e20.png", Overlay::None},
                 {880, 120, 10, "screenshot_wildlife.png", Overlay::None},
+                {0, 0, 0, "screenshot_watch.png", Overlay::None},
                 {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
                 {0, 0, 0, "screenshot_death.png", Overlay::None},
             };
@@ -251,6 +262,11 @@ int App::run(int argc, char** argv) {
                     }
                     Animal& d = game_.animals().spawn(game_.animals().find("roe_deer"), p0 + Vec2{3, 4}, rng);
                     d.state = AnimalState::Dead;
+                }
+                if (std::string(st.file) == "screenshot_watch.png" && sub == 0) {
+                    Rng rng(9);
+                    game_.player().inventory.add(game_.items().create("wristwatch", rng));
+                    game_.player().inventory.add(game_.items().create("thermometer", rng));
                 }
                 if (std::string(st.file) == "screenshot_death.png" && sub == 0) {
                     game_.player().body.mutableState().ammonia = 1.2f;
@@ -587,6 +603,243 @@ void App::drawDeath() {
 // HUD
 // ---------------------------------------------------------------------------
 
+// --anim-showcase <dir>: renders the character animations frame by frame
+// (30 fps) for the README's GIF/MP4.
+int App::runShowcase(const std::string& dir) {
+    std::filesystem::create_directories(dir);
+    const int size = 480;
+    SetWindowSize(size, size);
+    for (int i = 0; i < 4; ++i) { BeginDrawing(); ClearBackground(BLACK); EndDrawing(); }
+    Rng rng(3);
+    Player look;
+    auto wear = [&](const char* id, ClothingSlot slot) { look.worn[(size_t)slot] = game_.items().create(id, rng); };
+    wear("jeans", ClothingSlot::Legs);
+    wear("flannel_shirt", ClothingSlot::Torso);
+    wear("rain_jacket", ClothingSlot::Jacket);
+    wear("hiking_boots", ClothingSlot::Feet);
+    wear("wool_hat", ClothingSlot::Head);
+    struct Clip { const char* name; float seconds, speed; bool sneak, aim, eat, work, sleep; const char* weapon; float spin; };
+    const Clip clips[] = {
+        {"Idle", 2.0f, 0, false, false, false, false, false, nullptr, 0.0f},
+        {"Walk", 3.0f, 1.4f, false, false, false, false, false, nullptr, 0.5f},
+        {"Run", 2.6f, 4.6f, false, false, false, false, false, nullptr, 0.5f},
+        {"Sneak", 2.8f, 0.8f, true, false, false, false, false, nullptr, 0.4f},
+        {"Axe swing", 2.6f, 0, false, false, false, false, false, "axe", 0.0f},
+        {"Aim rifle", 2.2f, 0, false, true, false, false, false, "hunting_rifle", 0.35f},
+        {"Eat", 2.4f, 0, false, false, true, false, false, nullptr, 0.0f},
+        {"Search / work", 2.4f, 0, false, false, false, true, false, nullptr, 0.0f},
+        {"Sleep", 2.0f, 0, false, false, false, false, true, nullptr, 0.0f},
+    };
+    const float dt = 1.0f / 30.0f;
+    int frame = 0;
+    float facing = 0.6f, distance = 0, t = 0;
+    for (const Clip& c : clips) {
+        const ItemDef* weapon = c.weapon ? game_.items().find(c.weapon) : nullptr;
+        float swing = 0, nextSwing = 0.2f;
+        int frames = (int)(c.seconds / dt);
+        for (int f = 0; f < frames; ++f) {
+            t += dt;
+            distance += c.speed * dt;
+            facing += c.spin * dt;
+            if (c.weapon && std::string(c.weapon) == "axe") {
+                nextSwing -= dt;
+                if (nextSwing <= 0) { swing = 1; nextSwing = 1.0f; }
+                swing = std::max(0.0f, swing - dt * 3.0f);
+            }
+            AnimInput in;
+            in.speed = c.speed;
+            in.distance = distance;
+            in.sneaking = c.sneak;
+            in.aiming = c.aim;
+            in.eating = c.eat;
+            in.working = c.work;
+            in.asleep = c.sleep;
+            in.swing = swing;
+            in.time = t;
+            BeginDrawing();
+            ClearBackground(Color{24, 26, 30, 255});
+            DrawCircleGradient(size / 2, size / 2, size * 0.7f, Color{58, 62, 66, 255}, Color{24, 26, 30, 255});
+            renderer_.drawShowcase(in, facing, dt, look, weapon);
+            float fs = 26;
+            Vector2 m = ui::measure(c.name, fs, true);
+            ui::text(c.name, size / 2 - m.x / 2, size - 46, fs, Color{230, 226, 214, 255}, true);
+            ui::text("ALONE", 14, 12, 16, Color{214, 168, 92, 255}, true);
+            rlDrawRenderBatchActive();   // flush the text before reading the frame back
+            Image img = LoadImageFromScreen();
+            EndDrawing();
+            ExportImage(img, (std::filesystem::path(dir) / fmt("frame_%04d.png", frame++)).string().c_str());
+            UnloadImage(img);
+        }
+    }
+    Log::info("Showcase: %d frames written to %s", frame, dir.c_str());
+    return 0;
+}
+
+// Our own mouse cursor: a small outlined arrow, a crosshair when a firearm is ready.
+void App::drawCursor() {
+    if (tour_ || (!IsWindowFocused() && !IsCursorOnScreen())) return;
+    if (!IsCursorHidden()) HideCursor();
+    float s = std::max(1.0f, ui::scale());
+    Vector2 m = GetMousePosition();
+    const ItemInstance* wpn = state_ == State::Playing ? game_.weapon() : nullptr;
+    bool overUi = ui::mouseOverUi() || overlay_ != Overlay::None || menu_.open || state_ != State::Playing;
+    if (wpn && wpn->def->firearm && !overUi) {
+        Color c{236, 232, 220, 255}, o{0, 0, 0, 200};
+        float r = 9 * s, g = 3 * s;
+        for (int pass = 0; pass < 2; ++pass) {
+            float w = pass == 0 ? 4.0f : 2.0f;
+            Color col = pass == 0 ? o : c;
+            DrawLineEx({m.x - r, m.y}, {m.x - g, m.y}, w, col);
+            DrawLineEx({m.x + g, m.y}, {m.x + r, m.y}, w, col);
+            DrawLineEx({m.x, m.y - r}, {m.x, m.y - g}, w, col);
+            DrawLineEx({m.x, m.y + g}, {m.x, m.y + r}, w, col);
+        }
+        DrawCircleV(m, 1.5f, Color{220, 60, 50, 255});
+        return;
+    }
+    // arrow
+    Vector2 p0 = m, p1{m.x, m.y + 17 * s}, p2{m.x + 4.5f * s, m.y + 13 * s}, p3{m.x + 8 * s, m.y + 20 * s},
+            p4{m.x + 10.5f * s, m.y + 19 * s}, p5{m.x + 7 * s, m.y + 12 * s}, p6{m.x + 12.5f * s, m.y + 12 * s};
+    Color fill = overUi ? Color{236, 232, 220, 255} : Color{246, 226, 186, 255};
+    DrawTriangle(p0, p1, p2, fill);
+    DrawTriangle(p0, p2, p5, fill);
+    DrawTriangle(p0, p5, p6, fill);
+    DrawTriangle(p2, p3, p4, fill);
+    DrawTriangle(p2, p4, p5, fill);
+    Vector2 outline[] = {p0, p1, p2, p3, p4, p5, p6, p0};
+    DrawLineStrip(outline, 8, Color{20, 18, 16, 255});
+}
+
+std::string App::roughTimeOfDay(float h) {
+    if (h < 4.5f) return "Middle of the night";
+    if (h < 6.5f) return "Early morning";
+    if (h < 9.0f) return "Morning";
+    if (h < 11.0f) return "Late morning";
+    if (h < 13.0f) return "Around midday";
+    if (h < 15.0f) return "Early afternoon";
+    if (h < 17.5f) return "Late afternoon";
+    if (h < 19.5f) return "Evening";
+    if (h < 22.0f) return "Late evening";
+    return "Night";
+}
+
+std::string App::feelOfTemperature(float c) {
+    if (c < -12) return "Bitterly cold";
+    if (c < -2) return "Freezing";
+    if (c < 5) return "Cold";
+    if (c < 11) return "Chilly";
+    if (c < 17) return "Cool";
+    if (c < 23) return "Mild";
+    if (c < 28) return "Warm";
+    return "Hot";
+}
+
+// A wristwatch (leather strap, brass case) or a red twin-bell alarm clock.
+void App::drawClockFace(Vector2 c, float r, bool alarm) {
+    const Clock& clk = game_.world().clock();
+    double mins = clk.totalMinutes();
+    float hour = clk.hourOfDay();
+    float minute = (float)std::fmod(mins, 60.0);
+    float second = (float)std::fmod(mins * 60.0, 60.0);
+    Color ink{34, 30, 26, 255};
+    if (alarm) {
+        Color red{176, 38, 32, 255}, dark{110, 20, 18, 255};
+        // bells and hammer
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            Vector2 b{c.x + sgn * r * 0.62f, c.y - r * 0.86f};
+            DrawCircleSector(b, r * 0.42f, 180, 360, 16, dark);
+            DrawCircleSector(b, r * 0.36f, 180, 360, 16, red);
+            DrawLineEx({c.x + sgn * r * 0.3f, c.y + r * 0.8f}, {c.x + sgn * r * 0.62f, c.y + r * 1.12f}, r * 0.1f, dark);
+        }
+        DrawLineEx({c.x, c.y - r * 1.05f}, {c.x, c.y - r * 1.25f}, r * 0.08f, dark);
+        DrawCircleV(c, r * 1.02f, dark);
+        DrawCircleV(c, r * 0.96f, red);
+        DrawCircleV(c, r * 0.8f, Color{238, 230, 210, 255});
+        r *= 0.8f;
+    } else {
+        // strap with stitching
+        Color strap{92, 58, 36, 255}, stitch{150, 110, 70, 255};
+        DrawRectangleRounded({c.x - r * 0.5f, c.y - r * 1.55f, r, r * 3.1f}, 0.3f, 6, strap);
+        for (int sgn = -1; sgn <= 1; sgn += 2)
+            for (float k = 0.9f; k < 1.5f; k += 0.18f)
+                DrawLineEx({c.x - r * 0.36f, c.y + sgn * k * r}, {c.x - r * 0.24f, c.y + sgn * k * r}, 1.0f, stitch);
+        DrawCircleV(c, r * 1.04f, Color{120, 92, 40, 255});
+        DrawCircleV(c, r * 0.98f, Color{200, 166, 92, 255});
+        DrawCircleV(c, r * 0.86f, Color{246, 240, 226, 255});
+        // crown
+        DrawRectangleRounded({c.x + r * 0.98f, c.y - r * 0.1f, r * 0.14f, r * 0.2f}, 0.4f, 4, Color{180, 146, 76, 255});
+        r *= 0.86f;
+    }
+    // ticks and numerals
+    for (int i = 0; i < 60; ++i) {
+        float a = i / 60.0f * 2 * PI - PI / 2;
+        bool hourTick = i % 5 == 0;
+        float r0 = r * (hourTick ? 0.8f : 0.88f);
+        DrawLineEx({c.x + std::cos(a) * r0, c.y + std::sin(a) * r0}, {c.x + std::cos(a) * r * 0.95f, c.y + std::sin(a) * r * 0.95f},
+                   hourTick ? std::max(1.5f, r * 0.05f) : 1.0f, hourTick ? ink : Color{120, 112, 100, 255});
+    }
+    if (r > 26) {
+        const char* nums[] = {"12", "3", "6", "9"};
+        for (int i = 0; i < 4; ++i) {
+            float a = i * PI / 2 - PI / 2;
+            Vector2 m = ui::measure(nums[i], r * 0.24f, true);
+            ui::text(nums[i], c.x + std::cos(a) * r * 0.62f - m.x / 2, c.y + std::sin(a) * r * 0.62f - m.y / 2, r * 0.24f, ink, true);
+        }
+    }
+    // date window (wristwatch only)
+    if (!alarm) {
+        std::string d = clk.dateString().substr(0, 6);
+        for (auto& ch : d) ch = (char)std::toupper((unsigned char)ch);
+        Vector2 m = ui::measure(d, r * 0.17f, true);
+        Rectangle wnd{c.x - m.x / 2 - 2, c.y + r * 0.32f, m.x + 4, m.y};
+        DrawRectangleRec(wnd, WHITE);
+        DrawRectangleLinesEx(wnd, 1, Color{150, 140, 120, 255});
+        ui::text(d, wnd.x + 2, wnd.y, r * 0.17f, ink, true);
+    }
+    auto hand = [&](float frac, float len, float width, Color col) {
+        float a = frac * 2 * PI - PI / 2;
+        Vector2 tip{c.x + std::cos(a) * len, c.y + std::sin(a) * len};
+        Vector2 tail{c.x - std::cos(a) * len * 0.18f, c.y - std::sin(a) * len * 0.18f};
+        DrawLineEx(tail, tip, width, col);
+    };
+    hand(std::fmod(hour, 12.0f) / 12.0f, r * 0.5f, std::max(2.5f, r * 0.09f), ink);
+    hand(minute / 60.0f, r * 0.76f, std::max(2.0f, r * 0.06f), ink);
+    if (game_.timeSpeed() <= 1) hand(second / 60.0f, r * 0.82f, 1.2f, Color{196, 40, 32, 255});
+    DrawCircleV(c, std::max(2.5f, r * 0.07f), ink);
+}
+
+// Without a clock: the sun or moon on its arc over the horizon.
+void App::drawSkyDial(Vector2 c, float r) {
+    const Clock& clk = game_.world().clock();
+    float h = clk.hourOfDay();
+    float day = clk.daylight();
+    Color sky = ColorLerp(Color{18, 24, 44, 255}, Color{120, 160, 196, 255}, day);
+    DrawCircleSector(c, r, 180, 360, 24, sky);
+    DrawCircleSectorLines(c, r, 180, 360, 24, Color{90, 94, 98, 255});
+    DrawLineEx({c.x - r - 3, c.y}, {c.x + r + 3, c.y}, 2, Color{70, 90, 60, 255});
+    // the sun rises around 6-7 in autumn: map 6..18 onto the arc, the moon the other half
+    bool sun = h >= 6 && h < 18;
+    float f = sun ? (h - 6) / 12.0f : std::fmod(h + 6, 24.0f) / 12.0f;
+    float a = PI + f * PI;
+    Vector2 body{c.x + std::cos(a) * r * 0.72f, c.y + std::sin(a) * r * 0.72f};
+    if (sun) DrawCircleV(body, r * 0.2f, Color{250, 214, 120, 255});
+    else {
+        DrawCircleV(body, r * 0.17f, Color{220, 224, 230, 255});
+        DrawCircleV({body.x + r * 0.08f, body.y - r * 0.04f}, r * 0.15f, sky);
+    }
+}
+
+void App::drawThermometer(Rectangle r, float celsius) {
+    Color glass{220, 226, 232, 255}, red{200, 40, 36, 255};
+    float bulb = r.width * 0.75f;
+    DrawRectangleRounded({r.x + r.width * 0.25f, r.y, r.width * 0.5f, r.height - bulb}, 1.0f, 6, glass);
+    DrawCircleV({r.x + r.width / 2, r.y + r.height - bulb * 0.8f}, bulb * 0.75f, glass);
+    DrawCircleV({r.x + r.width / 2, r.y + r.height - bulb * 0.8f}, bulb * 0.55f, red);
+    float f = std::clamp((celsius + 30) / 60.0f, 0.0f, 1.0f);
+    float top = r.y + (r.height - bulb) * (1 - f);
+    DrawRectangle((int)(r.x + r.width * 0.4f), (int)top, (int)std::max(2.0f, r.width * 0.2f), (int)(r.y + r.height - bulb - top + 2), red);
+}
+
 void App::drawHud() {
     float s = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
@@ -610,15 +863,43 @@ void App::drawHud() {
     }
     if (game_.player().asleep) DrawRectangle(0, 0, (int)W, (int)H, Color{0, 0, 0, 170});
 
-    // Top-left: time, weather, place
-    Rectangle p{12 * s, 12 * s, 300 * s, 96 * s};
-    ui::panel(p, Color{10, 12, 14, 170});
-    ui::text(c.timeString(), p.x + 12 * s, p.y + 8 * s, 30 * s, ui::theme().text, true);
-    ui::text(c.dateString(), p.x + 106 * s, p.y + 10 * s, 16 * s, ui::theme().dim);
-    ui::text(fmt("Day %d", c.day()), p.x + 106 * s, p.y + 28 * s, 14 * s, ui::theme().dim);
+    // Top-left: what you can tell about the time and the weather.
+    // Without a watch you only see roughly what part of the day it is; a
+    // wristwatch or an alarm clock puts a real clock face on screen. The exact
+    // temperature needs a thermometer.
+    const Inventory& inv = game_.player().inventory;
+    int clockIdx = inv.findTag("clock");
+    int thermoIdx = inv.findTag("thermometer");
+    std::string clockId = clockIdx >= 0 ? inv.items()[clockIdx].def->id : "";
     float t = w.outdoorTemp();
-    ui::text(fmt("%.0f°C, %s", t, weatherName(c.weather().kind)), p.x + 12 * s, p.y + 48 * s, 16 * s, ui::theme().text);
-    ui::text(game_.location(), p.x + 12 * s, p.y + 70 * s, 15 * s, ui::theme().accent);
+    float face = 44 * s;
+    Rectangle p{12 * s, 12 * s, 312 * s, (clockIdx >= 0 ? 112 : 92) * s};
+    ui::panel(p, Color{10, 12, 14, 170});
+    float tx;
+    if (clockIdx >= 0) {
+        Vector2 cc{p.x + 14 * s + face, p.y + p.height / 2};
+        drawClockFace(cc, face, clockId == "alarm_clock");
+        tx = cc.x + face + 16 * s;
+        ui::text(c.timeString(), tx, p.y + 10 * s, 24 * s, ui::theme().text, true);
+        ui::text(c.dateString(), tx, p.y + 38 * s, 14 * s, ui::theme().dim);
+    } else {
+        Vector2 cc{p.x + 14 * s + 26 * s, p.y + 34 * s};
+        drawSkyDial(cc, 26 * s);
+        tx = cc.x + 26 * s + 14 * s;
+        ui::text(roughTimeOfDay(c.hourOfDay()), tx, p.y + 10 * s, 20 * s, ui::theme().text, true);
+        ui::text(fmt("Day %d", c.day()), tx, p.y + 34 * s, 14 * s, ui::theme().dim);
+    }
+    std::string weather = weatherName(c.weather().kind);
+    float ty = p.y + p.height - 46 * s;
+    if (thermoIdx >= 0) {
+        drawThermometer({tx, ty - 2 * s, 10 * s, 24 * s}, t);
+        ui::text(fmt("%.0f°C, %s", t, weather.c_str()), tx + 16 * s, ty + 2 * s, 15 * s, ui::theme().text);
+    } else {
+        std::string wl = weather;
+        for (auto& ch : wl) ch = (char)std::tolower((unsigned char)ch);
+        ui::text(feelOfTemperature(t) + ", " + wl, tx, ty + 2 * s, 15 * s, ui::theme().text);
+    }
+    ui::text(game_.location(), tx, ty + 22 * s, 14 * s, ui::theme().accent);
     if (game_.timeSpeed() > 1 || game_.currentAction().timeScale > 1.5f) {
         float sp = game_.timeSpeed() * (game_.currentAction().active ? game_.currentAction().timeScale : 1);
         ui::text(fmt(">> x%.0f", sp), p.x + p.width - 70 * s, p.y + 10 * s, 16 * s, ui::theme().accent, true);
