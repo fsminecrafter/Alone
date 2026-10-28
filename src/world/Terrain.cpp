@@ -36,7 +36,7 @@ float propHeight(Prop p) {
         case Prop::Fence: return 1.0f; case Prop::Lamppost: return 5.0f; case Prop::Bench: return 0.5f;
         case Prop::Mailbox: return 1.1f; case Prop::Barrier: return 0.8f; case Prop::Car: return 1.5f;
         case Prop::Bin: return 1.1f; case Prop::HayBale: return 1.2f; case Prop::Woodpile: return 1.0f;
-        case Prop::RainBarrel: return 0.9f;
+        case Prop::RainBarrel: return 0.9f; case Prop::Pillar: return 2.6f; case Prop::Crate: return 0.9f;
         case Prop::Fridge: return 1.8f; case Prop::Freezer: return 0.9f; case Prop::Counter: return 0.9f;
         case Prop::Stove: return 0.9f; case Prop::Sink: return 0.9f; case Prop::Table: return 0.75f;
         case Prop::Chair: return 0.9f; case Prop::Sofa: return 0.8f; case Prop::Bed: return 0.5f;
@@ -54,7 +54,7 @@ const char* propName(Prop p) {
     static const char* names[] = {
         "", "Spruce", "Pine", "Birch", "Oak", "Maple", "Rowan",
         "Shrub", "Hedge", "Lingonberry shrubs", "Blueberry shrubs", "Wild rose", "Rock", "Boulder", "Stump", "Reeds",
-        "Fence", "Street lamp", "Bench", "Mailbox", "Barrier", "Abandoned car", "Rubbish bin", "Hay bale", "Woodpile", "Rain barrel",
+        "Fence", "Street lamp", "Bench", "Mailbox", "Barrier", "Abandoned car", "Rubbish bin", "Hay bale", "Woodpile", "Rain barrel", "Pillar", "Crate",
         "Fridge", "Freezer", "Kitchen cupboard", "Stove", "Sink", "Table", "Chair", "Sofa", "Bed", "Wardrobe", "Chest of drawers",
         "Bookshelf", "Toilet", "Bathtub", "Bathroom cabinet", "Shelf", "Cooler", "Checkout", "Desk", "Locker",
         "Pew", "Medical cabinet", "Gun cabinet", "Workbench", "Altar", "Hospital bed",
@@ -79,6 +79,8 @@ const char* propContainer(Prop p) {
         case Prop::Workbench: return "garage_shelf";
         case Prop::Woodpile: return "woodpile";
         case Prop::Car: return "desk";
+        case Prop::Bin: return "rubbish_bin";
+        case Prop::Crate: return "crate";
         default: return nullptr;
     }
 }

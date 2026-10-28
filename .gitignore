@@ -73,3 +73,6 @@ settings.ini
 screenshot_*.png
 __pycache__/
 save.txt
+
+# Reference material (orienteering maps, photos): used locally, not redistributed
+tools/mapgen/reference/

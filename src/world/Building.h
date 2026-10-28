@@ -21,7 +21,7 @@ struct IRect {
 enum class BuildingType {
     House, Cottage, Farmhouse, Barn, Shed, Apartment, Office, Warehouse,
     Grocery, Pharmacy, GasStation, Hardware, Hospital, School, Church, TownHall,
-    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, Count
+    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, ParkingGarage, Count
 };
 
 enum class RoomType { Hall, Living, Kitchen, Bedroom, Bathroom, Storage, ShopFloor, Office, Ward, Classroom, Nave, Lobby, Locker, Dining, Count };
@@ -74,7 +74,13 @@ struct Building {
     bool isOutbuilding = false;  // shed/barn belonging to another building's lot
     bool osm = false;            // a real building from OpenStreetMap
     int levels = 0;              // storeys from OpenStreetMap (0 unknown)
+    uint32_t osmColour = 0, osmRoofColour = 0;   // mapped colours (bit 24 set when known)
+    int osmRoof = -1;            // mapped roof shape: 0 gable, 1 flat, 2 hip
+    bool oldTown = false;        // the wooden houses along Kungsgatan and around the squares
+    bool shopFront = false;      // big display windows and an awning on the street side
+    std::string sign;            // text over the entrance ("Vimpeln", "Apotek", ...)
     uint32_t seed = 0;
+    float floorY = 0;            // height of the ground floor above sea level (level on any slope)
 
     const Room* roomAt(int x, int y) const;
     const Furniture* furnitureAt(int x, int y) const;

@@ -2,6 +2,7 @@
 #include "core/Log.h"
 #include "core/Paths.h"
 #include <algorithm>
+#include <set>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -159,6 +160,40 @@ const ItemInstance* Game::weapon() const {
     return i >= 0 ? &player_.inventory.items()[i] : nullptr;
 }
 
+void Game::checkTrip(float dt, float grade, float limp) {
+    Player& p = player_;
+    float steep = std::fabs(grade);
+    if (steep < 0.2f || p.sneaking || p.fallen > 0) return;   // careful steps don't slip
+    float risk = (steep - 0.2f) * (p.running ? 1.2f : 0.12f);
+    if (grade < 0) risk *= 1.6f;                              // downhill is worse
+    if (!world_->indoors(p.pos)) risk *= 1.0f + 0.8f * world_->groundWetness() + 0.6f * world_->snowCover();
+    if (p.stamina < 0.25f) risk *= 1.5f;                      // tired legs
+    if (world_->clock().daylight() < 0.15f && !p.flashlightOn) risk *= 1.4f;   // can't see your feet
+    risk *= 1.0f + limp;
+    if (!rng_.chance(risk * dt)) return;
+    p.fallen = p.running ? 1.8f : 1.2f;
+    p.running = false;
+    p.stamina = std::max(0.0f, p.stamina - 0.2f);
+    cancelAction();
+    sound(Sfx::Hurt, p.pos);
+    bool slippery = world_->groundWetness() > 0.5f || world_->snowCover() > 0.3f;
+    if (rng_.chance(p.running ? 0.75f : 0.5f)) {
+        // scraped hands or knees on the stones
+        static const BodyPart parts[] = {BodyPart::LeftHand, BodyPart::RightHand, BodyPart::LeftLeg, BodyPart::RightLeg};
+        Wound w;
+        w.part = parts[rng_.rangeInt(0, 3)];
+        w.type = WoundType::Scratch;
+        w.severity = clamp01(rng_.range(0.06f, 0.2f) * (1.0f + steep));
+        w.bleeding = 1.0f + 6.0f * w.severity;
+        w.contamination = 0.55f;   // dirt in it
+        p.body.addWound(w);
+        log(std::string(slippery ? "You slip on the steep, wet ground and fall. " : "You trip on the steep slope and fall. ") +
+                "Your " + lower(bodyPartName(w.part)) + " is scraped.", MessageKind::Bad);
+    } else {
+        log(slippery ? "You slip on the steep, wet ground and fall." : "You trip on the steep slope and fall.", MessageKind::Bad);
+    }
+}
+
 Environment Game::environment() {
     Environment env;
     bool inside = world_->indoors(player_.pos);
@@ -178,6 +213,17 @@ Environment Game::environment() {
     env.clothingClo = clo;
     env.waterproof = waterproof;
     env.carriedKg = carriedKg();
+    // A tent keeps the wind and rain off and holds some warmth
+    if (world_->tentAt(player_.pos)) {
+        env.wind = 0;
+        env.wetness = 0;
+        env.airTempC += 4.0f;
+    }
+    // A sleeping bag and a mat, wherever you sleep
+    if (player_.asleep) {
+        if (player_.inventory.findTag("sleeping_bag") >= 0) env.clothingClo += 2.5f;
+        if (player_.inventory.findId("sleeping_mat") >= 0) env.clothingClo += 0.4f;
+    }
     // Sleeping in a bed with covers is much warmer
     if (player_.asleep) {
         const Tile& t = world_->tile(tx, ty);
@@ -226,7 +272,8 @@ void Game::update(float dt, const PlayerInput& input) {
         if (s.caught) continue;
         s.minutesSet += gameMinutes;
         Zone z = map_.zoneAt(s.pos.x, s.pos.y);
-        float habitat = (z == Zone::Woodland || z == Zone::Meadow || z == Zone::Field) ? 1.0f : z == Zone::Forest ? 0.6f : 0.15f;
+        float habitat = (z == Zone::Woodland || z == Zone::Meadow || z == Zone::Field) ? 1.0f
+                      : (z == Zone::Forest || z == Zone::ForestDense || z == Zone::Marsh) ? 0.6f : z == Zone::Thicket ? 0.4f : 0.15f;
         if (rng_.chance(0.035f * habitat * gameMinutes / 60.0f)) {
             s.caught = true;
             if (const AnimalDef* hare = animals_.find("hare")) {
@@ -270,6 +317,11 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     // Movement
     float len = in.move.length();
     bool wantsMove = len > 0.1f;
+    // Lying where you fell: you have to get up first
+    if (p.fallen > 0) {
+        p.fallen = std::max(0.0f, p.fallen - dt);
+        wantsMove = false;
+    }
     if (wantsMove && action_.active) {
         if (action_.option.kind == ActionKind::Sleep) log("You get up.");
         cancelAction();
@@ -279,17 +331,40 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     bool canRun = p.stamina > 0.05f && !in.sneak;
     p.running = wantsMove && in.run && canRun;
 
+    // A hurt leg or foot: you limp, and can't run properly
+    float limp = std::max(p.body.impairment(BodyPart::LeftLeg) + 0.7f * p.body.impairment(BodyPart::LeftFoot),
+                          p.body.impairment(BodyPart::RightLeg) + 0.7f * p.body.impairment(BodyPart::RightFoot));
+    limp = std::min(1.0f, limp);
+    if (limp > 0.65f) p.running = false;
     float speed = p.sneaking ? 1.0f : p.running ? 4.6f : 2.1f;
-    speed *= cap.moveSpeed;
+    speed *= cap.moveSpeed * (1.0f - 0.45f * limp);
     float over = carriedKg() / carryCapacityKg();
     if (over > 1.0f) speed *= std::max(0.35f, 1.0f - (over - 1.0f));
     int tx = (int)std::floor(p.pos.x), ty = (int)std::floor(p.pos.y);
-    Ground g = world_->tile(tx, ty).ground;
+    const Tile& t0 = world_->tile(tx, ty);
+    Ground g = t0.ground;
     if (g == Ground::WaterShallow) speed *= 0.45f;
     else if (g == Ground::TallGrass || g == Ground::FieldSoil) speed *= 0.85f;
+    // Thick forest, thickets and bogs are slow going (off the paths)
+    if (t0.building < 0 && g != Ground::Asphalt && g != Ground::Gravel && g != Ground::Dirt && g != Ground::Sidewalk) {
+        Zone zone = map_.zoneAt(p.pos.x, p.pos.y);
+        if (zone == Zone::ForestDense) speed *= 0.85f;
+        else if (zone == Zone::Thicket) speed *= 0.6f;
+        else if (zone == Zone::Marsh) speed *= 0.7f;
+        else if (zone == Zone::Rock) speed *= 0.9f;
+    }
 
+    p.grade = 0;
     if (wantsMove) {
         Vec2 dir = in.move * (1.0f / std::max(1.0f, len));
+        // Hills: slow going uphill, and steeply downhill too (Tobler's hiking
+        // function: fastest on a gentle downhill)
+        Vec2 unit = dir * (1.0f / std::max(0.001f, dir.length()));
+        p.grade = world_->slope(p.pos, unit);
+        float hill = std::exp(-3.5f * std::fabs(p.grade + 0.05f)) / std::exp(-3.5f * 0.05f);
+        speed *= std::clamp(hill, 0.3f, 1.1f);
+        checkTrip(dt, p.grade, limp);
+        if (p.fallen > 0) speed = 0;
         Vec2 before = p.pos;
         p.pos = world_->moveCircle(p.pos, dir * (speed * dt), 0.28f);
         stepDistance_ += distance(before, p.pos);
@@ -298,8 +373,10 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
         p.facing = std::atan2(dir.y, dir.x);
     }
 
-    // Stamina (real-time)
-    if (p.running) p.stamina -= dt / 14.0f;
+    // Stamina (real-time). Climbing takes your breath, running uphill most of all.
+    float uphill = std::max(0.0f, p.grade);
+    if (p.running) p.stamina -= dt / 14.0f * (1.0f + 2.5f * uphill);
+    else if (p.moving && uphill > 0.12f) p.stamina -= dt * (uphill - 0.12f) * 0.35f;
     else p.stamina += dt / 22.0f * cap.endurance * (p.moving ? 0.6f : 1.0f);
     p.stamina = clamp01(p.stamina);
 
@@ -326,10 +403,11 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     if (p.asleep) act = Activity::Sleeping;
     else if (p.lastAttack < 2.0f) act = Activity::Fighting;
     else if (p.running) act = Activity::Running;
-    else if (p.moving) act = Activity::Walking;
+    else if (p.moving) act = uphill > 0.15f ? Activity::Running : Activity::Walking;   // a steep climb is hard work
     else if (action_.active) act = action_.option.kind == ActionKind::Rest || action_.option.kind == ActionKind::Wait ? Activity::Resting : Activity::Working;
     Environment env = environment();
     p.body.update(gameMinutes, env, act);
+    soilDressings(gameMinutes);
     float temp = env.airTempC;
     p.inventory.age(gameMinutes / 60.0f, temp);
     handleBodyEvents();
@@ -450,8 +528,9 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     }
 
     float reach = w ? w->def->reach : 0.9f;
-    float damage = (w ? w->def->damage : 2.0f) * cap.strength;
-    p.attackTimer = w ? w->def->cooldown : 0.7f;
+    float arm = std::min(1.0f, p.body.impairment(BodyPart::RightArm) + p.body.impairment(BodyPart::RightHand));
+    float damage = (w ? w->def->damage : 2.0f) * cap.strength * (1.0f - 0.5f * arm);
+    p.attackTimer = (w ? w->def->cooldown : 0.7f) * (1.0f + 0.8f * arm);
     p.stamina = std::max(0.0f, p.stamina - 0.08f);
     p.noise = w ? w->def->noise : 5.0f;
     sound(Sfx::Swing, p.pos);
@@ -552,6 +631,285 @@ int Game::findFuel() const {
 // Context actions
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Carpentry
+// ---------------------------------------------------------------------------
+
+const std::vector<Game::BuildRecipe>& Game::buildRecipes() {
+    static const std::vector<BuildRecipe> r = {
+        {BuildKind::Wall, "Wooden wall", 2, 4, false, false, false, 8.0f, "A plank wall along the edge of a tile. Keeps wind and animals out."},
+        {BuildKind::Door, "Door", 3, 6, true, false, true, 12.0f, "A door in a frame. Open and close it like any other."},
+        {BuildKind::Window, "Wall with a window", 2, 4, true, false, true, 10.0f, "A wall with a small glazed window from an old frame."},
+        {BuildKind::Floor, "Plank floor", 1, 2, false, false, false, 5.0f, "Boards on joists: dry underfoot."},
+        {BuildKind::Roof, "Roof", 2, 4, true, false, true, 8.0f, "A plank roof over a tile. Under a roof you're out of the rain and wind."},
+        {BuildKind::Crate, "Storage crate", 2, 4, false, false, false, 6.0f, "A big lidded box to keep things in."},
+        {BuildKind::RainCollector, "Rain collector", 1, 2, false, true, false, 6.0f, "A barrel under a tarp funnel. Fills when it rains."},
+        {BuildKind::Bed, "Plank bed", 3, 6, false, false, false, 10.0f, "A bed frame off the cold ground."},
+        {BuildKind::Fence, "Fence", 1, 2, false, false, false, 4.0f, "A short stretch of fence."},
+    };
+    return r;
+}
+
+const Game::BuildRecipe* Game::recipe(BuildKind k) {
+    for (const auto& r : buildRecipes())
+        if (r.kind == k) return &r;
+    return nullptr;
+}
+
+bool Game::canAffordBuild(BuildKind k, std::string* why) const {
+    const BuildRecipe* r = recipe(k);
+    if (!r) return false;
+    auto no = [&](const std::string& w) { if (why) *why = w; return false; };
+    const Inventory& inv = player_.inventory;
+    if (r->book && !player_.knowsCarpentry) return no("You don't know how. A carpentry book would teach you");
+    if (inv.findTag("hammer") < 0 && inv.findId("hammer") < 0 && inv.findId("sledgehammer") < 0) return no("You need a hammer");
+    if (r->saw && inv.findTag("saw") < 0) return no("You need a saw");
+    if (r->tarp && inv.findTag("tarp") < 0) return no("You need a tarpaulin");
+    int planks = 0, nails = 0;
+    for (const auto& it : inv.items()) {
+        if (it.def->hasTag("plank")) ++planks;
+        if (it.def->hasTag("nails")) nails += it.usesLeft;
+    }
+    if (planks < r->planks) return no("You need " + std::to_string(r->planks) + " planks (you have " + std::to_string(planks) + ")");
+    if (nails < r->nails) return no("You need " + std::to_string(r->nails) + " nails (you have " + std::to_string(nails) + ")");
+    return true;
+}
+
+ActionOption Game::buildOption(BuildKind k, int x, int y, int dir) {
+    ActionOption o;
+    o.kind = ActionKind::Build;
+    o.targetId = (int)k;
+    o.x = x; o.y = y; o.dir = dir;
+    const BuildRecipe* r = recipe(k);
+    o.label = std::string("Build ") + (r ? lower(r->name) : "it");
+    std::string why;
+    Built b{k, x, y, dir};
+    Vec2 c = isEdgeBuild(k) ? (dir == 0 ? Vec2{x + 0.5f, (float)y} : Vec2{(float)x, y + 0.5f}) : Vec2{x + 0.5f, y + 0.5f};
+    if (distance(c, player_.pos) > 2.8f) { o.enabled = false; o.reason = "Too far away"; return o; }
+    if (!world_->canBuild(b, &why) || !canAffordBuild(k, &why)) { o.enabled = false; o.reason = why; }
+    return o;
+}
+
+// ---------------------------------------------------------------------------
+// Wounds and dressings
+// ---------------------------------------------------------------------------
+
+int Game::facingDir() const {
+    // 0 north, 1 east, 2 south, 3 west (the map's y grows southwards)
+    int k = (int)std::lround(player_.facing / 1.5707963f);
+    k = ((k % 4) + 4) % 4;
+    return (k + 1) % 4;
+}
+
+IRect Game::tentFootprint(const ItemDef& d) const {
+    int dir = facingDir();
+    int dx = dir == 1 ? 1 : dir == 3 ? -1 : 0, dy = dir == 2 ? 1 : dir == 0 ? -1 : 0;
+    int px = (int)std::floor(player_.pos.x), py = (int)std::floor(player_.pos.y);
+    int fx = px + dx, fy = py + dy;               // the tile in front of you
+    int L = std::max(1, d.tentL), W = std::max(1, d.tentW);
+    int x0 = fx, y0 = fy, x1 = fx, y1 = fy;
+    for (int i = 0; i < L; ++i)
+        for (int j = 0; j < W; ++j) {
+            int x = fx + dx * i - dy * j, y = fy + dy * i + dx * j;
+            x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y);
+        }
+    return IRect{x0, y0, x1 - x0 + 1, y1 - y0 + 1};
+}
+
+int Game::worstWoundPart(DressingKind forKind) const {
+    const Body& b = player_.body;
+    int best = -1;
+    float bestScore = 0;
+    for (const auto& w : b.state().wounds) {
+        if (w.healed > 0.95f) continue;
+        if (forKind == DressingKind::Bandaid && w.severity > 0.35f) continue;   // a plaster won't do
+        const Dressing& d = b.dressing(w.part);
+        // Needs one if it has none, or the old one is soaked or filthy
+        if (d.on() && d.soiling() < 0.55f) continue;
+        float score = w.bleeding * 0.2f + w.severity + (d.on() ? 0.0f : 0.5f);
+        if (score > bestScore) { bestScore = score; best = (int)w.part; }
+    }
+    return best;
+}
+
+int Game::dirtiestWoundPart() const {
+    int best = -1;
+    float bestC = 0.02f;
+    for (const auto& w : player_.body.state().wounds)
+        if (w.healed < 0.95f && w.contamination + w.infection > bestC) { bestC = w.contamination + w.infection; best = (int)w.part; }
+    return best;
+}
+
+void Game::returnUsedDressing(const Dressing& d) {
+    if (!d.on()) return;
+    // Plasters lose their stick; bandages and rags can be washed and used again
+    if (d.kind == DressingKind::Bandaid) return;
+    bool dirty = d.soiling() > 0.25f;
+    std::string id = d.kind == DressingKind::Bandage ? (dirty ? "bandage_dirty" : "bandage") : (dirty ? "rag_dirty" : "rag");
+    ItemInstance it = items_.create(id, rng_);
+    if (!dirty && d.kind == DressingKind::Bandage) it.opened = true;   // used: no longer sterile
+    giveItem(it);
+}
+
+bool Game::waterForWashing(bool consume) {
+    // A lake, a tap with water in the tank, a rain barrel...
+    int wx, wy;
+    if (world_->waterSourceNear(player_.pos, 1.8f, &wx, &wy) != World::WaterSource::None) {
+        const Tile& t = world_->tile(wx, wy);
+        if (t.ground == Ground::WaterShallow || t.ground == Ground::WaterDeep) return true;
+        if (!consume) return world_->tankWater(wx, wy) >= 250;
+        return world_->takeTankWater(wx, wy, 250) > 0;
+    }
+    // ...or what you carry
+    for (auto& it : player_.inventory.items()) {
+        if (it.def->capacityMl <= 0 || it.liquidMl < 250) continue;
+        if (consume) it.liquidMl -= 250;
+        return true;
+    }
+    return false;
+}
+
+// Dirt reaching each dressing (or open wound) from walking, working and lying
+// on the ground. Mud and forest floor soil it fast; a wooden floor indoors hardly.
+void Game::soilDressings(float gameMinutes) {
+    Player& p = player_;
+    if (gameMinutes <= 0 || dead()) return;
+    float h = gameMinutes / 60.0f;
+    int tx = (int)std::floor(p.pos.x), ty = (int)std::floor(p.pos.y);
+    const Tile& t = world_->tile(tx, ty);
+    float ground;
+    switch (t.ground) {
+        case Ground::Dirt: case Ground::FieldSoil: ground = 1.5f; break;
+        case Ground::ForestFloor: case Ground::Moss: ground = 1.0f; break;
+        case Ground::WaterShallow: ground = 1.3f; break;
+        case Ground::Grass: case Ground::TallGrass: case Ground::Stubble: ground = 0.6f; break;
+        case Ground::Sand: case Ground::Gravel: ground = 0.7f; break;
+        case Ground::Asphalt: case Ground::Sidewalk: case Ground::Cobble: case Ground::Concrete: case Ground::Rail: ground = 0.35f; break;
+        case Ground::FloorWood: ground = 0.12f; break;
+        case Ground::FloorTile: ground = 0.08f; break;
+        case Ground::FloorCarpet: ground = 0.15f; break;
+        case Ground::FloorConcrete: ground = 0.2f; break;
+        default: ground = 0.6f; break;
+    }
+    bool indoors = t.building >= 0;
+    float wet = indoors ? 1.0f : 1.0f + 0.6f * std::max(world_->groundWetness(), world_->clock().weather().rain);
+    float moving = p.running ? 2.0f : p.moving ? 1.0f : 0.25f;
+    auto worn = [&](ClothingSlot sl) { return p.worn[(size_t)sl].def != nullptr; };
+    // Per body part: how exposed it is, and how much clothing shields it
+    float feet = 0.15f * (worn(ClothingSlot::Feet) ? 1.0f : 4.0f);
+    float legs = 0.08f * (worn(ClothingSlot::Legs) ? 0.5f : 1.0f);
+    float hands = 0.03f * (worn(ClothingSlot::Hands) ? 0.3f : 1.0f);
+    float sleeves = worn(ClothingSlot::Jacket) || worn(ClothingSlot::Sweater) ? 0.5f : 1.0f;
+    float rate[(size_t)BodyPart::Count] = {};
+    rate[(size_t)BodyPart::Head] = 0.02f;
+    rate[(size_t)BodyPart::Torso] = 0.015f;
+    rate[(size_t)BodyPart::LeftArm] = rate[(size_t)BodyPart::RightArm] = 0.02f * sleeves;
+    rate[(size_t)BodyPart::LeftHand] = rate[(size_t)BodyPart::RightHand] = hands;
+    rate[(size_t)BodyPart::LeftLeg] = rate[(size_t)BodyPart::RightLeg] = legs;
+    rate[(size_t)BodyPart::LeftFoot] = rate[(size_t)BodyPart::RightFoot] = feet;
+    for (auto& r : rate) r *= ground * wet * moving;
+    // Working with your hands
+    if (action_.active) {
+        ActionKind k = action_.option.kind;
+        float work = k == ActionKind::Butcher ? 1.2f : k == ActionKind::Search ? 0.25f
+                   : (k == ActionKind::GatherSticks || k == ActionKind::ChopTree || k == ActionKind::BuildFire ||
+                      k == ActionKind::Forage || k == ActionKind::PickBerries || k == ActionKind::SetSnare) ? 0.4f : 0.0f;
+        float glove = worn(ClothingSlot::Hands) ? 0.3f : 1.0f;
+        rate[(size_t)BodyPart::LeftHand] += work * glove;
+        rate[(size_t)BodyPart::RightHand] += work * glove;
+        if (k == ActionKind::Butcher) rate[(size_t)BodyPart::LeftArm] += 0.2f, rate[(size_t)BodyPart::RightArm] += 0.2f;
+    }
+    // Sleeping on the bare ground
+    if (p.asleep && !indoors && t.prop != Prop::Bed)
+        for (int i : {1, 2, 3, 6, 7}) rate[i] += 0.04f * ground;
+    for (int i = 0; i < (int)BodyPart::Count; ++i) p.body.soil((BodyPart)i, rate[i] * h);
+}
+
+std::vector<ActionOption> Game::actionsForBodyPart(BodyPart part) {
+    std::vector<ActionOption> out;
+    if (dead()) return out;
+    const Body& b = player_.body;
+    bool wounded = false;
+    float worst = 0;
+    for (const auto& w : b.state().wounds)
+        if (w.part == part) { wounded = true; worst = std::max(worst, w.severity); }
+    const Dressing& cur = b.dressing(part);
+    auto opt = [&](ActionKind k, const std::string& label, const ItemInstance* it, bool en = true, const std::string& why = "") {
+        ActionOption o;
+        o.kind = k; o.label = label; o.part = (int)part; o.enabled = en; o.reason = why;
+        if (it) o.item = {ItemLoc::Player, 0, 0, 0, it->uid};
+        out.push_back(o);
+    };
+    if (wounded) {
+        // One option per kind of disinfectant and dressing you carry
+        std::set<std::string> seen;
+        for (const auto& it : player_.inventory.items()) {
+            const ItemDef& d = *it.def;
+            if (d.hasTag("disinfectant") && !seen.count("dis:" + d.id)) {
+                seen.insert("dis:" + d.id);
+                opt(ActionKind::Disinfect, "Disinfect with " + lower(d.name), &it);
+            }
+        }
+        for (const auto& it : player_.inventory.items()) {
+            const ItemDef& d = *it.def;
+            if (d.dressing == DressingKind::None) continue;
+            std::string key = "dr:" + d.id + (it.opened ? "o" : "");
+            if (seen.count(key)) continue;
+            seen.insert(key);
+            std::string name = lower(it.displayName());
+            if (it.def->uses > 0) name = lower(d.dressing == DressingKind::Bandaid && d.uses > 1 ? "bandaid" : d.name);
+            std::string label = std::string(cur.on() ? "Replace with " : "Apply ") + (d.dressing == DressingKind::Bandaid && d.uses > 1 ? "a bandaid" : name);
+            bool small = d.dressing != DressingKind::Bandaid || worst <= 0.35f;
+            opt(ActionKind::Bandage, label, &it, small, "The wound is too big for a bandaid");
+        }
+        if (seen.empty()) opt(ActionKind::None, "You have nothing to treat it with", nullptr, false, "Look in bathrooms, pharmacies and hospitals. Clothes rip into rags.");
+    }
+    if (cur.on()) opt(ActionKind::RemoveDressing, std::string("Take off the ") + dressingName(cur.kind), nullptr);
+    if (!wounded && !cur.on()) opt(ActionKind::None, "Nothing wrong here", nullptr, false);
+    return out;
+}
+
+std::vector<std::string> Game::describeBodyPart(BodyPart part) const {
+    std::vector<std::string> out;
+    const Body& b = player_.body;
+    const Dressing& d = b.dressing(part);
+    for (const auto& w : b.state().wounds) {
+        if (w.part != part) continue;
+        std::string what;
+        switch (w.type) {
+            case WoundType::Scratch: what = w.severity > 0.3f ? "Long scratches" : "A scratch"; break;
+            case WoundType::Laceration: what = w.severity > 0.6f ? "A deep gash" : w.severity > 0.3f ? "A nasty cut" : "A small cut"; break;
+            case WoundType::Bite: what = w.severity > 0.5f ? "A deep, torn bite" : "A bite"; break;
+            case WoundType::Puncture: what = "A puncture wound"; break;
+            case WoundType::Burn: what = w.severity > 0.5f ? "A blistered burn" : "A burn"; break;
+            default: what = "A wound"; break;
+        }
+        std::vector<std::string> state;
+        float bleedOut = w.bleeding * (d.on() ? (d.blood > 0.75f ? 0.8f : 0.3f) : 1.0f);
+        if (w.bleeding > 0.3f) state.push_back(d.on() ? (d.blood > 0.75f ? "blood is seeping through" : "bleeding under the dressing")
+                                                       : bleedOut > 8 ? "bleeding heavily" : "bleeding");
+        // Only what you can see: redness, swelling, pus - never the word "infection"
+        if (w.infection > 0.6f) state.push_back("swollen and weeping yellow pus, it smells");
+        else if (w.infection > 0.35f) state.push_back("red, swollen and hot to the touch");
+        else if (w.infection > 0.12f) state.push_back("red around the edges");
+        if (!d.on() && w.contamination > 0.5f && w.healed < 0.8f) state.push_back("there's dirt in it");
+        if (w.healed > 0.75f) state.push_back("almost healed");
+        else if (w.healed > 0.4f && w.bleeding <= 0) state.push_back("scabbed over");
+        std::string line = what;
+        for (size_t i = 0; i < state.size(); ++i) line += (i == 0 ? ", " : i + 1 == state.size() ? " and " : ", ") + state[i];
+        out.push_back(line + ".");
+    }
+    if (d.on()) {
+        std::string kind = d.kind == DressingKind::Bandaid ? "bandaid" : d.kind == DressingKind::Bandage ? "bandage" : "rag";
+        std::string look = d.soiling() > 0.8f ? "A filthy " : d.soiling() > 0.5f ? "A dirty " : d.soiling() > 0.25f ? "A grubby " : "A clean ";
+        std::string line = look + kind;
+        if (d.blood > 0.75f) line += ", soaked through with blood";
+        else if (d.blood > 0.35f) line += ", stained with blood";
+        out.push_back(line + ".");
+    }
+    return out;
+}
+
 std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
     std::vector<ActionOption> out;
     if (!world_ || dead()) return out;
@@ -650,8 +1008,12 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
     }
     if (t.prop == Prop::Bed || t.prop == Prop::HospitalBed || t.prop == Prop::Sofa)
         add(ActionKind::Sleep, t.prop == Prop::Sofa ? "Sleep on the sofa" : "Sleep in the bed");
+    if (t.prop == Prop::Bed || t.prop == Prop::HospitalBed) {
+        bool done = world_->harvested(tx, ty, 100000);
+        add(ActionKind::TearUpSheet, "Tear up the bed sheet for rags", !done, "Already torn up");
+    }
 
-    // Fires
+    // Fires and camping stoves
     if (Campfire* f = world_->fireNear(pt, 1.3f, false)) {
         bool reach = distance(f->pos, player_.pos) < 2.4f;
         auto fireOpt = [&](ActionKind k, const std::string& label, bool en, const std::string& why) {
@@ -663,21 +1025,78 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
             return &out.back();
         };
         bool igniter = player_.inventory.findTag("igniter") >= 0;
-        bool fuel = findFuel() >= 0;
-        if (!f->lit) fireOpt(ActionKind::LightFire, "Light the campfire", igniter && (f->fuelMinutes > 0 || fuel),
-                             !igniter ? "You need a lighter or matches" : "No fuel");
-        fireOpt(ActionKind::AddFuel, "Add fuel to the fire", fuel, "You have nothing to burn");
+        if (f->stove) {
+            bool spirit = player_.inventory.findTag("stove_fuel") >= 0;
+            // You can pour while it burns. You shouldn't.
+            fireOpt(ActionKind::FillStove, f->lit ? "Top up the burner with red alcohol" : "Fill the burner with red alcohol",
+                    spirit && f->fuelMl < 99.0f, !spirit ? "You have no red alcohol" : "The burner is full");
+            if (!f->lit) {
+                fireOpt(ActionKind::LightStove, "Light the storm kitchen", igniter && f->fuelMl > 1.0f,
+                        !igniter ? "You need a lighter or matches" : "The burner is empty");
+                fireOpt(ActionKind::PackStove, "Pack up the storm kitchen", true, "");
+            } else {
+                fireOpt(ActionKind::StoveOff, "Put out the flame", true, "");
+            }
+        } else {
+            bool fuel = findFuel() >= 0;
+            if (!f->lit) fireOpt(ActionKind::LightFire, "Light the campfire", igniter && (f->fuelMinutes > 0 || fuel),
+                                 !igniter ? "You need a lighter or matches" : "No fuel");
+            fireOpt(ActionKind::AddFuel, "Add fuel to the fire", fuel, "You have nothing to burn");
+        }
         if (f->lit) {
-            bool pot = player_.inventory.findTag("pot") >= 0;
+            bool pot = player_.inventory.findTag("pot") >= 0 || f->stove;   // a storm kitchen comes with its pots
             for (const auto& it : player_.inventory.items()) {
                 if (it.def->cookedInto.empty()) continue;
-                bool needsPot = it.def->id == "oats" || it.def->id == "potato_raw";
+                bool needsPot = it.def->id == "oats" || it.def->id == "potato_raw" || it.def->id == "pasta" || it.def->id == "rice";
                 auto* o = fireOpt(ActionKind::CookItem, "Cook " + lower(itemName(it)), !needsPot || pot, "You need a pot");
                 o->item = {ItemLoc::Player, 0, 0, 0, it.uid};
             }
             bool dirty = player_.inventory.find([](const ItemInstance& i) { return i.def->capacityMl > 0 && i.liquidMl > 0 && !i.liquidSafe; }) >= 0;
             if (dirty) fireOpt(ActionKind::BoilWater, "Boil water", pot, "You need a pot");
         }
+    }
+
+    // Tents
+    if (Tent* tent = world_->tentAt(pt)) {
+        bool reach = distance(tent->rect.centre(), player_.pos) < 3.0f;
+        ActionOption o;
+        o.targetId = tent->id; o.x = tx; o.y = ty;
+        o.enabled = reach; o.reason = reach ? "" : "Too far away";
+        o.kind = ActionKind::Sleep; o.label = "Crawl in and sleep";
+        out.push_back(o);
+        o.kind = ActionKind::PackTent; o.label = "Pack up the tent";
+        out.push_back(o);
+    }
+
+    // Fishing from the shore
+    if ((t.ground == Ground::WaterShallow || t.ground == Ground::WaterDeep) && player_.inventory.findTag("fishing") >= 0) {
+        ActionOption o;
+        o.kind = ActionKind::Fish; o.label = "Fish here for an hour"; o.x = tx; o.y = ty;
+        o.enabled = dist < 4.0f; o.reason = o.enabled ? "" : "Too far away";
+        out.push_back(o);
+    }
+
+    // Things you built: take them apart again
+    {
+        bool tool = player_.inventory.findId("hammer") >= 0 || player_.inventory.findId("crowbar") >= 0 ||
+                    player_.inventory.findId("sledgehammer") >= 0;
+        auto dismantle = [&](const Built& b) {
+            ActionOption o;
+            o.kind = ActionKind::Dismantle; o.targetId = (int)b.kind;
+            o.x = b.x; o.y = b.y; o.dir = b.dir;
+            o.label = std::string("Dismantle the ") + buildKindName(b.kind);
+            o.enabled = tool && near; o.reason = !near ? "Too far away" : "You need a hammer or a crowbar";
+            out.push_back(o);
+        };
+        float fx = pt.x - tx, fy = pt.y - ty;
+        const Built* e = nullptr;
+        if (fy < 0.3f) e = world_->builtEdgeAt(tx, ty, 0);
+        if (!e && fy > 0.7f) e = world_->builtEdgeAt(tx, ty + 1, 0);
+        if (!e && fx < 0.3f) e = world_->builtEdgeAt(tx, ty, 1);
+        if (!e && fx > 0.7f) e = world_->builtEdgeAt(tx + 1, ty, 1);
+        if (e) dismantle(*e);
+        for (BuildKind k : {BuildKind::Crate, BuildKind::RainCollector, BuildKind::Bed, BuildKind::Fence, BuildKind::Roof, BuildKind::Floor})
+            if (const Built* b = world_->builtAt(tx, ty, k)) dismantle(*b);
     }
 
     // Snares
@@ -697,7 +1116,7 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
                 t.ground != Ground::Asphalt;
     if (open) {
         Zone z = map_.zoneAt(tx + 0.5f, ty + 0.5f);
-        bool wild = z == Zone::Forest || z == Zone::Woodland;
+        bool wild = z == Zone::Forest || z == Zone::Woodland || z == Zone::ForestDense || z == Zone::Thicket || z == Zone::Marsh;
         if (wild) {
             bool season = inSeason(doy, 182, 320);
             bool done = world_->harvested(tx & ~7, ty & ~7, 10);
@@ -761,22 +1180,37 @@ std::vector<ActionOption> Game::actionsForItem(const ItemRef& ref) {
     }
     if (d.category == ItemCategory::Clothing) {
         if (ref.loc == ItemLoc::Worn) add(ActionKind::TakeOff, "Take off");
-        else if (mine) {
-            add(ActionKind::Wear, "Wear");
-            if (d.slot != ClothingSlot::Back && d.slot != ClothingSlot::Feet) add(ActionKind::TearIntoRags, "Tear into strips");
-        }
+        else if (mine) add(ActionKind::Wear, "Wear");
     }
-    if (mine && d.hasTag("bandage")) {
-        int idx = -1;
-        const auto& wounds = player_.body.state().wounds;
-        for (int i = 0; i < (int)wounds.size(); ++i)
-            if (!wounds[i].bandaged || wounds[i].bandageDirt > 0.6f) { idx = i; break; }
-        add(ActionKind::Bandage, "Bandage a wound", 1, idx >= 0, "No wounds need a bandage");
+    if (mine && d.rags > 0) {
+        bool knife = player_.inventory.findTag("knife") >= 0 || player_.inventory.findTag("scissors") >= 0;
+        add(ActionKind::TearIntoRags, "Rip into rags", 1, !d.ripNeedsKnife || knife, "The fabric is too tough to rip by hand. You need a knife or scissors");
     }
-    if (mine && d.hasTag("disinfectant")) {
-        bool any = false;
-        for (const auto& w : player_.body.state().wounds) any |= !w.disinfected;
-        add(ActionKind::Disinfect, "Clean a wound", 1, any, "No wounds to clean");
+    if (mine && d.dressing != DressingKind::None) {
+        const char* label = d.dressing == DressingKind::Bandaid ? "Put on the worst small cut"
+                          : d.dressing == DressingKind::Bandage ? "Bandage the worst wound" : "Tie over the worst wound";
+        add(ActionKind::Bandage, label, 1, worstWoundPart(d.dressing) >= 0,
+            d.dressing == DressingKind::Bandaid && !player_.body.state().wounds.empty() ? "Your wounds are too big for a bandaid"
+                                                                                       : "No wounds need it");
+    }
+    if (mine && !d.washesInto.empty())
+        add(ActionKind::WashItem, "Wash in water", 1, waterForWashing(false), "You need water: a lake, a tap or a full bottle");
+    if (mine && d.hasTag("disinfectant"))
+        add(ActionKind::Disinfect, "Clean the dirtiest wound", 1, dirtiestWoundPart() >= 0, "No open wounds to clean");
+    if (mine && d.hasTag("stove")) add(ActionKind::PlaceStove, "Set up the storm kitchen here");
+    if (mine && d.hasTag("tent")) {
+        std::string why;
+        IRect r = tentFootprint(d);
+        bool ok = world_->canPitch(r, &why);
+        add(ActionKind::PitchTent, "Pitch the tent (in front of you)", 1, ok, why);
+    }
+    if (mine && d.hasTag("log")) {
+        add(ActionKind::SawPlanks, "Saw into planks", 1, player_.inventory.findTag("saw") >= 0, "You need a saw");
+        add(ActionKind::SplitLog, "Split into firewood", 1, player_.inventory.findTag("axe") >= 0, "You need an axe");
+    }
+    if (mine && d.id == "batteries") {
+        int light = player_.inventory.find([](const ItemInstance& i) { return i.def->hasTag("light") && i.usesLeft < i.def->uses; });
+        add(ActionKind::ReplaceBatteries, "Put new batteries in a torch", 1, light >= 0, "Your lights are full");
     }
     if (mine && (d.hasTag("painkiller") || d.hasTag("antibiotic") || d.treats != Pathogen::None || d.vitaminCMg > 0))
         add(ActionKind::TakePill, "Take one");
@@ -853,6 +1287,12 @@ void Game::perform(const ActionOption& o) {
             if (it) { it->liquidMl = 0; it->liquidSafe = true; }
             return;
         case ActionKind::Read:
+            if (it && it->def->hasTag("teaches_carpentry") && !player_.knowsCarpentry) {
+                player_.knowsCarpentry = true;
+                log("You read about framing, door hanging and roofing. You could build doors, windows and roofs now (B).",
+                    MessageKind::Good);
+                return;
+            }
             if (it && it->def->hasTag("field_guide"))
                 log("You leaf through the pictures. With this book you can tell edible mushrooms from deadly ones.", MessageKind::Good);
             return;
@@ -863,6 +1303,9 @@ void Game::perform(const ActionOption& o) {
             return;
         }
         case ActionKind::Sleep:
+            if (o.targetId != 0)   // crawling into a tent
+                for (const auto& t : world_->tents())
+                    if (t.id == o.targetId) player_.pos = t.rect.centre();
             player_.asleep = true;
             player_.body.setAsleep(true);
             startTimed(o, 1e9f, 90.0f);
@@ -891,8 +1334,39 @@ void Game::perform(const ActionOption& o) {
         case ActionKind::Eat: startTimed(o, 3.0f + 4.0f * o.amount); return;
         case ActionKind::Drink: startTimed(o, 2.5f); return;
         case ActionKind::OpenCan: startTimed(o, o.amount > 0 ? 3.0f : 6.0f); return;
-        case ActionKind::Bandage: startTimed(o, 4.0f); return;
+        case ActionKind::Bandage: {
+            ItemInstance* d = resolve(o.item);
+            DressingKind k = d ? d->def->dressing : DressingKind::Bandage;
+            startTimed(o, k == DressingKind::Bandaid ? 2.0f : k == DressingKind::Rag ? 5.0f : 4.0f);
+            return;
+        }
         case ActionKind::Disinfect: startTimed(o, 3.0f); return;
+        case ActionKind::RemoveDressing: startTimed(o, 2.0f); return;
+        case ActionKind::PlaceStove: startTimed(o, 3.0f); return;
+        case ActionKind::FillStove: startTimed(o, 2.5f); return;
+        case ActionKind::LightStove: startTimed(o, 1.5f); return;
+        case ActionKind::StoveOff: startTimed(o, 1.0f); return;
+        case ActionKind::PackStove: startTimed(o, 3.0f); return;
+        case ActionKind::PitchTent: {
+            ItemInstance* t = resolve(o.item);
+            startTimed(o, t && t->def->tentW > 1 ? 18.0f : 12.0f);
+            return;
+        }
+        case ActionKind::PackTent: startTimed(o, 10.0f); return;
+        case ActionKind::SawPlanks: startTimed(o, 15.0f); return;
+        case ActionKind::SplitLog: startTimed(o, 10.0f); return;
+        case ActionKind::ReplaceBatteries: startTimed(o, 2.0f); return;
+        case ActionKind::Fish: startTimed(o, 4.0f, 15.0f); return;
+        case ActionKind::Build: {
+            const BuildRecipe* r = recipe((BuildKind)o.targetId);
+            ActionOption check = buildOption((BuildKind)o.targetId, o.x, o.y, o.dir);
+            if (!r || !check.enabled) { log(check.reason.empty() ? "You can't build that here." : check.reason + "."); return; }
+            startTimed(o, r->seconds);
+            return;
+        }
+        case ActionKind::Dismantle: startTimed(o, 6.0f); return;
+        case ActionKind::WashItem: startTimed(o, 6.0f); return;
+        case ActionKind::TearUpSheet: startTimed(o, 6.0f); return;
         case ActionKind::TakePill: startTimed(o, 1.5f); return;
         case ActionKind::Purify: startTimed(o, 2.0f); return;
         case ActionKind::TearIntoRags: startTimed(o, 5.0f); return;
@@ -1063,9 +1537,10 @@ void Game::finishAction() {
         case ActionKind::ChopTree: {
             sound(Sfx::Chop, player_.pos);
             world_->setProp(o.x, o.y, Prop::Stump);
-            int n = rng_.rangeInt(2, 4);
+            int n = rng_.rangeInt(1, 3);
             for (int i = 0; i < n; ++i) world_->dropItem(Vec2{o.x + 0.5f, o.y + 0.5f}, items_.create("firewood", rng_));
-            log("The tree comes down. You split it into firewood.", MessageKind::Good);
+            world_->dropItem(Vec2{o.x + 0.5f, o.y + 0.5f}, items_.create("log", rng_));
+            log("The tree comes down. You cut a log from the trunk and split the rest for firewood.", MessageKind::Good);
             break;
         }
         case ActionKind::BuildFire: {
@@ -1205,28 +1680,230 @@ void Game::finishAction() {
             break;
         case ActionKind::Bandage: {
             if (!it) break;
-            const auto& wounds = player_.body.state().wounds;
-            int idx = -1;
-            float worst = -1;
-            for (int i = 0; i < (int)wounds.size(); ++i)
-                if ((!wounds[i].bandaged || wounds[i].bandageDirt > 0.6f) && wounds[i].bleeding + wounds[i].severity > worst) {
-                    worst = wounds[i].bleeding + wounds[i].severity;
-                    idx = i;
-                }
-            if (idx < 0) break;
-            bool sterile = it->def->hasTag("sterile");
-            player_.body.bandageWound(idx, sterile);
-            log(std::string("You bandage the wound on your ") + bodyPartName(wounds[idx].part) + ".");
-            takeItem(o.item);
+            const ItemDef& d = *it->def;
+            int part = o.part >= 0 ? o.part : worstWoundPart(d.dressing);
+            if (part < 0) break;
+            bool dirty = d.hasTag("dirty");
+            bool sterile = d.hasTag("sterile") && !it->opened && !dirty;
+            float dirt = dirty ? 0.65f : sterile ? 0.0f : d.dressing == DressingKind::Rag ? 0.12f : 0.06f;
+            Dressing old = player_.body.applyDressing((BodyPart)part, d.dressing, sterile, dirt);
+            useOne(player_.inventory.indexOfUid(it->uid));   // (before giving anything back: `it` may move)
+            std::string where = bodyPartName((BodyPart)part);
+            const char* verb = d.dressing == DressingKind::Bandaid ? "You stick a bandaid on your "
+                             : d.dressing == DressingKind::Bandage ? "You wrap a bandage around your " : "You tie a rag around your ";
+            log(verb + where + (dirty ? ". It's filthy." : "."));
+            if (d.dressing == DressingKind::Bandaid && player_.body.worstSeverityAt((BodyPart)part) > 0.35f)
+                log("It's far too small for this.", MessageKind::Bad);
+            returnUsedDressing(old);
+            break;
+        }
+        case ActionKind::RemoveDressing: {
+            if (o.part < 0) break;
+            Dressing old = player_.body.removeDressing((BodyPart)o.part);
+            if (!old.on()) break;
+            log(std::string("You take the ") + dressingName(old.kind) + " off your " + bodyPartName((BodyPart)o.part) + ".");
+            returnUsedDressing(old);
             break;
         }
         case ActionKind::Disinfect: {
             if (!it) break;
-            const auto& wounds = player_.body.state().wounds;
-            for (int i = 0; i < (int)wounds.size(); ++i)
-                if (!wounds[i].disinfected) { player_.body.disinfectWound(i); break; }
-            log("You clean the wound. It stings.");
+            int part = o.part >= 0 ? o.part : dirtiestWoundPart();
+            if (part < 0) break;
+            bool weak = it->def->hasTag("weak_disinfectant");
+            player_.body.disinfect((BodyPart)part, weak ? 0.75f : 1.0f);
+            log(std::string("You clean the wound on your ") + bodyPartName((BodyPart)part) + (weak ? ". The alcohol burns." : ". It stings."));
             if (--it->usesLeft <= 0) takeItem(o.item);
+            break;
+        }
+        case ActionKind::WashItem: {
+            if (!it || it->def->washesInto.empty()) break;
+            if (!waterForWashing(true)) { log("There's no water here to wash it in."); break; }
+            ItemInstance clean = items_.create(it->def->washesInto, rng_);
+            clean.opened = true;   // clean, but not sterile any more
+            std::string name = lower(it->def->name);
+            takeItem(o.item);
+            giveItem(clean);
+            log("You scrub the " + name + " clean in the water and wring it out.");
+            break;
+        }
+        case ActionKind::PlaceStove: {
+            if (!it) break;
+            Vec2 at = player_.pos + Vec2{std::cos(player_.facing), std::sin(player_.facing)} * 0.8f;
+            Campfire f;
+            f.pos = Vec2{std::floor(at.x) + 0.5f, std::floor(at.y) + 0.5f};
+            f.id = world_->newId();
+            f.stove = true;
+            f.fuelMl = it->liquidMl;   // whatever was left in the burner
+            world_->campfires().push_back(f);
+            takeItem(o.item);
+            log("You set up the storm kitchen: burner, windshield, pot on top.");
+            break;
+        }
+        case ActionKind::FillStove: {
+            Campfire* f = nullptr;
+            for (auto& c : world_->campfires()) if (c.id == o.targetId) f = &c;
+            int fuel = player_.inventory.findTag("stove_fuel");
+            if (!f || fuel < 0) break;
+            if (f->lit) {
+                // Pouring into a lit burner: the invisible flame runs up the stream into the bottle
+                ItemInstance bottle = player_.inventory.take(fuel);
+                (void)bottle;
+                Wound w;
+                w.part = BodyPart::RightHand; w.type = WoundType::Burn;
+                w.severity = rng_.range(0.4f, 0.65f); w.bleeding = 0; w.contamination = 0.15f;
+                player_.body.addWound(w);
+                Wound w2 = w;
+                w2.part = BodyPart::RightArm; w2.severity = rng_.range(0.15f, 0.35f);
+                player_.body.addWound(w2);
+                player_.body.mutableState().sting = 1.0f;
+                Campfire spill;
+                spill.pos = f->pos + Vec2{0.6f, 0.3f};
+                spill.id = world_->newId();
+                spill.lit = true;
+                spill.fuelMinutes = 6.0f;   // the spilled alcohol burns out on the ground
+                world_->campfires().push_back(spill);
+                log("You pour while it's still burning. The flame races up into the bottle - it bursts alight in your hand!",
+                    MessageKind::Bad);
+                break;
+            }
+            ItemInstance& b = player_.inventory.items()[fuel];
+            f->fuelMl = 100.0f;
+            if (--b.usesLeft <= 0) player_.inventory.take(fuel);
+            log("You fill the burner with red alcohol.");
+            break;
+        }
+        case ActionKind::LightStove:
+            for (auto& f : world_->campfires())
+                if (f.id == o.targetId && f.fuelMl > 0) {
+                    useOne(player_.inventory.findTag("igniter"));
+                    f.lit = true;
+                    f.fuelMinutes = f.fuelMl / 4.0f;
+                    log("A pale blue flame rises from the burner.", MessageKind::Good);
+                }
+            break;
+        case ActionKind::StoveOff:
+            for (auto& f : world_->campfires())
+                if (f.id == o.targetId) { f.lit = false; log("You put the simmer lid over the burner. The flame dies."); }
+            break;
+        case ActionKind::PackStove: {
+            auto& fires = world_->campfires();
+            for (size_t i = 0; i < fires.size(); ++i)
+                if (fires[i].id == o.targetId && fires[i].stove && !fires[i].lit) {
+                    ItemInstance st = items_.create("storm_kitchen", rng_);
+                    st.liquidMl = fires[i].fuelMl;
+                    fires.erase(fires.begin() + i);
+                    giveItem(st);
+                    log("You pack the storm kitchen away.");
+                    break;
+                }
+            break;
+        }
+        case ActionKind::PitchTent: {
+            if (!it || !it->def->hasTag("tent")) break;
+            IRect r = tentFootprint(*it->def);
+            std::string why;
+            if (!world_->canPitch(r, &why)) { log(why + "."); break; }
+            Tent t;
+            t.id = world_->newId();
+            t.rect = r;
+            t.dir = facingDir();
+            t.item = it->def->id;
+            world_->tents().push_back(t);
+            takeItem(o.item);
+            log("You pitch the tent and peg it down.", MessageKind::Good);
+            break;
+        }
+        case ActionKind::PackTent: {
+            auto& tents = world_->tents();
+            for (size_t i = 0; i < tents.size(); ++i)
+                if (tents[i].id == o.targetId) {
+                    giveItem(items_.create(tents[i].item, rng_));
+                    tents.erase(tents.begin() + i);
+                    log("You pull up the pegs and roll the tent up.");
+                    break;
+                }
+            break;
+        }
+        case ActionKind::SawPlanks: {
+            if (!it) break;
+            takeItem(o.item);
+            for (int i = 0; i < 3; ++i) giveItem(items_.create("plank", rng_));
+            sound(Sfx::Chop, player_.pos);
+            log("You saw the log into three planks.", MessageKind::Good);
+            break;
+        }
+        case ActionKind::SplitLog: {
+            if (!it) break;
+            takeItem(o.item);
+            for (int i = 0; i < 4; ++i) giveItem(items_.create("firewood", rng_));
+            sound(Sfx::Chop, player_.pos);
+            log("You split the log into firewood.");
+            break;
+        }
+        case ActionKind::ReplaceBatteries: {
+            int light = player_.inventory.find([](const ItemInstance& i) { return i.def->hasTag("light") && i.usesLeft < i.def->uses; });
+            if (light < 0 || !it) break;
+            ItemInstance& l = player_.inventory.items()[light];
+            l.usesLeft = l.def->uses;
+            std::string name = lower(l.def->name);
+            useOne(player_.inventory.indexOfUid(it->uid));
+            log("You put fresh batteries in the " + name + ".");
+            break;
+        }
+        case ActionKind::Fish: {
+            float h = world_->clock().hourOfDay();
+            bool bite = (h < 8.0f || h > 18.0f) ? rng_.chance(0.5f) : rng_.chance(0.3f);
+            if (bite) {
+                world_->dropItem(player_.pos, items_.create("fish_raw", rng_));
+                log("Something pulls the line. You land a perch!", MessageKind::Good);
+            } else {
+                log("Not a single bite.");
+            }
+            break;
+        }
+        case ActionKind::Build: {
+            BuildKind k = (BuildKind)o.targetId;
+            const BuildRecipe* r = recipe(k);
+            ActionOption check = buildOption(k, o.x, o.y, o.dir);
+            if (!r || !check.enabled) { log(check.reason + "."); break; }
+            // use the materials
+            int planks = r->planks, nails = r->nails;
+            for (int i = (int)player_.inventory.size() - 1; i >= 0 && planks > 0; --i)
+                if (player_.inventory.items()[i].def->hasTag("plank")) { player_.inventory.take(i); --planks; }
+            for (int i = (int)player_.inventory.size() - 1; i >= 0 && nails > 0; --i) {
+                ItemInstance& n = player_.inventory.items()[i];
+                if (!n.def->hasTag("nails")) continue;
+                int use = std::min(nails, n.usesLeft);
+                n.usesLeft -= use;
+                nails -= use;
+                if (n.usesLeft <= 0) player_.inventory.take(i);
+            }
+            if (r->tarp) player_.inventory.take(player_.inventory.findTag("tarp"));
+            world_->addBuild(Built{k, o.x, o.y, o.dir});
+            sound(Sfx::Chop, player_.pos);
+            log(std::string("You finish the ") + buildKindName(k) + ".", MessageKind::Good);
+            break;
+        }
+        case ActionKind::Dismantle: {
+            Built b{(BuildKind)o.targetId, o.x, o.y, o.dir};
+            const BuildRecipe* r = recipe(b.kind);
+            if (b.kind == BuildKind::Crate) {   // tip out what was in it
+                for (auto& item : world_->container(b.x, b.y).items) world_->dropItem(Vec2{b.x + 0.5f, b.y + 0.5f}, item);
+                world_->container(b.x, b.y).items.clear();
+            }
+            if (!world_->removeBuild(b)) break;
+            int back = r ? (r->planks + 1) / 2 : 1;
+            for (int i = 0; i < back; ++i) world_->dropItem(player_.pos, items_.create("plank", rng_));
+            sound(Sfx::Chop, player_.pos);
+            log(std::string("You take the ") + buildKindName(b.kind) + " apart and save " + std::to_string(back) +
+                (back == 1 ? " plank." : " planks."));
+            break;
+        }
+        case ActionKind::TearUpSheet: {
+            int n = rng_.rangeInt(4, 6);
+            for (int i = 0; i < n; ++i) giveItem(items_.create("rag", rng_));
+            world_->markHarvested(o.x, o.y);
+            log("You strip the bed and tear the sheet into " + std::to_string(n) + " rags.");
             break;
         }
         case ActionKind::TakePill: {
@@ -1254,10 +1931,11 @@ void Game::finishAction() {
         }
         case ActionKind::TearIntoRags: {
             if (!it) break;
+            int n = std::max(1, it->def->rags);
+            std::string name = lower(it->def->name);
             takeItem(o.item);
-            int n = rng_.rangeInt(2, 4);
             for (int i = 0; i < n; ++i) giveItem(items_.create("rag", rng_));
-            log("You tear it into strips of cloth.");
+            log("You rip the " + name + " into " + std::to_string(n) + (n == 1 ? " rag." : " rags."));
             break;
         }
         default: break;

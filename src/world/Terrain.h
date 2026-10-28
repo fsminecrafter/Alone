@@ -6,7 +6,9 @@ namespace alone {
 // Land-cover classes from the digitised map (terrain.pgm values).
 // Must match tools/mapgen/digitize.py.
 enum class Zone : uint8_t {
-    Unknown = 0, Water, Forest, Woodland, Park, Residential, Field, Meadow, Commercial, Hospital, Paved, Parking, Count
+    Unknown = 0, Water, Forest, Woodland, Park, Residential, Field, Meadow, Commercial, Hospital, Paved, Parking,
+    ForestDense, Thicket, Marsh, Rock,   // from orienteering maps: slow and difficult ground
+    Count
 };
 
 // Surface of a 1x1 m tile.
@@ -15,6 +17,7 @@ enum class Ground : uint8_t {
     Asphalt, Sidewalk, Gravel, Cobble, Rail, Concrete,
     WaterShallow, WaterDeep,
     FloorWood, FloorTile, FloorConcrete, FloorCarpet,
+    Deck,                        // wooden piers and jetties over the water
     Count
 };
 
@@ -25,7 +28,7 @@ enum class Prop : uint8_t {
     Spruce, Pine, Birch, Oak, Maple, Rowan,
     Shrub, Hedge, LingonBush, BlueberryBush, RoseBush, Rock, Boulder, Stump, Reeds,
     // outdoor man-made
-    Fence, Lamppost, Bench, Mailbox, Barrier, Car, Bin, HayBale, Woodpile, RainBarrel,
+    Fence, Lamppost, Bench, Mailbox, Barrier, Car, Bin, HayBale, Woodpile, RainBarrel, Pillar, Crate,
     // furniture
     Fridge, Freezer, Counter, Stove, Sink, Table, Chair, Sofa, Bed, Wardrobe, Dresser,
     Bookshelf, Toilet, Bathtub, BathroomCabinet, Shelf, Cooler, Checkout, Desk, Locker,

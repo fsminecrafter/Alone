@@ -1,5 +1,6 @@
 #include "client/MeshBuilder.h"
 #include "core/Rng.h"
+#include "world/MapData.h"
 #include "raymath.h"
 #include <cmath>
 #include <cstring>
@@ -20,14 +21,30 @@ Color mixColor(Color a, Color b, float t) {
                  (unsigned char)(a.b + (b.b - a.b) * t), (unsigned char)(a.a + (b.a - a.a) * t)};
 }
 
+// How much the shader darkens a point this high above its ground (as alpha)
+static unsigned char aoAlpha(float y) {
+    float t = Clamp((y + 0.05f) / 0.9f, 0.0f, 1.0f);
+    return (unsigned char)(255.0f * t * t * (3.0f - 2.0f * t));
+}
+
 void MeshBuilder::tri(Vector3 a, Vector3 b, Vector3 c, Color col) {
-    Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
+    Vector3 v[3] = {a, b, c};
+    unsigned char ao[3];
+    for (int i = 0; i < 3; ++i) {
+        ao[i] = aoMode_ == 2 ? 255 : aoAlpha(aoMode_ == 1 ? aoFixed_ : v[i].y);
+        if (drape_) v[i].y += drape_->elevation(v[i].x, v[i].z);
+        v[i].y += lift_;
+    }
+    Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(v[1], v[0]), Vector3Subtract(v[2], v[0])));
     if (Vector3LengthSqr(n) < 1e-12f) return;   // degenerate
-    for (Vector3 v : {a, b, c}) {
-        pos_.insert(pos_.end(), {v.x, v.y, v.z});
+    for (int i = 0; i < 3; ++i) {
+        mn_ = Vector3Min(mn_, v[i]);
+        mx_ = Vector3Max(mx_, v[i]);
+        pos_.insert(pos_.end(), {v[i].x, v[i].y, v[i].z});
         nrm_.insert(nrm_.end(), {n.x, n.y, n.z});
-        col_.insert(col_.end(), {col.r, col.g, col.b, col.a});
+        col_.insert(col_.end(), {col.r, col.g, col.b, ao[i]});
         uv_.insert(uv_.end(), {mat_, param_});
+        if (pieces_) tan_.insert(tan_.end(), {piece_[0], piece_[1], piece_[2], piece_[3]});
     }
 }
 
@@ -191,12 +208,17 @@ Mesh MeshBuilder::build() const {
     std::memcpy(m.vertices, pos_.data(), pos_.size() * sizeof(float));
     std::memcpy(m.normals, nrm_.data(), nrm_.size() * sizeof(float));
     std::memcpy(m.colors, col_.data(), col_.size());
+    if (!tan_.empty()) {
+        m.tangents = (float*)MemAlloc((unsigned)(tan_.size() * sizeof(float)));
+        std::memcpy(m.tangents, tan_.data(), tan_.size() * sizeof(float));
+    }
     UploadMesh(&m, false);
     // Free CPU copies, the GPU has them
     MemFree(m.vertices); m.vertices = nullptr;
     MemFree(m.normals); m.normals = nullptr;
     MemFree(m.colors); m.colors = nullptr;
     MemFree(m.texcoords); m.texcoords = nullptr;
+    if (m.tangents) { MemFree(m.tangents); m.tangents = nullptr; }
     return m;
 }
 

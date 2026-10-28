@@ -21,6 +21,7 @@ struct Vec2 {
 };
 
 inline float dot(Vec2 a, Vec2 b) { return a.x * b.x + a.y * b.y; }
+inline float cross(Vec2 a, Vec2 b) { return a.x * b.y - a.y * b.x; }
 inline float distance(Vec2 a, Vec2 b) { return (a - b).length(); }
 inline float clamp01(float v) { return std::clamp(v, 0.0f, 1.0f); }
 inline float lerp(float a, float b, float t) { return a + (b - a) * t; }

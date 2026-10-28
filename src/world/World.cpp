@@ -44,6 +44,22 @@ Chunk& World::chunk(int cx, int cy) {
             auto o = overrides_.find(tileKey(x0 + lx, y0 + ly));
             if (o != overrides_.end() && o->second.hasProp) c->at(lx, ly).prop = o->second.prop;
         }
+    // ...and what they built
+    for (const auto& b : builds_) {
+        if (b.x < x0 || b.y < y0 || b.x >= x0 + kChunkSize || b.y >= y0 + kChunkSize) continue;
+        Tile& t = c->at(b.x - x0, b.y - y0);
+        switch (b.kind) {
+            case BuildKind::Wall: t.walls |= b.dir == 0 ? WallN : WallW; break;
+            case BuildKind::Door: t.walls |= b.dir == 0 ? (WallN | DoorN) : (WallW | DoorW); break;
+            case BuildKind::Window: t.walls |= b.dir == 0 ? (WallN | WindowN) : (WallW | WindowW); break;
+            case BuildKind::Floor: t.ground = Ground::FloorWood; t.prop = Prop::None; break;
+            case BuildKind::Crate: t.prop = Prop::Crate; break;
+            case BuildKind::RainCollector: t.prop = Prop::RainBarrel; break;
+            case BuildKind::Bed: t.prop = Prop::Bed; break;
+            case BuildKind::Fence: t.prop = Prop::Fence; break;
+            default: break;
+        }
+    }
     c->lastUsed = clockTime_;
     c->version = ++versionCounter_;
     Chunk& ref = *c;
@@ -88,7 +104,130 @@ const Building* World::buildingAt(int x, int y) {
 }
 
 bool World::indoors(Vec2 p) {
-    return tile((int)std::floor(p.x), (int)std::floor(p.y)).building >= 0;
+    int x = (int)std::floor(p.x), y = (int)std::floor(p.y);
+    return tile(x, y).building >= 0 || roofAt(x, y);
+}
+
+// ---------------------------------------------------------------------------
+// Tents and carpentry
+// ---------------------------------------------------------------------------
+
+const char* buildKindName(BuildKind k) {
+    static const char* n[] = {"wall", "door", "window", "floor", "roof", "crate", "rain collector", "bed", "fence"};
+    return n[(int)k];
+}
+
+Tent* World::tentAt(Vec2 p) {
+    for (auto& t : tents_)
+        if (t.rect.contains((int)std::floor(p.x), (int)std::floor(p.y))) return &t;
+    return nullptr;
+}
+
+bool World::canPitch(const IRect& r, std::string* why) {
+    for (int y = r.y; y < r.bottom(); ++y)
+        for (int x = r.x; x < r.right(); ++x) {
+            const Tile& t = tile(x, y);
+            if (t.building >= 0 || roofAt(x, y)) { if (why) *why = "There's no room for it in here"; return false; }
+            if (t.ground == Ground::WaterShallow || t.ground == Ground::WaterDeep || t.ground == Ground::Asphalt ||
+                t.ground == Ground::Rail || t.ground == Ground::Deck) { if (why) *why = "You can't pitch a tent on that"; return false; }
+            if (t.prop != Prop::None && t.prop != Prop::LingonBush && t.prop != Prop::BlueberryBush) {
+                if (why) *why = "Something is in the way";
+                return false;
+            }
+            if (tentAt({x + 0.5f, y + 0.5f})) { if (why) *why = "There's already a tent here"; return false; }
+        }
+    return true;
+}
+
+const Built* World::builtAt(int x, int y, BuildKind kind) const {
+    for (const auto& b : builds_)
+        if (b.x == x && b.y == y && b.kind == kind) return &b;
+    return nullptr;
+}
+
+const Built* World::builtEdgeAt(int x, int y, int dir) const {
+    for (const auto& b : builds_)
+        if (isEdgeBuild(b.kind) && b.x == x && b.y == y && b.dir == dir) return &b;
+    return nullptr;
+}
+
+bool World::roofAt(int x, int y) const {
+    for (const auto& b : builds_)
+        if (b.kind == BuildKind::Roof && b.x == x && b.y == y) return true;
+    return false;
+}
+
+bool World::canBuild(const Built& b, std::string* why) {
+    auto no = [&](const char* w) { if (why) *why = w; return false; };
+    if (isEdgeBuild(b.kind)) {
+        const Tile& t = tile(b.x, b.y);
+        int ox = b.dir == 0 ? b.x : b.x - 1, oy = b.dir == 0 ? b.y - 1 : b.y;   // the tile on the other side
+        const Tile& o = tile(ox, oy);
+        uint8_t bit = b.dir == 0 ? WallN : WallW;
+        if (t.walls & bit) return no("There's already a wall there");
+        if (t.building >= 0 && o.building >= 0) return no("Not inside a house");
+        if (t.ground == Ground::WaterDeep || o.ground == Ground::WaterDeep) return no("Not over deep water");
+        if (tentAt({b.x + 0.5f, b.y + 0.5f}) || tentAt({ox + 0.5f, oy + 0.5f})) return no("A tent is in the way");
+        return true;
+    }
+    const Tile& t = tile(b.x, b.y);
+    if (t.building >= 0 && b.kind != BuildKind::Crate && b.kind != BuildKind::Bed) return no("Not inside a house");
+    if (t.ground == Ground::WaterDeep || t.ground == Ground::WaterShallow) return no("Not in the water");
+    if (builtAt(b.x, b.y, b.kind)) return no("You've already built one here");
+    if (b.kind == BuildKind::Floor) {
+        if (t.ground == Ground::FloorWood || t.building >= 0) return no("There's a floor here already");
+        return true;
+    }
+    if (b.kind == BuildKind::Roof) return true;
+    if (t.prop != Prop::None && t.prop != Prop::LingonBush && t.prop != Prop::BlueberryBush) return no("Something is in the way");
+    if (tentAt({b.x + 0.5f, b.y + 0.5f})) return no("A tent is in the way");
+    return true;
+}
+
+void World::applyBuild(const Built& b, bool on) {
+    Tile& t = mutableTile(b.x, b.y);
+    uint8_t bits = 0;
+    switch (b.kind) {
+        case BuildKind::Wall: bits = b.dir == 0 ? WallN : WallW; break;
+        case BuildKind::Door: bits = b.dir == 0 ? (WallN | DoorN) : (WallW | DoorW); break;
+        case BuildKind::Window: bits = b.dir == 0 ? (WallN | WindowN) : (WallW | WindowW); break;
+        case BuildKind::Floor: t.ground = on ? Ground::FloorWood : Ground::Grass; if (on) t.prop = Prop::None; break;
+        case BuildKind::Crate: t.prop = on ? Prop::Crate : Prop::None; break;
+        case BuildKind::RainCollector: t.prop = on ? Prop::RainBarrel : Prop::None; break;
+        case BuildKind::Bed: t.prop = on ? Prop::Bed : Prop::None; break;
+        case BuildKind::Fence: t.prop = on ? Prop::Fence : Prop::None; break;
+        default: break;
+    }
+    if (bits) t.walls = on ? (t.walls | bits) : (t.walls & ~bits);
+    if (b.kind == BuildKind::Crate || b.kind == BuildKind::RainCollector || b.kind == BuildKind::Bed || b.kind == BuildKind::Fence) {
+        TileOverride& o = overrides_[tileKey(b.x, b.y)];
+        o.hasProp = true;
+        o.prop = t.prop;
+    }
+    touch(b.x, b.y);
+}
+
+void World::addBuild(const Built& b) {
+    builds_.push_back(b);
+    applyBuild(b, true);
+    if (b.kind == BuildKind::Crate) {
+        ContainerState& c = container(b.x, b.y);
+        c.searched = true;     // a new crate is empty: nothing to search
+        c.items.clear();
+    }
+    if (b.kind == BuildKind::RainCollector) tankWater_[tileKey(b.x, b.y)] = 0;
+}
+
+bool World::removeBuild(const Built& b) {
+    for (size_t i = 0; i < builds_.size(); ++i) {
+        const Built& e = builds_[i];
+        if (e.kind == b.kind && e.x == b.x && e.y == b.y && (!isEdgeBuild(e.kind) || e.dir == b.dir)) {
+            builds_.erase(builds_.begin() + i);
+            applyBuild(b, false);
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +340,23 @@ void World::toggleDoor(int x, int y, int dir) {
     touch(x, y);
 }
 
+float World::standHeight(Vec2 p) {
+    const Tile& t = tile((int)std::floor(p.x), (int)std::floor(p.y));
+    if (t.building >= 0)
+        if (const Building* b = building(t.building)) return b->floorY;
+    switch (t.ground) {
+        case Ground::Deck: return map_.waterLevel(p.x, p.y) + 0.22f;
+        case Ground::WaterShallow: return map_.waterLevel(p.x, p.y) - 0.12f;
+        case Ground::WaterDeep: return map_.waterLevel(p.x, p.y) - 0.35f;
+        default: return map_.elevation(p.x, p.y);
+    }
+}
+
+float World::slope(Vec2 p, Vec2 dir) {
+    if (tile((int)std::floor(p.x), (int)std::floor(p.y)).building >= 0) return 0.0f;
+    return (map_.elevation(p.x + dir.x * 0.75f, p.y + dir.y * 0.75f) - map_.elevation(p.x - dir.x * 0.75f, p.y - dir.y * 0.75f)) / 1.5f;
+}
+
 bool World::findDoorNear(Vec2 p, float reach, int& ox, int& oy, int& odir) {
     float best = reach;
     bool found = false;
@@ -295,13 +451,16 @@ World::WaterSource World::waterSourceNear(Vec2 p, float reach, int* ox, int* oy)
     return best;
 }
 
+float World::tankWater(int x, int y) {
+    auto it = tankWater_.find(tileKey(x, y));
+    if (it != tankWater_.end()) return it->second;
+    return tile(x, y).prop == Prop::RainBarrel ? 60000.0f * hashFloat(hash2(x, y, seed_)) + 20000.0f : 6000.0f;
+}
+
 float World::takeTankWater(int x, int y, float ml) {
     int64_t key = tileKey(x, y);
     auto it = tankWater_.find(key);
-    if (it == tankWater_.end()) {
-        float start = tile(x, y).prop == Prop::RainBarrel ? 60000.0f * hashFloat(hash2(x, y, seed_)) + 20000.0f : 6000.0f;
-        it = tankWater_.emplace(key, start).first;
-    }
+    if (it == tankWater_.end()) it = tankWater_.emplace(key, tankWater(x, y)).first;
     float take = std::min(ml, it->second);
     it->second -= take;
     return take;
@@ -337,6 +496,7 @@ float World::fireWarmthAt(Vec2 p) {
     for (const auto& f : fires_) {
         if (!f.lit) continue;
         float d = distance(f.pos, p);
+        if (f.stove) { if (d < 1.5f) w += 3.0f; continue; }   // a spirit burner warms your hands, not much more
         if (d < 6.0f) w += 14.0f * (1.0f - ramp(d, 1.0f, 6.0f));
     }
     return std::min(w, 22.0f);
@@ -364,10 +524,25 @@ void World::update(float gameMinutes, Vec2 focus) {
     else wetness_ = std::max(0.0f, wetness_ - hours * (0.15f + 0.02f * std::max(0.0f, t)));
     for (auto& f : fires_) {
         if (!f.lit) continue;
+        if (f.stove) {
+            // A spirit burner: about 4 ml a minute, the windshield keeps the rain off
+            f.fuelMl -= gameMinutes * 4.0f;
+            if (f.fuelMl <= 0) { f.fuelMl = 0; f.lit = false; }
+            f.fuelMinutes = f.fuelMl / 4.0f;
+            continue;
+        }
         // Rain makes fires burn down faster
         f.fuelMinutes -= gameMinutes * (1.0f + clock_.weather().rain * 1.5f);
         if (f.fuelMinutes <= 0) { f.fuelMinutes = 0; f.lit = false; }
     }
+    // Rain collectors fill up (a tarp funnel over a barrel: ~1 m2)
+    float rain = clock_.weather().rain;
+    if (rain > 0.05f)
+        for (const auto& b : builds_)
+            if (b.kind == BuildKind::RainCollector) {
+                float& ml = tankWater_[tileKey(b.x, b.y)];
+                ml = std::min(150000.0f, ml + rain * 25.0f * gameMinutes);
+            }
     // Food on the ground and in containers ages too (cheaply, only near the player)
     float temp = t;
     for (auto& [key, stack] : ground_) {

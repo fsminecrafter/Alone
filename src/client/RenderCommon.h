@@ -17,7 +17,9 @@ constexpr float kShallowWater = -0.12f;
 inline Vector3 V(float x, float y, float z) { return Vector3{x, y, z}; }
 
 inline bool isWater(Ground g) { return g == Ground::WaterShallow || g == Ground::WaterDeep; }
-inline float groundHeight(Ground g) { return g == Ground::WaterDeep ? kDeepWater : g == Ground::WaterShallow ? kShallowWater : 0.0f; }
+inline float groundHeight(Ground g) {
+    return g == Ground::WaterDeep ? kDeepWater : g == Ground::WaterShallow ? kShallowWater : g == Ground::Deck ? 0.22f : 0.0f;
+}
 
 Color groundColour(Ground g);
 int groundMaterial(Ground g);

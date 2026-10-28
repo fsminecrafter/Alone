@@ -3,6 +3,7 @@
 #include <emscripten.h>
 #endif
 #include "client/Icons.h"
+#include "client/Input.h"
 #include "client/Ui.h"
 #include "core/Config.h"
 #include "core/Log.h"
@@ -66,6 +67,37 @@ std::string settingsPath() {
     return (std::filesystem::path(storageDir()) / "settings.ini").string();
 }
 
+// Laptops with an NVIDIA card next to the built-in graphics (PRIME): ask the
+// driver to run the game on the NVIDIA GPU, unless the player chose already
+// (or set ALONE_NO_GPU_SWITCH). Windows does the same through the exports in
+// main.cpp; Mesa's own switching (DRI_PRIME) is left to the player.
+bool preferDiscreteGpu() {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    if (getenv("ALONE_NO_GPU_SWITCH") || getenv("__NV_PRIME_RENDER_OFFLOAD") || getenv("__GLX_VENDOR_LIBRARY_NAME") ||
+        getenv("DRI_PRIME"))
+        return false;
+    std::error_code ec;
+    if (!std::filesystem::exists("/proc/driver/nvidia/version", ec)) return false;
+    bool lib = false;
+    for (const char* dir : {"/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/lib/aarch64-linux-gnu"})
+        lib |= std::filesystem::exists(std::filesystem::path(dir) / "libGLX_nvidia.so.0", ec);
+    if (!lib) return false;
+    setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+    setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
+    Log::info("NVIDIA GPU found: asking to render on it (set ALONE_NO_GPU_SWITCH=1 to stop this)");
+    return true;
+#else
+    return false;
+#endif
+}
+
+void undoGpuPreference() {
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+    unsetenv("__NV_PRIME_RENDER_OFFLOAD");
+    unsetenv("__GLX_VENDOR_LIBRARY_NAME");
+#endif
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -81,6 +113,7 @@ int App::run(int argc, char** argv) {
         else if (a == "--seed" && i + 1 < argc) seed_ = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
         else if (a == "--screenshots") autoShots_ = 1, tour_ = true;
         else if (a == "--anim-showcase" && i + 1 < argc) showcaseDir_ = argv[++i], tour_ = true;
+        else if (a == "--bench") bench_ = true, tour_ = true;
     }
 #ifdef __EMSCRIPTEN__
     Log::init("/tmp/alone.log");
@@ -88,21 +121,39 @@ int App::run(int argc, char** argv) {
     Log::init((std::filesystem::path(storageDir()) / "alone.log").string());
 #endif
     Paths::init(argv[0], dataOverride);
+#ifdef __EMSCRIPTEN__
+    // In a browser (often a laptop or Chromebook GPU): lighter defaults
+    settings_.msaa = 0;
+    settings_.gfx.shadows = 1;
+    settings_.gfx.maxLights = 16;
+#endif
     loadSettings();
+    if (tour_) settings_.gfx.renderScale = 100;   // screenshots and benchmarks at full resolution
 
     unsigned flags = FLAG_WINDOW_RESIZABLE;
+    // ALONE_HIDDEN=1: render without showing a window (screenshot tours, showcase)
+    if (const char* hid = getenv("ALONE_HIDDEN"); hid && *hid == '1') flags |= FLAG_WINDOW_HIDDEN;
+    if (const char* m = getenv("ALONE_MSAA")) settings_.msaa = atoi(m) ? 1 : 0;   // for benchmarks
     if (settings_.msaa) flags |= FLAG_MSAA_4X_HINT;
 #ifndef __EMSCRIPTEN__
     if (settings_.vsync) flags |= FLAG_VSYNC_HINT;
 #endif
     SetConfigFlags(flags);
+    bool switched = preferDiscreteGpu();
     InitWindow((int)kBaseW, (int)kBaseH, "Alone");
+    if (!IsWindowReady() && switched) {   // the discrete GPU didn't work out: try again without it
+        Log::warn("Could not open the window on the NVIDIA GPU, using the default one");
+        undoGpuPreference();
+        InitWindow((int)kBaseW, (int)kBaseH, "Alone");
+    }
+    if (!IsWindowReady()) { Log::error("Could not open a window"); return 1; }
     SetWindowMinSize(960, 540);
     SetExitKey(KEY_NULL);
 #ifndef __EMSCRIPTEN__
     SetTargetFPS(settings_.fpsCap);
 #endif
     ui::init();
+    input::init();
     if (!renderer_.init()) { CloseWindow(); return 1; }
     InitAudioDevice();
     audio_ = IsAudioDeviceReady();
@@ -121,6 +172,13 @@ int App::run(int argc, char** argv) {
 
     if (!game_.loadData()) {
         Log::error("Game data failed to load");
+    }
+    if (bench_) {
+        int r = runBench();
+        renderer_.shutdown();
+        ui::shutdown();
+        CloseWindow();
+        return r;
     }
     if (!showcaseDir_.empty()) {
         int r = runShowcase(showcaseDir_);
@@ -156,6 +214,11 @@ void App::frame() {
     hv.point = hover_;
     hv.show = state_ == State::Playing && !ui::mouseOverUi() && overlay_ != Overlay::Map && !menu_.open;
     hv.colour = hoverColour();
+    if (buildKind_ >= 0 && state_ == State::Playing) {
+        hv.buildKind = buildKind_;
+        hv.bx = buildX_; hv.by = buildY_; hv.bdir = buildDir_;
+        hv.buildOk = game_.buildOption((BuildKind)buildKind_, buildX_, buildY_, buildDir_).enabled;
+    }
     renderer_.draw(game_, time_, dt, hv);
     if (state_ == State::Menu) drawMenu();
     else {
@@ -163,6 +226,7 @@ void App::frame() {
         switch (overlay_) {
             case Overlay::Inventory: drawInventory(); break;
             case Overlay::Health: drawHealth(); break;
+            case Overlay::Build: drawBuildMenu(); break;
             case Overlay::Map: drawMap(); break;
             case Overlay::Pause: drawPause(); break;
             case Overlay::Settings: drawSettings(); break;
@@ -176,6 +240,7 @@ void App::frame() {
     if (settings_.showFps) DrawFPS(GetScreenWidth() - 90, GetScreenHeight() - 24);
     ui::endFrame();
     drawCursor();
+    input::endFrame();
     EndDrawing();
 
     // --screenshots: automated tour used for documentation / smoke tests
@@ -189,8 +254,11 @@ void App::frame() {
             {0, 0, 0, "screenshot_inventory.png", Overlay::Inventory},
             {0, 0, 0, "screenshot_map.png", Overlay::Map},
             {640, 364, 13, "screenshot_torget.png", Overlay::None},
-            {648.3f, 378.5f, 14, "screenshot_storken.png", Overlay::None},
-            {1, 1, 15, "screenshot_storken_inside.png", Overlay::None},
+            {641, 370, 12.5f, "screenshot_rain.png", Overlay::None},
+            {767.3f, 409.9f, 14.5f, "screenshot_hills.png", Overlay::None},
+            {1, 1, 14, "screenshot_vimpeln.png", Overlay::None},
+            {1, 1, 15, "screenshot_vimpeln_inside.png", Overlay::None},
+            {1, 1, 12, "screenshot_kungsgatan.png", Overlay::None},
             {618.9f, 352.5f, 15, "screenshot_church.png", Overlay::None},
             {300, 520, 11, "screenshot_forest.png", Overlay::None},
             {474, 352, 16, "screenshot_nolhaga.png", Overlay::None},
@@ -199,6 +267,9 @@ void App::frame() {
             {760, 410, 12, "screenshot_e20.png", Overlay::None},
             {880, 120, 10, "screenshot_wildlife.png", Overlay::None},
             {0, 0, 0, "screenshot_watch.png", Overlay::None},
+            {0, 0, 0, "screenshot_health.png", Overlay::Health},
+            {0, 0, 0, "screenshot_camp.png", Overlay::None},
+            {1086.6f, 322.1f, 11, "screenshot_hjortmarka.png", Overlay::None},
             {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
             {0, 0, 0, "screenshot_settings_graphics.png", Overlay::Settings},
             {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
@@ -229,7 +300,19 @@ void App::frame() {
                     // Find a kitchen container in the start house
                     Player& pl = game_.player();
                     const Building* b = game_.world().buildingAt((int)pl.pos.x, (int)pl.pos.y);
-                    if (b) for (const auto& f : b->furniture) {
+                    // a container with something in it (kitchens first)
+                    std::vector<const Furniture*> order;
+                    if (b) {
+                        for (const auto& f : b->furniture)
+                            if (f.container == "kitchen_cupboard" || f.container == "pantry" || f.container == "fridge") order.push_back(&f);
+                        for (const auto& f : b->furniture)
+                            if (!f.container.empty()) order.push_back(&f);
+                    }
+                    const Furniture* pick = nullptr;
+                    for (const Furniture* f : order)
+                        if (!game_.world().container(f->x, f->y).items.empty()) { pick = f; break; }
+                    if (!pick && !order.empty()) pick = order.front();
+                    if (pick) for (const auto& f : std::vector<Furniture>{*pick}) {
                         if (f.container.empty()) continue;
                         Vec2 fp{f.x + 0.5f, f.y + 0.5f};
                         pl.pos = fp + Vec2{f.facing == 1 ? 1.0f : f.facing == 3 ? -1.0f : 0.0f, f.facing == 2 ? 1.0f : f.facing == 0 ? -1.0f : 0.0f};
@@ -259,18 +342,32 @@ void App::frame() {
                     game_.world().clock().advance(add * 60);
                     renderer_.snapTo(game_.player().pos);
                 }
-                if (std::string(st.file) == "screenshot_storken_inside.png") {
-                    // Stand in the food court of Gallerian Storken
-                    Vec2 at;
-                    for (const auto& ob : game_.map().osmBuildings())
-                        if (ob.name == "Gallerian Storken") at = ob.centre;
-                    game_.world().tile((int)at.x, (int)at.y);
-                    for (const auto& b : game_.world().gen().allBuildings())
-                        if (b.name == "Gallerian Storken")
-                            for (const auto& r : b.rooms)
-                                if (r.type == RoomType::Dining) at = r.rect.centre() + Vec2{0.5f, 0.5f};
-                    game_.player().pos = at;
-                    renderer_.snapTo(at);
+                {
+                    // Landmarks: stand outside the entrance, or in the food court
+                    std::string f = st.file;
+                    const char* name = f.find("vimpeln") != std::string::npos ? "Vimpeln"
+                                     : f.find("kungsgatan") != std::string::npos ? "Gallerian Storken" : nullptr;
+                    if (name) {
+                        Vec2 at;
+                        for (const auto& ob : game_.map().osmBuildings())
+                            if (ob.name == name) at = ob.centre;
+                        game_.world().tile((int)at.x, (int)at.y);
+                        for (const auto& b : game_.world().gen().allBuildings()) {
+                            if (b.name != name) continue;
+                            Vec2 out = (b.doorPos - b.rect.centre()).normalized();
+                            at = b.doorPos + out * (f.find("vimpeln.png") != std::string::npos ? 11.0f : 5.0f);
+                            if (f.find("inside") != std::string::npos) {
+                                for (const auto& r : b.rooms)
+                                    if (r.type == RoomType::Dining) at = r.rect.centre() + Vec2{0.5f, 0.5f};
+                                for (const auto& r : b.rooms)
+                                    if (r.loot == "food_court_counter") at = r.rect.centre() + Vec2{0.5f, 0.5f};
+                            } else {
+                                renderer_.faceTowards(out);   // look at the front of it
+                            }
+                        }
+                        game_.player().pos = at;
+                        renderer_.snapTo(at);
+                    }
                 }
             }
             if (std::string(st.file) == "screenshot_symptoms.png") {
@@ -300,6 +397,88 @@ void App::frame() {
             }
             if (sub == 0 && std::string(st.file).find("settings_") != std::string::npos)
                 settingsTab_ = std::string(st.file).find("graphics") != std::string::npos ? 1 : 0;
+            if (std::string(st.file) == "screenshot_hjortmarka.png" && sub == 0) {
+                Weather fine;
+                fine.kind = WeatherKind::Cloudy;
+                fine.cloud = 0.4f;
+                game_.world().clock().forceWeather(fine, game_.world().clock().totalMinutes() + 600);
+            }
+            if (std::string(st.file) == "screenshot_health.png" && sub == 0) {
+                // A few wounds in different states of care
+                Body& body = game_.player().body;
+                body.mutableState().wounds.clear();
+                for (auto& d : body.mutableState().dressings) d = Dressing{};
+                game_.animals().animals().clear();
+                Wound cut; cut.part = BodyPart::LeftArm; cut.type = WoundType::Laceration; cut.severity = 0.55f; cut.bleeding = 6;
+                body.addWound(cut);
+                body.applyDressing(BodyPart::LeftArm, DressingKind::Rag, false, 0.7f);
+                body.mutableState().dressings[(int)BodyPart::LeftArm].blood = 0.6f;
+                Wound sc; sc.part = BodyPart::RightHand; sc.type = WoundType::Scratch; sc.severity = 0.15f; sc.bleeding = 1;
+                body.addWound(sc);
+                body.applyDressing(BodyPart::RightHand, DressingKind::Bandaid, true, 0);
+                Wound bite; bite.part = BodyPart::LeftLeg; bite.type = WoundType::Bite; bite.severity = 0.45f; bite.bleeding = 9;
+                bite.infection = 0.4f;
+                body.addWound(bite);
+                Wound burn; burn.part = BodyPart::RightFoot; burn.type = WoundType::Burn; burn.severity = 0.3f; burn.healed = 0.5f;
+                body.addWound(burn);
+                body.applyDressing(BodyPart::RightFoot, DressingKind::Bandage, true, 0.1f);
+            }
+            if (std::string(st.file) == "screenshot_rain.png" && sub == 0) {
+                // A downpour on the square: the streaks, rings and puddles
+                Weather wx;
+                wx.kind = WeatherKind::Rain;
+                wx.rain = 0.9f;
+                wx.cloud = 0.95f;
+                wx.wind = 6.0f;
+                double now = game_.world().clock().totalMinutes();
+                game_.world().clock().forceWeather(wx, now + 70);
+                game_.world().update(60.0f, game_.player().pos);   // an hour of it: everything's soaked
+            }
+            if (std::string(st.file) == "screenshot_camp.png" && sub == 0) {
+                // A camp outside the start house on a sunny afternoon: a tent, a storm
+                // kitchen, a little plank cabin
+                World& w = game_.world();
+                Player& pl = game_.player();
+                Weather fine;
+                fine.kind = WeatherKind::Clear;
+                fine.cloud = 0.15f;
+                fine.wind = 2.0f;
+                double now = w.clock().totalMinutes();
+                double add = 16.5 - w.clock().hourOfDay();
+                if (add < 0) add += 24;
+                w.clock().advance(add * 60);
+                w.clock().forceWeather(fine, now + add * 60 + 600);
+                pl.body.mutableState().wounds.clear();
+                for (auto& d : pl.body.mutableState().dressings) d = Dressing{};
+                game_.animals().animals().clear();
+                const Building* home = w.gen().findStartHouse(game_.map().spawn());
+                Vec2 base = pl.pos;
+                if (home) base = home->doorPos + (home->doorPos - home->rect.centre()).normalized() * 7.0f;
+                int bx = (int)std::floor(base.x), by = (int)std::floor(base.y);
+                Tent t; t.id = w.newId(); t.rect = IRect{bx + 3, by - 1, 2, 2}; t.dir = 3; t.item = "tent_dome";
+                w.tents().push_back(t);
+                Campfire stove; stove.pos = Vec2{bx + 1.5f, by + 2.5f}; stove.id = w.newId(); stove.stove = true;
+                stove.fuelMl = 80; stove.lit = true; stove.fuelMinutes = 20;
+                w.campfires().push_back(stove);
+                for (int i = 0; i < 3; ++i) {
+                    w.addBuild(Built{BuildKind::Wall, bx - 4 + i, by - 2, 0});
+                    w.addBuild(Built{BuildKind::Floor, bx - 4 + i, by - 2, 0});
+                    w.addBuild(Built{BuildKind::Floor, bx - 4 + i, by - 1, 0});
+                    w.addBuild(Built{BuildKind::Roof, bx - 4 + i, by - 2, 0});
+                    w.addBuild(Built{BuildKind::Roof, bx - 4 + i, by - 1, 0});
+                }
+                w.addBuild(Built{BuildKind::Wall, bx - 4, by - 2, 1});
+                w.addBuild(Built{BuildKind::Wall, bx - 4, by - 1, 1});
+                w.addBuild(Built{BuildKind::Window, bx - 1, by - 2, 1});
+                w.addBuild(Built{BuildKind::Wall, bx - 1, by - 1, 1});
+                w.addBuild(Built{BuildKind::Door, bx - 3, by, 0});
+                w.addBuild(Built{BuildKind::Wall, bx - 4, by, 0});
+                w.addBuild(Built{BuildKind::Window, bx - 2, by, 0});
+                w.addBuild(Built{BuildKind::Crate, bx, by - 2, 0});
+                pl.pos = Vec2{bx + 0.6f, by + 2.6f};
+                pl.facing = 3.6f;
+                renderer_.snapTo(pl.pos);
+            }
             if (std::string(st.file) == "screenshot_watch.png" && sub == 0) {
                 Rng rng(9);
                 game_.player().inventory.add(game_.items().create("wristwatch", rng));
@@ -322,6 +501,7 @@ void App::shutdownApp() {
     if (audio_) CloseAudioDevice();
     if (mapReady_) UnloadTexture(mapTex_);
     renderer_.shutdown();
+    input::shutdown();
     ui::shutdown();
     CloseWindow();
 }
@@ -411,9 +591,15 @@ void App::update(float dt) {
 }
 
 void App::updatePlaying(float dt) {
+    // When a search finishes, open what was searched so you can look through it
+    if (lootPending_) {
+        if (game_.hasOpenContainer()) { overlay_ = Overlay::Inventory; lootPending_ = false; }
+        else if (!game_.currentAction().active) lootPending_ = false;   // cancelled
+    }
     // Keyboard shortcuts
     if (IsKeyPressed(KEY_ESCAPE)) {
         if (menu_.open) menu_.open = false;
+        else if (buildKind_ >= 0) buildKind_ = -1;
         else if (overlay_ == Overlay::Settings) overlay_ = settingsReturn_;
         else if (overlay_ != Overlay::None) overlay_ = Overlay::None;
         else overlay_ = Overlay::Pause;
@@ -423,6 +609,10 @@ void App::updatePlaying(float dt) {
         if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I)) { overlay_ = overlay_ == Overlay::Inventory ? Overlay::None : Overlay::Inventory; menu_.open = false; }
         if (IsKeyPressed(KEY_M)) overlay_ = overlay_ == Overlay::Map ? Overlay::None : Overlay::Map;
         if (IsKeyPressed(KEY_H)) overlay_ = overlay_ == Overlay::Health ? Overlay::None : Overlay::Health;
+        if (IsKeyPressed(KEY_B)) {
+            if (buildKind_ >= 0) buildKind_ = -1;
+            else overlay_ = overlay_ == Overlay::Build ? Overlay::None : Overlay::Build;
+        }
     }
     if (IsKeyPressed(KEY_F1)) overlay_ = overlay_ == Overlay::Help ? Overlay::None : Overlay::Help;
     if (debug_ && IsKeyPressed(KEY_F3)) showDebug_ = !showDebug_;
@@ -460,7 +650,7 @@ void App::updatePlaying(float dt) {
         worldInput();
         in.aim = hover_;
         in.attack = (IsKeyPressed(KEY_SPACE)) ||
-                    (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ui::mouseOverUi() && !menu_.open && overlay_ != Overlay::Map);
+                    (input::pressed(MOUSE_BUTTON_LEFT) && !ui::mouseOverUi() && !menu_.open && overlay_ != Overlay::Map);
     }
     if (overlay_ != Overlay::Map && !ui::mouseOverUi()) {
         float wheel = GetMouseWheelMove();
@@ -493,18 +683,38 @@ void App::worldInput() {
     Vector2 mouse = GetMousePosition();
     hover_ = renderer_.pick(mouse, game_.world());
     if (ui::mouseOverUi() || overlay_ == Overlay::Map) return;
-    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+    if (buildKind_ >= 0) { updateBuildPlacement(); return; }
+    if (input::pressed(MOUSE_BUTTON_RIGHT)) {
         menu_.options = game_.actionsAt(hover_);
         menu_.open = !menu_.options.empty();
         menu_.pos = mouse;
         menu_.title = "";
     }
-    if (IsKeyPressed(KEY_F)) {
-        // Interact: first enabled option near where the player is looking / standing
-        auto opts = game_.actionsAt(hover_);
-        for (auto& o : opts)
-            if (o.enabled && o.kind != ActionKind::Rest && o.kind != ActionKind::Sleep) { game_.perform(o); break; }
+    ActionOption o;
+    if (IsKeyPressed(KEY_F) && interactTarget(o)) {
+        game_.perform(o);
+        if (o.kind == ActionKind::OpenContainer) overlay_ = Overlay::Inventory;
+        if (o.kind == ActionKind::Search) lootPending_ = true;
     }
+}
+
+bool App::interactTarget(ActionOption& out) {
+    const Player& p = game_.player();
+    if (game_.currentAction().active || p.asleep) return false;
+    Vec2 dir{std::cos(p.facing), std::sin(p.facing)};
+    auto usable = [](const ActionOption& o) {
+        return o.enabled && o.kind != ActionKind::Rest && o.kind != ActionKind::Sleep && o.kind != ActionKind::Build &&
+               o.kind != ActionKind::Dismantle;   // tearing things down needs a right-click
+    };
+    // A door in front of you (or right beside you) comes first
+    for (Vec2 pt : {p.pos + dir * 0.7f, p.pos + dir * 0.3f, p.pos})
+        for (const auto& o : game_.actionsAt(pt))
+            if (o.kind == ActionKind::ToggleDoor && o.enabled) { out = o; return true; }
+    // then whatever is in front of you, then what the mouse points at
+    for (Vec2 pt : {p.pos + dir * 0.8f, hover_})
+        for (const auto& o : game_.actionsAt(pt))
+            if (usable(o)) { out = o; return true; }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +841,14 @@ void App::drawSettings() {
             settings_.fpsCap = caps[idx];
         }
 #endif
+        {
+            static const int scales[] = {0, 100, 75, 50};
+            int idx = 0;
+            for (int i = 0; i < 4; ++i) if (scales[i] == settings_.gfx.renderScale) idx = i;
+            std::string autoLabel = settings_.gfx.renderScale == 0 ? fmt("Auto (%d%%)", (int)std::lround(renderer_.renderScale() * 100)) : "Auto";
+            choice("Render resolution", {autoLabel, "100%", "75%", "50%"}, idx);
+            settings_.gfx.renderScale = scales[idx];
+        }
         choice("Shadows", {"Off", "Low", "High", "Ultra"}, settings_.gfx.shadows);
         {
             static const int lights[] = {8, 16, 32};
@@ -688,7 +906,8 @@ void App::drawHelp() {
         {"F", "Quick interact (doors, search)"},
         {"Left click / Space", "Attack with what you hold"},
         {"Tab / I", "Inventory: double-click to move items, right-click for options"},
-        {"H", "Look yourself over (wounds)"},
+        {"H", "Health: look yourself over, treat wounds"},
+        {"B", "Build (carpentry): walls, doors, floors, roofs, crates"},
         {"M", "Map of Alingsås"},
         {"Z / R", "Sleep / rest for an hour"},
         {"L", "Flashlight on/off"},
@@ -738,6 +957,76 @@ void App::drawDeath() {
 // HUD
 // ---------------------------------------------------------------------------
 
+// --bench: frame times at a few typical places (town, forest, inside a
+// shopping centre), for checking performance changes.
+int App::runBench() {
+    // A/B switches: ALONE_BENCH_SHADOWS=0..3, ALONE_BENCH_SIZE=640x360
+    if (const char* v = getenv("ALONE_BENCH_SHADOWS")) { settings_.gfx.shadows = atoi(v); applySettings(); }
+    if (const char* v = getenv("ALONE_BENCH_SIZE")) {
+        int w = 0, h = 0;
+        if (std::sscanf(v, "%dx%d", &w, &h) == 2) SetWindowSize(w, h);
+    }
+    game_.setBaseTimeScale(settings_.minutesPerSecond);
+    game_.newGame(4242);
+    state_ = State::Playing;
+    struct Spot { const char* name; Vec2 at; };
+    std::vector<Spot> spots = {{"start house", game_.player().pos}};
+    for (const auto& ob : game_.map().osmBuildings()) {
+        if (ob.name == "Gallerian Storken") spots.push_back({"Kungsgatan", ob.centre + Vec2{0, ob.h * 0.5f + 6.0f}});
+        if (ob.name == "Vimpeln") spots.push_back({"inside Vimpeln", ob.centre});
+    }
+    spots.push_back({"Hjortmarka forest", Vec2{7443.2f, 2206.7f}});
+    renderer_.finishEachPhase = getenv("ALONE_BENCH_FINISH") != nullptr;
+    std::printf("%-20s %8s %8s %8s %8s | %6s %6s %6s %6s %6s %6s\n", "place", "frame", "update", "render", "fps",
+                "rig", "prep", "shadow", "scene", "rest", "hud+swap");
+    for (const auto& sp : spots) {
+        game_.player().pos = sp.at;
+        renderer_.snapTo(sp.at);
+        // let the chunks around the spot get built first
+        for (int i = 0; i < 90; ++i) {
+            update(1.0f / 30.0f);
+            BeginDrawing();
+            HoverInfo hv;
+            renderer_.draw(game_, time_, 1.0f / 30.0f, hv);
+            drawHud();
+            EndDrawing();
+        }
+        if (const char* dir = getenv("ALONE_BENCH_SHOTS")) {   // a picture of each place, to check what's drawn
+            Image img = LoadImageFromScreen();
+            std::string name = std::string(dir) + "/bench_" + sp.name + ".png";
+            for (char& ch : name) if (ch == ' ') ch = '_';
+            ExportImage(img, name.c_str());
+            UnloadImage(img);
+        }
+        double tu = 0, tr = 0, t0 = GetTime();
+        const int frames = 120;
+        renderer_.profile() = Renderer::Profile{};
+        for (int i = 0; i < frames; ++i) {
+            double a = GetTime();
+            update(1.0f / 30.0f);
+            double b = GetTime();
+            BeginDrawing();
+            HoverInfo hv;
+            renderer_.draw(game_, time_, 1.0f / 30.0f, hv);
+            drawHud();
+            EndDrawing();
+            double c = GetTime();
+            tu += b - a; tr += c - b;
+        }
+        double total = (GetTime() - t0) / frames;
+        const auto& pr = renderer_.profile();
+        double n = std::max(1, pr.frames);
+        double inDraw = (pr.rig + pr.prep + pr.shadow + pr.scene + pr.rest) / n;
+        std::printf("%-20s %7.1fms %7.1fms %7.1fms %8.1f | %6.1f %6.1f %6.1f %6.1f %6.1f %6.1f\n", sp.name, total * 1000,
+                    tu / frames * 1000, tr / frames * 1000, 1.0 / total, pr.rig / n, pr.prep / n, pr.shadow / n, pr.scene / n,
+                    pr.rest / n, tr / frames * 1000 - inDraw);
+        std::printf("%-20s chunks %4.1f (sun %4.1f), vertices %.2fM (sun %.2fM), buildings %.2fM (sun %.2fM) per frame\n", "",
+                    pr.chunks / n, pr.sunChunks / n, pr.verts / n / 1e6, pr.sunVerts / n / 1e6, pr.buildingVerts / n / 1e6,
+                    pr.sunBuildingVerts / n / 1e6);
+    }
+    return 0;
+}
+
 // --anim-showcase <dir>: renders the character animations frame by frame
 // (30 fps) for the README's GIF/MP4.
 int App::runShowcase(const std::string& dir) {
@@ -753,22 +1042,34 @@ int App::runShowcase(const std::string& dir) {
     wear("rain_jacket", ClothingSlot::Jacket);
     wear("hiking_boots", ClothingSlot::Feet);
     wear("wool_hat", ClothingSlot::Head);
-    struct Clip { const char* name; float seconds, speed; bool sneak, aim, eat, work, sleep; const char* weapon; float spin; };
+    // facing: -0.79 shows the right side, 0.79 faces the camera
+    struct Clip { const char* name; float seconds, speed; bool sneak, aim, eat, work, sleep; const char* weapon; float spin; float facing;
+                  float limp = 0, arm = 0, hunch = 0, shiver = 0, nausea = 0, winded = 0; };
     const Clip clips[] = {
-        {"Idle", 2.0f, 0, false, false, false, false, false, nullptr, 0.0f},
-        {"Walk", 3.0f, 1.4f, false, false, false, false, false, nullptr, 0.5f},
-        {"Run", 2.6f, 4.6f, false, false, false, false, false, nullptr, 0.5f},
-        {"Sneak", 2.8f, 0.8f, true, false, false, false, false, nullptr, 0.4f},
-        {"Axe swing", 2.6f, 0, false, false, false, false, false, "axe", 0.0f},
-        {"Aim rifle", 2.2f, 0, false, true, false, false, false, "hunting_rifle", 0.35f},
-        {"Eat", 2.4f, 0, false, false, true, false, false, nullptr, 0.0f},
-        {"Search / work", 2.4f, 0, false, false, false, true, false, nullptr, 0.0f},
-        {"Sleep", 2.0f, 0, false, false, false, false, true, nullptr, 0.0f},
+        {"Idle", 2.0f, 0, false, false, false, false, false, nullptr, 0.0f, 0.5f},
+        {"Walk", 3.0f, 1.4f, false, false, false, false, false, nullptr, 0.5f, 0.0f},
+        {"Run", 2.6f, 4.6f, false, false, false, false, false, nullptr, 0.5f, -0.4f},
+        {"Sneak", 2.8f, 0.8f, true, false, false, false, false, nullptr, 0.4f, 0.2f},
+        {"Axe swing", 2.6f, 0, false, false, false, false, false, "axe", 0.0f, -0.45f},
+        {"Knife", 2.0f, 0, false, false, false, false, false, "hunting_knife", 0.0f, -0.3f},
+        {"Aim rifle", 2.2f, 0, false, true, false, false, false, "hunting_rifle", 0.35f, -0.6f},
+        {"Eat", 2.4f, 0, false, false, true, false, false, nullptr, 0.0f, 0.6f},
+        {"Search / work", 2.4f, 0, false, false, false, true, false, nullptr, 0.0f, 0.3f},
+        {"Limping (hurt leg)", 3.0f, 1.0f, false, false, false, false, false, nullptr, 0.45f, 0.0f, 0.9f},
+        {"Hurt arm", 2.2f, 1.2f, false, false, false, false, false, nullptr, 0.3f, 0.4f, 0, 0.9f},
+        {"In pain", 2.4f, 0.9f, false, false, false, false, false, nullptr, 0.3f, 0.2f, 0, 0, 0.9f},
+        {"Freezing", 2.4f, 0, false, false, false, false, false, nullptr, 0.0f, 0.6f, 0, 0, 0, 1.0f},
+        {"Nauseous", 2.2f, 0, false, false, false, false, false, nullptr, 0.0f, 0.5f, 0, 0, 0, 0, 1.0f},
+        {"Out of breath", 2.2f, 0, false, false, false, false, false, nullptr, 0.0f, -0.2f, 0, 0, 0, 0, 0, 1.0f},
+        {"Sleep", 2.0f, 0, false, false, false, false, true, nullptr, 0.0f, 0.4f},
     };
+    const char* onlyClip = getenv("ALONE_CLIP");
     const float dt = 1.0f / 30.0f;
     int frame = 0;
     float facing = 0.6f, distance = 0, t = 0;
     for (const Clip& c : clips) {
+        if (onlyClip && !std::strstr(c.name, onlyClip)) continue;
+        facing = c.facing;
         const ItemDef* weapon = c.weapon ? game_.items().find(c.weapon) : nullptr;
         float swing = 0, nextSwing = 0.2f;
         int frames = (int)(c.seconds / dt);
@@ -776,7 +1077,7 @@ int App::runShowcase(const std::string& dir) {
             t += dt;
             distance += c.speed * dt;
             facing += c.spin * dt;
-            if (c.weapon && std::string(c.weapon) == "axe") {
+            if (c.weapon && !game_.items().find(c.weapon)->firearm) {
                 nextSwing -= dt;
                 if (nextSwing <= 0) { swing = 1; nextSwing = 1.0f; }
                 swing = std::max(0.0f, swing - dt * 3.0f);
@@ -791,6 +1092,9 @@ int App::runShowcase(const std::string& dir) {
             in.asleep = c.sleep;
             in.swing = swing;
             in.time = t;
+            in.weapon = !weapon ? 0 : weapon->firearm ? 3 : weapon->hasTag("knife") ? 2 : 1;
+            in.limpL = c.limp; in.armHurtL = c.arm; in.hunch = c.hunch; in.shiver = c.shiver;
+            in.nausea = c.nausea; in.winded = c.winded;
             BeginDrawing();
             ClearBackground(Color{24, 26, 30, 255});
             DrawCircleGradient(size / 2, size / 2, size * 0.7f, Color{58, 62, 66, 255}, Color{24, 26, 30, 255});
@@ -812,39 +1116,13 @@ int App::runShowcase(const std::string& dir) {
 
 // Our own mouse cursor: a small outlined arrow, a crosshair when a firearm is ready.
 void App::drawCursor() {
-    if (tour_ || (!IsWindowFocused() && !IsCursorOnScreen())) return;
-#ifndef __EMSCRIPTEN__
-    if (!IsCursorHidden()) HideCursor();   // (the web page hides it with CSS: raylib's HideCursor locks the pointer there)
-#endif
-    float s = std::max(1.0f, ui::scale());
-    Vector2 m = GetMousePosition();
+    // The system pointer with the game's pictures on it: it moves smoothly
+    // however slowly the game draws
+    if (tour_) { input::setPointer(input::Pointer::Hidden); return; }
     const ItemInstance* wpn = state_ == State::Playing ? game_.weapon() : nullptr;
     bool overUi = ui::mouseOverUi() || overlay_ != Overlay::None || menu_.open || state_ != State::Playing;
-    if (wpn && wpn->def->firearm && !overUi) {
-        Color c{236, 232, 220, 255}, o{0, 0, 0, 200};
-        float r = 9 * s, g = 3 * s;
-        for (int pass = 0; pass < 2; ++pass) {
-            float w = pass == 0 ? 4.0f : 2.0f;
-            Color col = pass == 0 ? o : c;
-            DrawLineEx({m.x - r, m.y}, {m.x - g, m.y}, w, col);
-            DrawLineEx({m.x + g, m.y}, {m.x + r, m.y}, w, col);
-            DrawLineEx({m.x, m.y - r}, {m.x, m.y - g}, w, col);
-            DrawLineEx({m.x, m.y + g}, {m.x, m.y + r}, w, col);
-        }
-        DrawCircleV(m, 1.5f, Color{220, 60, 50, 255});
-        return;
-    }
-    // arrow
-    Vector2 p0 = m, p1{m.x, m.y + 17 * s}, p2{m.x + 4.5f * s, m.y + 13 * s}, p3{m.x + 8 * s, m.y + 20 * s},
-            p4{m.x + 10.5f * s, m.y + 19 * s}, p5{m.x + 7 * s, m.y + 12 * s}, p6{m.x + 12.5f * s, m.y + 12 * s};
-    Color fill = overUi ? Color{236, 232, 220, 255} : Color{246, 226, 186, 255};
-    DrawTriangle(p0, p1, p2, fill);
-    DrawTriangle(p0, p2, p5, fill);
-    DrawTriangle(p0, p5, p6, fill);
-    DrawTriangle(p2, p3, p4, fill);
-    DrawTriangle(p2, p4, p5, fill);
-    Vector2 outline[] = {p0, p1, p2, p3, p4, p5, p6, p0};
-    DrawLineStrip(outline, 8, Color{20, 18, 16, 255});
+    if (wpn && wpn->def->firearm && !overUi) input::setPointer(input::Pointer::Crosshair);
+    else input::setPointer(overUi ? input::Pointer::Arrow : input::Pointer::ArrowWorld);
 }
 
 std::string App::roughTimeOfDay(float h) {
@@ -1043,6 +1321,18 @@ void App::drawHud() {
         ui::text(fmt(">> x%.0f", sp), p.x + p.width - 70 * s, p.y + 10 * s, 16 * s, ui::theme().accent, true);
     }
 
+    if (buildKind_ >= 0) {
+        const Game::BuildRecipe* r = Game::recipe((BuildKind)buildKind_);
+        float s2 = ui::scale();
+        std::string why;
+        bool ok = game_.canAffordBuild((BuildKind)buildKind_, &why);
+        std::string line = std::string("Building: ") + (r ? r->name : "?") + " - click to place, right-click to stop";
+        Vector2 m = ui::measure(line, 16 * s2);
+        Rectangle hint{W / 2 - m.x / 2 - 14 * s2, H - 92 * s2, m.x + 28 * s2, ok ? 34 * s2 : 54 * s2};
+        ui::panel(hint, Color{14, 15, 17, 220});
+        ui::text(line, hint.x + 14 * s2, hint.y + 8 * s2, 16 * s2, ui::theme().text);
+        if (!ok) ui::text(why, hint.x + 14 * s2, hint.y + 30 * s2, 14 * s2, ui::theme().bad);
+    }
     drawSymptoms();
     drawMessages();
     drawActionBar();
@@ -1111,7 +1401,22 @@ void App::drawMessages() {
 
 void App::drawActionBar() {
     const CurrentAction& a = game_.currentAction();
-    if (!a.active) return;
+    if (!a.active) {
+        // What F would do now, as a small prompt
+        ActionOption o;
+        if (state_ != State::Playing || overlay_ != Overlay::None || menu_.open || buildKind_ >= 0 || !interactTarget(o)) return;
+        float s = ui::scale();
+        float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
+        float tw = ui::measure(o.label, 16 * s).x;
+        float w = tw + 56 * s;
+        Rectangle r{W / 2 - w / 2, H - 70 * s, w, 32 * s};
+        ui::panel(r, Color{10, 12, 14, 170});
+        Rectangle key{r.x + 8 * s, r.y + 5 * s, 24 * s, 22 * s};
+        DrawRectangleRounded(key, 0.25f, 4, Color{60, 62, 66, 255});
+        ui::textCentered("F", key.x + key.width / 2, key.y + 2 * s, 16 * s, ui::theme().accent, true);
+        ui::text(o.label, key.x + key.width + 10 * s, r.y + 7 * s, 16 * s, ui::theme().text);
+        return;
+    }
     float s = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
     Rectangle r{W / 2 - 160 * s, H - 92 * s, 320 * s, 48 * s};
@@ -1151,19 +1456,20 @@ void App::drawContextMenu() {
         if (hov && o.enabled) DrawRectangleRec(rr, ui::theme().highlight);
         ui::text(o.label, x + 12 * s, ry + 4 * s, 16 * s, o.enabled ? ui::theme().text : ui::theme().dim);
         if (hov && !o.enabled && !o.reason.empty()) ui::tooltip("", o.reason);
-        if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (hov && input::pressed(MOUSE_BUTTON_LEFT)) {
             clickedSomething = true;
             if (o.enabled) {
                 ActionOption copy = o;
                 menu_.open = false;
                 game_.perform(copy);
-                if (copy.kind == ActionKind::Search || copy.kind == ActionKind::OpenContainer) overlay_ = Overlay::Inventory;
+                if (copy.kind == ActionKind::OpenContainer) overlay_ = Overlay::Inventory;
+                if (copy.kind == ActionKind::Search) lootPending_ = true;
                 return;
             }
         }
         ry += rowH;
     }
-    if (!clickedSomething && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) && !ui::hovered(r))
+    if (!clickedSomething && (input::pressed(MOUSE_BUTTON_LEFT) || input::pressed(MOUSE_BUTTON_RIGHT)) && !ui::hovered(r))
         menu_.open = false;
 }
 
@@ -1206,6 +1512,7 @@ void App::drawItemTooltip(const ItemInstance& it) {
 
 void App::drawItemList(const std::string& title, Rectangle area, std::vector<ItemRef>& refs, int pane, ItemLoc target) {
     float s = ui::scale();
+    if (pane >= 0 && pane < 2) { paneRect_[pane] = area; paneLoc_[pane] = pane == 0 ? ItemLoc::Player : target == ItemLoc::Player ? (game_.hasOpenContainer() ? ItemLoc::Container : ItemLoc::Ground) : target; }
     ui::text(title, area.x, area.y - 26 * s, 18 * s, ui::theme().accent, true);
     DrawRectangleRec(area, Color{8, 9, 10, 160});
     float rowH = 34 * s;
@@ -1229,20 +1536,24 @@ void App::drawItemList(const std::string& title, Rectangle area, std::vector<Ite
         ui::text(name, row.x + rowH + 4 * s, row.y + 8 * s, 15 * s, ui::theme().text);
         std::string wt = fmt("%.1f", it->weightKg());
         ui::text(wt, row.x + row.width - ui::measure(wt, 13 * s).x - 8 * s, row.y + 10 * s, 13 * s, ui::theme().dim);
-        if (hov && !menu_.open) {
+        if (hov && !menu_.open && !drag_.active) {
             drawItemTooltip(*it);
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (input::pressed(MOUSE_BUTTON_LEFT)) {
                 double now = GetTime();
                 if (lastClickUid_ == it->uid && now - lastClickTime_ < 0.35) {
                     game_.transfer(ref, target);
                     lastClickUid_ = 0;
+                    drag_.armed = false;
                 } else {
                     selectedUid_ = it->uid;
                     lastClickUid_ = it->uid;
                     lastClickTime_ = now;
+                    // hold and drag it to the other list
+                    drag_.ref = ref; drag_.armed = true; drag_.active = false;
+                    drag_.start = GetMousePosition(); drag_.fromPane = pane;
                 }
             }
-            if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) openItemMenu(ref, GetMousePosition());
+            if (input::pressed(MOUSE_BUTTON_RIGHT)) openItemMenu(ref, GetMousePosition());
         }
         y += rowH;
     }
@@ -1308,8 +1619,8 @@ void App::drawInventory() {
             ItemRef ref{ItemLoc::Worn, 0, 0, 0, it.uid};
             if (hov && !menu_.open) {
                 drawItemTooltip(it);
-                if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) openItemMenu(ref, GetMousePosition());
-                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (input::pressed(MOUSE_BUTTON_RIGHT)) openItemMenu(ref, GetMousePosition());
+                if (input::pressed(MOUSE_BUTTON_LEFT)) {
                     double now = GetTime();
                     if (lastClickUid_ == it.uid && now - lastClickTime_ < 0.35) { game_.transfer(ref, ItemLoc::Player); lastClickUid_ = 0; }
                     else { lastClickUid_ = it.uid; lastClickTime_ = now; }
@@ -1323,29 +1634,207 @@ void App::drawInventory() {
     ui::claim(wa);
 
     Rectangle oa{wa.x + colW + 20 * s, a.y, colW, a.height};
+    if (container) {
+        // The container you searched, as its own panel: nothing moves until you take it
+        Rectangle frame{oa.x - 6 * s, oa.y - 34 * s, oa.width + 12 * s, oa.height + 40 * s};
+        DrawRectangleRec(frame, Color{30, 26, 18, 220});
+        DrawRectangleLinesEx(frame, 2.0f, Color{150, 118, 64, 255});
+    }
     drawItemList(otherTitle, oa, other, 1, ItemLoc::Player);
+    paneLoc_[1] = container ? ItemLoc::Container : ItemLoc::Ground;
     if (!other.empty() && ui::button({oa.x + oa.width - 100 * s, oa.y - 30 * s, 100 * s, 24 * s}, "Take all", true, 14)) {
         for (const auto& r : other) game_.transfer(r, ItemLoc::Player);
     }
-    ui::text("Double-click moves an item. Right-click for options.", p.x + 20 * s, p.y + 14 * s, 14 * s, ui::theme().dim);
+    ui::text("Double-click or drag an item to move it. Right-click for options.", p.x + 20 * s, p.y + 14 * s, 14 * s, ui::theme().dim);
+
+    // Dragging an item between the lists
+    if (drag_.armed) {
+        Vector2 m = GetMousePosition();
+        if (!drag_.active && Vector2Distance(m, drag_.start) > 8 * s) drag_.active = true;
+        if (drag_.active) {
+            if (ItemInstance* it = game_.resolve(drag_.ref)) {
+                drawItemIcon(it->def, {m.x - 14 * s, m.y - 14 * s, 28 * s, 28 * s});
+                ui::text(game_.itemName(*it), m.x + 18 * s, m.y - 8 * s, 14 * s, ui::theme().text);
+            }
+        }
+        if (input::released(MOUSE_BUTTON_LEFT)) {
+            if (drag_.active)
+                for (int pane = 0; pane < 2; ++pane)
+                    if (pane != drag_.fromPane && CheckCollisionPointRec(m, paneRect_[pane])) game_.transfer(drag_.ref, paneLoc_[pane]);
+            drag_ = Drag{};
+        }
+    }
     if (ui::button({p.x + p.width - 44 * s, p.y + 10 * s, 32 * s, 28 * s}, "X")) overlay_ = Overlay::None;
+}
+
+// ---------------------------------------------------------------------------
+// Carpentry
+// ---------------------------------------------------------------------------
+
+void App::drawBuildMenu() {
+    float s = ui::scale();
+    float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
+    float pw = std::min(720 * s, W - 20), ph = std::min(560 * s, H - 20);
+    Rectangle p{W / 2 - pw / 2, H / 2 - ph / 2, pw, ph};
+    ui::panel(p, Color{18, 17, 15, 240});
+    ui::claim(p);
+    ui::text("Build", p.x + 20 * s, p.y + 14 * s, 24 * s, ui::theme().text, true);
+    const Player& pl = game_.player();
+    int planks = 0, nails = 0;
+    for (const auto& it : pl.inventory.items()) {
+        if (it.def->hasTag("plank")) ++planks;
+        if (it.def->hasTag("nails")) nails += it.usesLeft;
+    }
+    bool hammer = pl.inventory.findId("hammer") >= 0 || pl.inventory.findId("sledgehammer") >= 0;
+    bool saw = pl.inventory.findTag("saw") >= 0;
+    ui::text(fmt("You have %d planks, %d nails%s%s", planks, nails, hammer ? ", a hammer" : " - no hammer", saw ? ", a saw" : ""),
+             p.x + 110 * s, p.y + 20 * s, 15 * s, hammer ? ui::theme().dim : ui::theme().bad);
+    float y = p.y + 58 * s, rowH = 50 * s;
+    for (const auto& r : Game::buildRecipes()) {
+        Rectangle row{p.x + 16 * s, y, p.width - 32 * s, rowH - 4 * s};
+        std::string why;
+        bool ok = game_.canAffordBuild(r.kind, &why);
+        bool hov = ui::hovered(row);
+        DrawRectangleRec(row, hov ? Color{48, 44, 36, 230} : Color{28, 27, 24, 220});
+        ui::text(r.name, row.x + 12 * s, row.y + 6 * s, 17 * s, ok ? ui::theme().text : ui::theme().dim, true);
+        std::string need = fmt("%d planks, %d nails, hammer", r.planks, r.nails);
+        if (r.saw) need += ", saw";
+        if (r.tarp) need += ", tarpaulin";
+        if (r.book) need += pl.knowsCarpentry ? "" : "  (needs a carpentry book)";
+        ui::text(need, row.x + 12 * s, row.y + 27 * s, 13 * s, ok ? ui::theme().accent : ui::theme().bad);
+        if (hov) ui::tooltip(r.name, std::string(r.description) + (ok ? "\n\nClick, then click where to build it." : "\n\n" + why + "."));
+        if (hov && input::pressed(MOUSE_BUTTON_LEFT)) {
+            buildKind_ = (int)r.kind;
+            overlay_ = Overlay::None;
+        }
+        y += rowH;
+    }
+    ui::paragraph("Planks come from hardware stores, garages and warehouses, or saw a log (chop a tree, then use a saw). "
+                  "Walls and doors go on the edge of a tile: point near the edge you want. Right-click something you built "
+                  "to take it apart again.",
+                  p.x + 20 * s, p.y + p.height - 70 * s, p.width - 40 * s, 13 * s, ui::theme().dim);
+}
+
+void App::updateBuildPlacement() {
+    BuildKind k = (BuildKind)buildKind_;
+    int tx = (int)std::floor(hover_.x), ty = (int)std::floor(hover_.y);
+    buildX_ = tx; buildY_ = ty; buildDir_ = 0;
+    if (isEdgeBuild(k)) {
+        // the edge of the tile nearest the mouse
+        float fx = hover_.x - tx, fy = hover_.y - ty;
+        float dn = fy, ds = 1 - fy, dw = fx, de = 1 - fx;
+        float m = std::min({dn, ds, dw, de});
+        if (m == dn) { buildDir_ = 0; }
+        else if (m == ds) { buildY_ = ty + 1; buildDir_ = 0; }
+        else if (m == dw) { buildDir_ = 1; }
+        else { buildX_ = tx + 1; buildDir_ = 1; }
+    }
+    if (input::pressed(MOUSE_BUTTON_LEFT)) {
+        ActionOption o = game_.buildOption(k, buildX_, buildY_, buildDir_);
+        game_.perform(o);
+    }
+    if (input::pressed(MOUSE_BUTTON_RIGHT)) buildKind_ = -1;
 }
 
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Front view of the body for the health screen, in units of 1/100 of its
+// height. The player's left side is on the right, like looking at someone.
+struct PartShape { BodyPart part; float x, y, w, h; bool round; const char* label; };
+const PartShape kBodyShapes[] = {
+    {BodyPart::Head, -6.5f, 1.5f, 13.0f, 14.0f, true, "Head"},
+    {BodyPart::Torso, -10.0f, 16.5f, 20.0f, 30.5f, false, "Torso"},
+    {BodyPart::RightArm, -15.8f, 17.5f, 5.4f, 27.5f, false, "Right arm"},
+    {BodyPart::LeftArm, 10.4f, 17.5f, 5.4f, 27.5f, false, "Left arm"},
+    {BodyPart::RightHand, -16.2f, 45.5f, 6.2f, 8.0f, true, "Right hand"},
+    {BodyPart::LeftHand, 10.0f, 45.5f, 6.2f, 8.0f, true, "Left hand"},
+    {BodyPart::RightLeg, -9.6f, 47.5f, 8.8f, 40.5f, false, "Right leg"},
+    {BodyPart::LeftLeg, 0.8f, 47.5f, 8.8f, 40.5f, false, "Left leg"},
+    {BodyPart::RightFoot, -10.8f, 88.5f, 10.0f, 6.0f, false, "Right foot"},
+    {BodyPart::LeftFoot, 0.8f, 88.5f, 10.0f, 6.0f, false, "Left foot"},
+};
+
+std::string capitalise(std::string s) {
+    if (!s.empty()) s[0] = (char)std::toupper((unsigned char)s[0]);
+    return s;
+}
+
+} // namespace
+
 void App::drawHealth() {
     float s = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
-    Rectangle p{W / 2 - 280 * s, H / 2 - 230 * s, 560 * s, 460 * s};
-    ui::panel(p, Color{16, 17, 19, 236});
-    ui::text("You look yourself over", p.x + 20 * s, p.y + 16 * s, 22 * s, ui::theme().text, true);
+    float pw = std::min(860 * s, W - 20), ph = std::min(580 * s, H - 20);
+    Rectangle p{W / 2 - pw / 2, H / 2 - ph / 2, pw, ph};
+    ui::panel(p, Color{16, 17, 19, 238});
+    ui::claim(p);
+    ui::text("You look yourself over", p.x + 20 * s, p.y + 14 * s, 22 * s, ui::theme().text, true);
     const Body& body = game_.player().body;
     const BodyState& b = body.state();
-    float x = p.x + 24 * s, y = p.y + 60 * s, w = p.width - 48 * s;
 
-    // What you can see in a mirror: build, skin colour, wet clothes
+    // --- the body diagram ----------------------------------------------------------
+    float figH = p.height - 110 * s;
+    float u = figH / 100.0f;
+    float cx = p.x + 40 * s + 17 * u, top = p.y + 58 * s;
+    Rectangle fig{cx - 22 * u, top - 4 * s, 44 * u, figH + 8 * s};
+    DrawRectangleRounded(fig, 0.06f, 8, Color{24, 26, 29, 255});
+    int hovered = -1;
+    for (int pass = 0; pass < 2; ++pass)
+        for (const auto& sh : kBodyShapes) {
+            Rectangle r{cx + sh.x * u, top + sh.y * u, sh.w * u, sh.h * u};
+            bool hov = ui::hovered(r) && !menu_.open;
+            if (pass == 0 && hov) hovered = (int)sh.part;
+            if (pass == 1 && (int)sh.part != hovered) continue;   // hovered part drawn last, on top
+            float sev = body.worstSeverityAt(sh.part);
+            float bleed = body.bleedingAt(sh.part);
+            float infl = 0;
+            for (const auto& w : b.wounds) if (w.part == sh.part) infl = std::max(infl, w.infection);
+            Color c{78, 80, 84, 255};
+            if (sev > 0) c = mixColor(c, Color{150, 70, 60, 255}, std::min(1.0f, 0.35f + sev));
+            if (infl > 0.12f) c = mixColor(c, Color{196, 110, 40, 255}, std::min(1.0f, infl * 1.4f));
+            if (bleed > 0.3f) c = mixColor(c, Color{210, 30, 30, 255}, 0.45f + 0.35f * std::sin(time_ * 6.0f));
+            float round = sh.round ? 0.9f : 0.45f;
+            DrawRectangleRounded(r, round, 8, c);
+            // the dressing: a band across the part, white turning brown and red
+            const Dressing& d = body.dressing(sh.part);
+            if (d.on()) {
+                Color band = mixColor(Color{236, 234, 226, 255}, Color{118, 92, 62, 255}, std::min(1.0f, d.dirt * 1.1f));
+                band = mixColor(band, Color{150, 24, 22, 255}, std::min(0.85f, d.blood));
+                float bh = d.kind == DressingKind::Bandaid ? 2.2f * u : std::min(r.height * 0.55f, 9.0f * u);
+                float bw = d.kind == DressingKind::Bandaid ? r.width * 0.55f : r.width + 1.0f * u;
+                Rectangle br{r.x + r.width / 2 - bw / 2, r.y + r.height / 2 - bh / 2, bw, bh};
+                DrawRectangleRounded(br, 0.3f, 4, band);
+                if (d.kind != DressingKind::Bandaid)
+                    for (float yy = br.y + bh * 0.33f; yy < br.y + bh; yy += bh * 0.33f)
+                        DrawLineEx({br.x, yy}, {br.x + br.width, yy}, 1.0f, shade(band, 0.8f));
+            }
+            if ((int)sh.part == hovered) DrawRectangleRoundedLinesEx(r, round, 8, 2.0f * s, ui::theme().accent);
+        }
+    ui::text("R", fig.x + 6 * s, fig.y + 6 * s, 13 * s, ui::theme().dim, true);
+    ui::text("L", fig.x + fig.width - 14 * s, fig.y + 6 * s, 13 * s, ui::theme().dim, true);
+
+    // Right-click a part to treat it; hover to see it close up
+    if (hovered >= 0) {
+        BodyPart part = (BodyPart)hovered;
+        std::string name = capitalise(bodyPartName(part));
+        auto lines = game_.describeBodyPart(part);
+        std::string body = lines.empty() ? "Nothing wrong here." : "";
+        for (const auto& l : lines) body += (body.empty() ? "" : "\n") + l;
+        ui::tooltip(name, body + "\n\nRight-click to treat.");
+        if (input::pressed(MOUSE_BUTTON_RIGHT)) {
+            menu_.options = game_.actionsForBodyPart(part);
+            menu_.title = name;
+            menu_.pos = GetMousePosition();
+            menu_.open = !menu_.options.empty();
+        }
+    }
+
+    // --- what you notice -------------------------------------------------------------
+    float x = fig.x + fig.width + 28 * s, y = p.y + 60 * s, w = p.x + p.width - x - 24 * s;
     float fatPct = b.fatMassKg / body.bodyMassKg();
     float lean = b.leanMassKg / b.leanBaselineKg;
     std::string build = lean < 0.7f ? "You are skin and bones." : lean < 0.8f ? "You look gaunt, your ribs show." :
@@ -1355,24 +1844,31 @@ void App::drawHealth() {
     if (b.wetness > 0.15f) y = ui::paragraph(b.wetness > 0.6f ? "Your clothes are soaked through." : "Your clothes are damp.", x, y, w, 16 * s, ui::theme().text);
     if (b.feverC > 0.8f) y = ui::paragraph("Your forehead feels hot.", x, y, w, 16 * s, ui::theme().text);
     if (b.diarrhea > 0.3f) y = ui::paragraph("You've had to run to the toilet a lot.", x, y, w, 16 * s, ui::theme().text);
-    y += 14 * s;
+    if (body.totalBleeding() > 2.0f) y = ui::paragraph("There's blood on your clothes, and it keeps coming.", x, y, w, 16 * s, ui::theme().bad);
+    y += 12 * s;
     ui::text("Wounds", x, y, 18 * s, ui::theme().accent, true);
     y += 28 * s;
-    if (b.wounds.empty()) { ui::text("No wounds.", x, y, 15 * s, ui::theme().dim); y += 22 * s; }
-    for (const auto& wd : b.wounds) {
-        std::string sev = wd.severity > 0.6f ? "Deep" : wd.severity > 0.3f ? "Nasty" : "Small";
-        std::string line = sev + " " + woundTypeName(wd.type) + " on your " + bodyPartName(wd.part);
-        std::string state;
-        if (wd.bleeding > 0.5f && !(wd.bandaged && wd.bandageDirt < 0.8f)) state += wd.bleeding > 10 ? "bleeding heavily" : "bleeding";
-        if (wd.bandaged) state += std::string(state.empty() ? "" : ", ") + (wd.bandageDirt > 0.6f ? "dirty bandage" : "bandaged");
-        if (wd.infection > 0.3f) state += std::string(state.empty() ? "" : ", ") + (wd.infection > 0.6f ? "swollen and oozing" : "red and warm");
-        else if (wd.healed > 0.5f) state += std::string(state.empty() ? "" : ", ") + "healing";
-        ui::text(line, x, y, 15 * s, ui::theme().text);
-        if (!state.empty()) ui::text(state, x + 20 * s, y + 18 * s, 14 * s, wd.infection > 0.3f || wd.bleeding > 0.5f ? ui::theme().bad : ui::theme().dim);
-        y += 42 * s;
-        if (y > p.y + p.height - 60 * s) break;
+    bool any = false;
+    for (const auto& sh : kBodyShapes) {
+        auto lines = game_.describeBodyPart(sh.part);
+        if (lines.empty()) continue;
+        any = true;
+        bool hot = (int)sh.part == hovered;
+        ui::text(capitalise(bodyPartName(sh.part)), x, y, 15 * s, hot ? ui::theme().accent : ui::theme().text, true);
+        y += 20 * s;
+        for (const auto& l : lines) {
+            bool bad = l.find("bleed") != std::string::npos || l.find("seeping") != std::string::npos || l.find("swollen") != std::string::npos ||
+                       l.find("red around") != std::string::npos || l.find("filthy") != std::string::npos || l.find("dirty") != std::string::npos;
+            y = ui::paragraph(l, x + 12 * s, y, w - 12 * s, 14 * s, bad ? ui::theme().bad : ui::theme().dim);
+        }
+        y += 6 * s;
+        if (y > p.y + p.height - 150 * s) { ui::text("...", x, y, 15 * s, ui::theme().dim); break; }
     }
-    if (ui::button({p.x + p.width / 2 - 70 * s, p.y + p.height - 50 * s, 140 * s, 36 * s}, "Close")) overlay_ = Overlay::None;
+    if (!any) { ui::text("No wounds.", x, y, 15 * s, ui::theme().dim); y += 22 * s; }
+    ui::paragraph("Hover over a body part to look closer. Right-click it to disinfect, put on a bandaid, bandage or rag, "
+                  "or take a dirty one off. Dirty dressings can be washed in water.",
+                  x, p.y + p.height - 78 * s, w, 13 * s, ui::theme().dim);
+    if (ui::button({p.x + p.width - 160 * s, p.y + p.height - 50 * s, 140 * s, 36 * s}, "Close")) overlay_ = Overlay::None;
 }
 
 // ---------------------------------------------------------------------------
@@ -1399,10 +1895,38 @@ void App::buildMapTexture() {
                 case Zone::Hospital: c = {214, 176, 170, 255}; break;
                 case Zone::Paved: c = {214, 206, 192, 255}; break;
                 case Zone::Parking: c = {196, 196, 196, 255}; break;
+                case Zone::ForestDense: c = {76, 104, 66, 255}; break;
+                case Zone::Thicket: c = {58, 84, 52, 255}; break;
+                case Zone::Marsh: c = {112, 138, 128, 255}; break;
+                case Zone::Rock: c = {150, 148, 140, 255}; break;
                 default: c = {120, 120, 120, 255}; break;
             }
             px[y * w + x] = c;
         }
+    // Hills: shaded from the north-west, with brown contour lines every 5 m
+    // (every 25 m a little darker), like an orienteering map
+    if (m.hasElevation()) {
+        float mpp = m.terrainMetresPerPixel();
+        std::vector<float> row0(w), row1(w);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) row1[x] = m.elevationLinear((x + 0.5f) * mpp, (y + 0.5f) * mpp);
+            for (int x = 0; x < w; ++x) {
+                Color& c = px[y * w + x];
+                bool water = m.zoneAtPixel(x, y) == Zone::Water;
+                float hgt = row1[x];
+                float gx = (row1[std::min(w - 1, x + 1)] - row1[std::max(0, x - 1)]) / (2 * mpp);
+                float gy = y > 0 ? (hgt - row0[x]) / mpp : 0.0f;
+                float shadeF = water ? 1.0f : std::clamp(1.0f - (gx + gy) * 1.6f, 0.72f, 1.18f);
+                c = shade(c, shadeF);
+                if (!water && y > 0 && x > 0) {
+                    int k = (int)std::floor(hgt / 5.0f);
+                    bool line = k != (int)std::floor(row0[x] / 5.0f) || k != (int)std::floor(row1[x - 1] / 5.0f);
+                    if (line) c = mixColor(c, k % 5 == 0 ? Color{150, 90, 40, 255} : Color{176, 120, 66, 255}, k % 5 == 0 ? 0.75f : 0.5f);
+                }
+            }
+            std::swap(row0, row1);
+        }
+    }
     mapTex_ = LoadTextureFromImage(img);
     SetTextureFilter(mapTex_, TEXTURE_FILTER_BILINEAR);
     UnloadImage(img);
@@ -1484,6 +2008,11 @@ void App::drawMap() {
     EndScissorMode();
     ui::text("Alingsås", area.x + 16 * s, area.y + 12 * s, 26 * s, Color{40, 40, 44, 255}, true);
     ui::text("Drag to pan, wheel to zoom, M to close", area.x + 16 * s, area.y + 44 * s, 14 * s, Color{60, 60, 64, 255});
+    if (m.hasElevation()) {   // the contour lines are 5 m apart
+        float here = m.elevation(game_.player().pos.x, game_.player().pos.y);
+        ui::text(fmt("You are %.0f m above sea level. Contours every 5 m.", here), area.x + 16 * s, area.y + 64 * s, 14 * s,
+                 Color{60, 60, 64, 255});
+    }
     // scale bar: 500 m
     float bar = 500.0f / mpp * k;
     DrawRectangle((int)(area.x + 20 * s), (int)(area.y + area.height - 30 * s), (int)bar, (int)(4 * s), Color{40, 40, 40, 255});
@@ -1540,12 +2069,23 @@ void App::loadSettings() {
     settings_.fullscreen = s->flag("fullscreen", false);
     settings_.vsync = s->flag("vsync", settings_.vsync);
     settings_.fpsCap = std::clamp((int)s->num("fps_cap", (float)settings_.fpsCap), 0, 360);
-    settings_.msaa = s->flag("msaa", settings_.msaa != 0) ? 1 : 0;
-    settings_.gfx.shadows = std::clamp((int)s->num("shadows", (float)settings_.gfx.shadows), 0, 3);
-    settings_.gfx.maxLights = std::clamp((int)s->num("max_lights", (float)settings_.gfx.maxLights), 8, 32);
+    // Settings saved before the render resolution option existed keep the
+    // newer (lighter) web defaults for anti-aliasing, shadows and lights
+    bool older = !s->values.count("render_scale");
+#ifdef __EMSCRIPTEN__
+    if (!older)
+#else
+    (void)older;
+#endif
+    {
+        settings_.msaa = s->flag("msaa", settings_.msaa != 0) ? 1 : 0;
+        settings_.gfx.shadows = std::clamp((int)s->num("shadows", (float)settings_.gfx.shadows), 0, 3);
+        settings_.gfx.maxLights = std::clamp((int)s->num("max_lights", (float)settings_.gfx.maxLights), 8, 32);
+    }
     settings_.gfx.weather = s->flag("weather_effects", settings_.gfx.weather);
     settings_.gfx.visionCone = s->flag("vision_cone", settings_.gfx.visionCone);
     settings_.gfx.brightness = std::clamp(s->num("brightness", settings_.gfx.brightness), 0.7f, 1.4f);
+    settings_.gfx.renderScale = std::clamp((int)s->num("render_scale", (float)settings_.gfx.renderScale), 0, 100);
     settings_.uiScale = std::clamp(s->num("ui_scale", settings_.uiScale), 0.8f, 1.3f);
     settings_.screenEffects = s->flag("screen_effects", settings_.screenEffects);
     settings_.showFps = s->flag("show_fps", false);
@@ -1571,6 +2111,7 @@ void App::saveSettings() {
     set("weather_effects", flag(settings_.gfx.weather));
     set("vision_cone", flag(settings_.gfx.visionCone));
     set("brightness", fmt("%.2f", settings_.gfx.brightness));
+    set("render_scale", fmt("%d", settings_.gfx.renderScale));
     set("ui_scale", fmt("%.2f", settings_.uiScale));
     set("screen_effects", flag(settings_.screenEffects));
     set("show_fps", flag(settings_.showFps));

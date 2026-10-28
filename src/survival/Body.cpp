@@ -91,6 +91,16 @@ const char* bodyPartName(BodyPart p) {
                                   "right hand", "left leg", "right leg", "left foot", "right foot"};
     return names[(int)p];
 }
+const char* dressingName(DressingKind k) {
+    static const char* names[] = {"none", "bandaid", "bandage", "rag"};
+    return names[(int)k];
+}
+DressingKind dressingFromString(const std::string& s) {
+    for (int i = 1; i < (int)DressingKind::Count; ++i)
+        if (s == dressingName((DressingKind)i)) return (DressingKind)i;
+    return DressingKind::None;
+}
+
 const char* woundTypeName(WoundType t) {
     static const char* names[] = {"scratch", "laceration", "bite", "puncture", "burn"};
     return names[(int)t];
@@ -182,15 +192,70 @@ float Body::thirst() const {
     return ramp(s_.waterDeficitL, 0.3f, 5.0f);
 }
 
+namespace {
+// Fraction of a wound's bleeding that gets past its dressing
+float dressingLeak(const Dressing& d, const Wound& w) {
+    float base = 1.0f;
+    switch (d.kind) {
+        case DressingKind::Bandaid: base = w.severity <= 0.35f ? 0.25f : 0.9f; break;   // only for small cuts
+        case DressingKind::Rag: base = 0.3f; break;
+        case DressingKind::Bandage: base = 0.12f; break;
+        default: return 1.0f;
+    }
+    // Soaked through: the blood seeps past
+    return lerp(base, 0.8f, ramp(d.blood, 0.75f, 1.0f));
+}
+// How much a dressing presses the wound closed (helps clotting), 0..1
+float dressingPressure(const Dressing& d, const Wound& w) {
+    switch (d.kind) {
+        case DressingKind::Bandaid: return w.severity <= 0.35f ? 0.5f : 0.05f;
+        case DressingKind::Rag: return 0.7f;
+        case DressingKind::Bandage: return 1.0f;
+        default: return 0.0f;
+    }
+}
+float dressingCapacityMl(DressingKind k) {
+    return k == DressingKind::Bandaid ? 6.0f : k == DressingKind::Rag ? 50.0f : 80.0f;
+}
+} // namespace
+
 float Body::totalBleeding() const {
     float b = 0;
-    for (const auto& w : s_.wounds) b += w.bandaged && w.bandageDirt < 0.8f ? w.bleeding * 0.1f : w.bleeding;
+    for (const auto& w : s_.wounds) b += w.bleeding * dressingLeak(s_.dressings[(size_t)w.part], w);
     return b;
+}
+
+float Body::bleedingAt(BodyPart part) const {
+    float b = 0;
+    for (const auto& w : s_.wounds)
+        if (w.part == part) b += w.bleeding * dressingLeak(s_.dressings[(size_t)part], w);
+    return b;
+}
+
+bool Body::woundedAt(BodyPart part) const {
+    for (const auto& w : s_.wounds)
+        if (w.part == part) return true;
+    return false;
+}
+
+float Body::worstSeverityAt(BodyPart part) const {
+    float m = 0;
+    for (const auto& w : s_.wounds)
+        if (w.part == part) m = std::max(m, w.severity * (1.0f - 0.7f * w.healed));
+    return m;
+}
+
+float Body::impairment(BodyPart part) const {
+    float v = 0;
+    for (const auto& w : s_.wounds)
+        if (w.part == part) v += w.severity * (1.0f - w.healed) * 1.3f + w.infection * 0.5f;
+    return clamp01(v) * (1.0f - 0.35f * s_.painkiller);
 }
 
 float Body::pain() const {
     float p = 0;
     for (const auto& w : s_.wounds) p += w.severity * (1.0f - w.healed) * 0.7f + w.infection * 0.4f;
+    p += s_.sting * 0.6f;
     for (const auto& inf : s_.infections)
         if (inf.type == Pathogen::Trichinosis && inf.ageH > 48) p += inf.load * 0.5f;
     p += s_.diarrhea * 0.3f;
@@ -266,20 +331,46 @@ void Body::vomit() {
     emit(BodyEvent::Vomited);
 }
 
-void Body::bandageWound(int index, bool sterile) {
-    if (index < 0 || index >= (int)s_.wounds.size()) return;
-    Wound& w = s_.wounds[index];
-    w.bandaged = true;
-    w.bandageDirt = sterile ? 0.0f : 0.4f;
-    if (!sterile) w.contamination = std::min(1.0f, w.contamination + 0.1f);
+Dressing Body::applyDressing(BodyPart part, DressingKind kind, bool sterile, float dirt) {
+    Dressing old = removeDressing(part);
+    Dressing& d = s_.dressings[(size_t)part];
+    d.kind = kind;
+    d.dirt = clamp01(dirt);
+    d.blood = 0;
+    d.hours = 0;
+    d.sterile = sterile;
+    // A dirty dressing rubs its dirt into the wound
+    if (dirt > 0.25f)
+        for (auto& w : s_.wounds)
+            if (w.part == part) w.contamination = std::min(1.0f, w.contamination + 0.35f * dirt);
+    return old;
 }
 
-void Body::disinfectWound(int index) {
-    if (index < 0 || index >= (int)s_.wounds.size()) return;
-    Wound& w = s_.wounds[index];
-    w.disinfected = true;
-    w.contamination *= 0.1f;
-    w.infection = std::max(0.0f, w.infection - 0.15f);
+Dressing Body::removeDressing(BodyPart part) {
+    Dressing old = s_.dressings[(size_t)part];
+    s_.dressings[(size_t)part] = Dressing{};
+    return old;
+}
+
+void Body::disinfect(BodyPart part, float strength) {
+    for (auto& w : s_.wounds) {
+        if (w.part != part) continue;
+        w.contamination *= 1.0f - 0.9f * clamp01(strength);
+        w.infection = std::max(0.0f, w.infection - 0.15f * strength);
+        s_.sting = std::min(1.0f, s_.sting + 0.35f + 0.4f * w.severity);
+    }
+}
+
+void Body::soil(BodyPart part, float amount) {
+    if (amount <= 0) return;
+    Dressing& d = s_.dressings[(size_t)part];
+    if (d.on()) {
+        d.dirt = std::min(1.0f, d.dirt + amount);
+        return;
+    }
+    // An open wound picks up dirt too, a little more slowly
+    for (auto& w : s_.wounds)
+        if (w.part == part && w.healed < 0.8f) w.contamination = std::min(1.0f, w.contamination + amount * 0.5f);
 }
 
 void Body::takePainkiller(float strength) {
@@ -655,27 +746,55 @@ void Body::updateWounds(float dt) {
     float immune = immuneStrength();
     // Healing needs protein, energy and vitamin C
     float nutrition = ramp(s_.vitaminCMg, 50.0f, 400.0f) * lerp(0.4f, 1.0f, 1.0f - ramp(s_.energyDebtKcal, 5000.0f, 30000.0f));
+    s_.sting = std::max(0.0f, s_.sting - dt / 6.0f);
+
+    // Dressings age: sweat and skin make them grubby over a few days
+    for (auto& d : s_.dressings) {
+        if (!d.on()) continue;
+        d.hours += h;
+        d.dirt = std::min(1.0f, d.dirt + h / 100.0f);
+    }
+
     float bleedTotal = 0;
     for (auto& w : s_.wounds) {
-        float clot = 0.04f * (1.0f - 0.8f * w.severity) * ramp(s_.vitaminCMg, 30.0f, 200.0f);
+        Dressing& d = s_.dressings[(size_t)w.part];
+        // Pressure from a dressing helps the blood clot
+        float pressure = d.on() ? dressingPressure(d, w) : 0.0f;
+        float clot = 0.04f * (1.0f - 0.8f * w.severity) * ramp(s_.vitaminCMg, 30.0f, 200.0f) * (1.0f + 1.5f * pressure);
         w.bleeding *= std::exp(-clot * dt);
         if (w.bleeding < 0.05f) w.bleeding = 0;
-        bool bandageWorks = w.bandaged && w.bandageDirt < 0.8f;
-        bleedTotal += bandageWorks ? w.bleeding * 0.1f : w.bleeding;
+        float leak = d.on() ? dressingLeak(d, w) : 1.0f;
+        bleedTotal += w.bleeding * leak;
 
-        if (w.bandaged) w.bandageDirt = std::min(1.0f, w.bandageDirt + h / 48.0f);
-        float contamination = w.contamination + (w.bandaged && w.bandageDirt > 0.7f ? 0.3f : 0.0f);
-        if (w.infection <= 0 && !w.disinfected && rng_.chance(contamination * 0.02f * h)) {
+        if (d.on()) {
+            // Soaks up the blood it holds back, and what the wound weeps
+            float oozeMl = w.severity * (1.0f - w.healed) * 3.0f * h;
+            float heldMl = w.bleeding * (1.0f - leak) * dt;
+            d.blood = std::min(1.0f, d.blood + (heldMl + oozeMl) / dressingCapacityMl(d.kind));
+        }
+
+        // Germs: a clean dressing keeps the wound clean, a dirty one infects it
+        if (d.on()) {
+            float s = d.soiling();
+            if (s > 0.45f) w.contamination = std::min(1.0f, w.contamination + (s - 0.45f) * 0.06f * h);
+            else w.contamination = std::max(0.0f, w.contamination - 0.004f * immune * h);
+        } else {
+            w.contamination = std::max(0.0f, w.contamination - 0.002f * immune * h);
+        }
+        if (w.infection <= 0 && w.healed < 0.9f && rng_.chance(w.contamination * 0.02f * h)) {
             w.infection = 0.05f;
             emit(BodyEvent::WoundInfected);
         }
         if (w.infection > 0) {
-            float grow = 0.012f * (1.0f - 0.7f * immune);
-            float fight = 0.006f * immune + (s_.woundAntibioticH > 0 ? 0.03f : 0.0f) + (w.disinfected ? 0.004f : 0.0f);
+            float filth = d.on() ? std::max(0.0f, d.soiling() - 0.5f) : 0.0f;
+            float grow = 0.012f * (1.0f - 0.7f * immune) + 0.008f * filth;
+            float fight = 0.006f * immune + (s_.woundAntibioticH > 0 ? 0.03f : 0.0f) + (w.contamination < 0.1f ? 0.004f : 0.0f);
             w.infection = clamp01(w.infection + (grow - fight) * h);
             if (w.infection <= 0.001f) w.infection = 0;
         }
-        float healRate = 1.0f / (24.0f * (1.0f + w.severity * 10.0f)) * nutrition * (w.infection > 0.2f ? 0.2f : 1.0f);
+        // A clean cover helps a wound heal; a filthy one slows it down
+        float care = !d.on() ? 1.0f : d.soiling() < 0.4f ? 1.25f : d.soiling() > 0.75f ? 0.85f : 1.0f;
+        float healRate = 1.0f / (24.0f * (1.0f + w.severity * 10.0f)) * nutrition * (w.infection > 0.2f ? 0.2f : 1.0f) * care;
         if (w.bleeding <= 0) w.healed += healRate * h;
     }
     s_.bloodVolumeL -= bleedTotal * dt / 1000.0f;

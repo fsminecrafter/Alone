@@ -37,6 +37,16 @@ struct AnimInput {
     bool working = false;     // searching, butchering, building...
     bool eating = false;
     float time = 0;
+    // What is in the right hand: 0 nothing, 1 something to chop/club with,
+    // 2 a knife (stabs), 3 a rifle
+    int weapon = 0;
+    // The body: injuries and how you feel change how you move
+    float limpL = 0, limpR = 0;       // 0..1 hurt left/right leg or foot
+    float armHurtL = 0, armHurtR = 0; // 0..1 hurt arm or hand (held close, guarded)
+    float hunch = 0;                  // pain, weakness: bent over
+    float shiver = 0;                 // cold
+    float nausea = 0;                 // a hand on the stomach
+    float winded = 0;                 // out of breath: hands on the knees when stopped
 };
 
 class CharacterRig {
@@ -69,6 +79,8 @@ private:
     Matrix rootM_ = MatrixIdentity();
     // smoothed activity weights
     float wMove_ = 0, wRun_ = 0, wSneak_ = 0, wAim_ = 0, wWork_ = 0, wEat_ = 0, wLie_ = 0;
+    float wLimpL_ = 0, wLimpR_ = 0, wArmL_ = 0, wArmR_ = 0, wHunch_ = 0, wShiver_ = 0, wNausea_ = 0, wWinded_ = 0;
+    float wHold_ = 0;   // holding a weapon at the ready
 };
 
 } // namespace alone

@@ -2,9 +2,11 @@
 #include "core/Config.h"
 #include "core/Log.h"
 #include "core/Noise.h"
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -80,6 +82,33 @@ bool MapData::load(const std::string& dir) {
     if (magic != "P5" || width_ <= 0 || height_ <= 0) { Log::error("Bad terrain.pgm"); return false; }
     zones_.resize((size_t)width_ * height_);
     f.read((char*)zones_.data(), zones_.size());
+
+    // --- elevation.pgm: 16-bit heights on a coarse grid ---------------------------------------
+    std::string elevFile = m->str("elevation", "");
+    if (!elevFile.empty() && fileExists(dir + "/" + elevFile)) {
+        std::ifstream ef(dir + "/" + elevFile, std::ios::binary);
+        std::string em;
+        int emax = 0;
+        ef >> em >> ew_ >> eh_ >> emax;
+        ef.get();
+        float unit = m->num("elevation_units", 0.01f);
+        empp_ = m->num("elevation_metres_per_pixel", 8.0f);
+        if (em == "P5" && ew_ > 1 && eh_ > 1 && emax > 255) {
+            std::vector<unsigned char> raw((size_t)ew_ * eh_ * 2);
+            ef.read((char*)raw.data(), (std::streamsize)raw.size());
+            elev_.resize((size_t)ew_ * eh_);
+            elevMin_ = 1e9f;
+            elevMax_ = -1e9f;
+            for (size_t i = 0; i < elev_.size(); ++i) {
+                elev_[i] = ((raw[i * 2] << 8) | raw[i * 2 + 1]) * unit;   // big-endian, as PGM says
+                elevMin_ = std::min(elevMin_, elev_[i]);
+                elevMax_ = std::max(elevMax_, elev_[i]);
+            }
+        } else {
+            Log::warn("Bad %s: no elevation", elevFile.c_str());
+            ew_ = eh_ = 0;
+        }
+    }
 
     if (sp.size() >= 2) spawn_ = Vec2{(float)atof(sp[0].c_str()) * mpp_, (float)atof(sp[1].c_str()) * mpp_};
     else spawn_ = Vec2{widthM() / 2, heightM() / 2};
@@ -224,7 +253,20 @@ bool MapData::load(const std::string& dir) {
                     b.w = atoi(t[5].c_str());
                     b.h = atoi(t[6].c_str());
                     b.name = t.size() >= 8 ? t[7] : "";
+                    for (size_t i = 8; i < t.size(); ++i) {
+                        size_t eq = t[i].find('=');
+                        if (eq == std::string::npos) continue;
+                        std::string k = t[i].substr(0, eq), v = t[i].substr(eq + 1);
+                        if (k == "colour") b.colour = (uint32_t)std::strtoul(v.c_str(), nullptr, 16) | 0x1000000u;
+                        else if (k == "roof_colour") b.roofColour = (uint32_t)std::strtoul(v.c_str(), nullptr, 16) | 0x1000000u;
+                        else if (k == "roof") b.roof = v == "gable" ? 0 : v == "flat" ? 1 : v == "hip" ? 2 : -1;
+                    }
                     osmBuildings_.push_back(b);
+                } else if ((t[0] == "pier" || t[0] == "pier_area") && t.size() >= 5) {
+                    Pier pr;
+                    pr.area = t[0] == "pier_area";
+                    for (size_t i = 1; i + 1 < t.size(); i += 2) pr.pts.push_back(Vec2{num(i), num(i + 1)});
+                    piers_.push_back(pr);
                 }
             }
         }
@@ -316,6 +358,25 @@ RoadHit MapData::nearestStreet(float x, float y) const {
     return best;
 }
 
+bool MapData::pierAt(float x, float y) const {
+    Vec2 p{x, y};
+    for (const auto& pr : piers_) {
+        if (pr.area) {
+            // point in polygon
+            bool in = false;
+            for (size_t i = 0, j = pr.pts.size() - 1; i < pr.pts.size(); j = i++) {
+                const Vec2 &a = pr.pts[i], &b = pr.pts[j];
+                if ((a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) in = !in;
+            }
+            if (in) return true;
+        } else {
+            for (size_t i = 0; i + 1 < pr.pts.size(); ++i)
+                if (distToSegment(p, pr.pts[i], pr.pts[i + 1], nullptr) < 1.3f) return true;
+        }
+    }
+    return false;
+}
+
 bool MapData::osmCovered(float x, float y) const {
     for (const auto& c : coverage_)
         if (x >= c[0] && y >= c[1] && x <= c[2] && y <= c[3]) return true;
@@ -334,6 +395,55 @@ std::string MapData::streetAt(Vec2 p) const {
         if (d < best) { best = d; name = s.name; }
     }
     return name >= 0 ? roadNames_[name] : "";
+}
+
+float MapData::elevAt(int ix, int iy) const {
+    ix = std::clamp(ix, 0, ew_ - 1);
+    iy = std::clamp(iy, 0, eh_ - 1);
+    return elev_[(size_t)iy * ew_ + ix];
+}
+
+float MapData::elevation(float x, float y) const {
+    if (elev_.empty()) return 0.0f;
+    // Catmull-Rom through the 4x4 samples around the point: smooth slopes
+    float fx = x / empp_, fy = y / empp_;
+    int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
+    float tx = fx - ix, ty = fy - iy;
+    auto w = [](float t, float out[4]) {
+        float t2 = t * t, t3 = t2 * t;
+        out[0] = (-t3 + 2 * t2 - t) * 0.5f;
+        out[1] = (3 * t3 - 5 * t2 + 2) * 0.5f;
+        out[2] = (-3 * t3 + 4 * t2 + t) * 0.5f;
+        out[3] = (t3 - t2) * 0.5f;
+    };
+    float wx[4], wy[4];
+    w(tx, wx);
+    w(ty, wy);
+    float h = 0;
+    for (int j = 0; j < 4; ++j) {
+        float row = 0;
+        for (int i = 0; i < 4; ++i) row += wx[i] * elevAt(ix - 1 + i, iy - 1 + j);
+        h += wy[j] * row;
+    }
+    return h;
+}
+
+float MapData::elevationLinear(float x, float y) const {
+    if (elev_.empty()) return 0.0f;
+    float fx = x / empp_, fy = y / empp_;
+    int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
+    float tx = fx - ix, ty = fy - iy;
+    float a = elevAt(ix, iy) + (elevAt(ix + 1, iy) - elevAt(ix, iy)) * tx;
+    float b = elevAt(ix, iy + 1) + (elevAt(ix + 1, iy + 1) - elevAt(ix, iy + 1)) * tx;
+    return a + (b - a) * ty;
+}
+
+float MapData::waterLevel(float x, float y) const {
+    if (elev_.empty()) return 0.0f;
+    // the lowest of the four samples around: the water's own level, even
+    // right by the shore where the land samples are higher
+    int ix = (int)std::floor(x / empp_), iy = (int)std::floor(y / empp_);
+    return std::min(std::min(elevAt(ix, iy), elevAt(ix + 1, iy)), std::min(elevAt(ix, iy + 1), elevAt(ix + 1, iy + 1)));
 }
 
 Zone MapData::zoneAtPixel(int px, int py) const {

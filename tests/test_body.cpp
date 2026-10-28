@@ -143,7 +143,7 @@ TEST(bleeding_wound_bandaged_survives) {
     Wound w; w.severity = 0.7f; w.bleeding = 60.0f; w.type = WoundType::Laceration;
     s.body.addWound(w);
     s.body.update(3, comfy(), Activity::Standing);
-    s.body.bandageWound(0, true);
+    s.body.applyDressing(BodyPart::Torso, DressingKind::Bandage, true, 0);
     s.body.update(600, comfy(), Activity::Resting);
     report("bandaged wound", s);
     CHECK(!s.body.dead());
@@ -154,6 +154,48 @@ TEST(bleeding_wound_bandaged_survives) {
     report("untreated wound", t);
     CHECK(t.body.dead());
     CHECK(t.body.deathCause() == DeathCause::BloodLoss);
+}
+
+TEST(bandaid_is_useless_on_a_deep_cut) {
+    Wound w; w.part = BodyPart::LeftArm; w.severity = 0.7f; w.bleeding = 40.0f; w.type = WoundType::Laceration;
+    Sim a, b, c;
+    a.body.addWound(w); b.body.addWound(w); c.body.addWound(w);
+    a.body.applyDressing(BodyPart::LeftArm, DressingKind::Bandaid, true, 0);
+    b.body.applyDressing(BodyPart::LeftArm, DressingKind::Bandage, true, 0);
+    c.body.applyDressing(BodyPart::LeftArm, DressingKind::Rag, false, 0.1f);
+    std::printf("    bleeding through: bandaid %.1f, bandage %.1f, rag %.1f ml/min\n", a.body.totalBleeding(),
+                b.body.totalBleeding(), c.body.totalBleeding());
+    CHECK(a.body.totalBleeding() > 30.0f);
+    CHECK(b.body.totalBleeding() < 6.0f);
+    CHECK(c.body.totalBleeding() < b.body.totalBleeding() * 3.0f);
+    // On a scratch, a bandaid works
+    Sim d;
+    Wound sc; sc.part = BodyPart::RightHand; sc.severity = 0.15f; sc.bleeding = 3.0f;
+    d.body.addWound(sc);
+    d.body.applyDressing(BodyPart::RightHand, DressingKind::Bandaid, true, 0);
+    CHECK(d.body.totalBleeding() < 1.0f);
+}
+
+TEST(dirty_dressing_infects_clean_one_protects) {
+    Wound w; w.part = BodyPart::LeftLeg; w.severity = 0.5f; w.bleeding = 0; w.contamination = 0.2f;
+    int infectedDirty = 0, infectedClean = 0;
+    for (int trial = 0; trial < 12; ++trial) {
+        Sim dirty, clean;
+        dirty.body = Body(100 + trial); clean.body = Body(100 + trial);
+        dirty.body.addWound(w); clean.body.addWound(w);
+        clean.body.disinfect(BodyPart::LeftLeg);
+        clean.body.applyDressing(BodyPart::LeftLeg, DressingKind::Bandage, true, 0);
+        dirty.body.applyDressing(BodyPart::LeftLeg, DressingKind::Rag, false, 0.9f);
+        for (int i = 0; i < 4 * 24 * 2; ++i) {   // two days
+            dirty.body.update(15, comfy(), Activity::Standing);
+            clean.body.update(15, comfy(), Activity::Standing);
+            dirty.body.soil(BodyPart::LeftLeg, 0.01f);
+        }
+        if (!dirty.body.state().wounds.empty() && dirty.body.state().wounds[0].infection > 0) ++infectedDirty;
+        if (!clean.body.state().wounds.empty() && clean.body.state().wounds[0].infection > 0) ++infectedClean;
+    }
+    std::printf("    infected after 2 days: %d/12 under a filthy rag, %d/12 under a clean bandage\n", infectedDirty, infectedClean);
+    CHECK(infectedDirty > infectedClean + 3);
 }
 
 TEST(food_poisoning_resolves) {

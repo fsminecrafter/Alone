@@ -19,7 +19,27 @@ struct Campfire {
     float fuelMinutes = 0;   // burns while > 0
     bool lit = false;
     int id = 0;
+    bool stove = false;      // a storm kitchen: burns red alcohol from its burner
+    float fuelMl = 0;        // stove: alcohol in the burner (100 ml lasts ~25 min)
 };
+
+// A pitched tent: shelter from wind and rain, somewhere warmer to sleep.
+struct Tent {
+    int id = 0;
+    IRect rect;              // the tiles it covers
+    int dir = 0;             // which way the door faces: 0 N, 1 E, 2 S, 3 W
+    std::string item;        // the item it packs back into
+};
+
+// Carpentry: things the player has built. Edge pieces sit on the north (dir 0)
+// or west (dir 1) edge of a tile, like the walls of the houses.
+enum class BuildKind : uint8_t { Wall, Door, Window, Floor, Roof, Crate, RainCollector, Bed, Fence, Count };
+struct Built {
+    BuildKind kind = BuildKind::Wall;
+    int x = 0, y = 0, dir = 0;
+};
+const char* buildKindName(BuildKind k);
+inline bool isEdgeBuild(BuildKind k) { return k == BuildKind::Wall || k == BuildKind::Door || k == BuildKind::Window; }
 
 struct Snare {
     Vec2 pos;
@@ -60,6 +80,15 @@ public:
     const Building* building(int id) const { return gen_.building(id); }
     bool indoors(Vec2 p);
 
+    // --- height (metres above sea level) ----------------------------------
+    float terrainHeight(Vec2 p) const { return map_.elevation(p.x, p.y); }   // the natural ground
+    // What you stand on there: a building's floor, a jetty, the bottom of
+    // shallow water, or the ground
+    float standHeight(Vec2 p);
+    // How steep the ground is going in `dir` (unit): rise per metre, + uphill.
+    // Level inside buildings.
+    float slope(Vec2 p, Vec2 dir);
+
     // --- movement --------------------------------------------------------
     bool tileBlocked(int x, int y);                           // water, solid props
     bool edgeBlocked(int x, int y, int dx, int dy);           // wall/closed door between neighbours
@@ -89,10 +118,23 @@ public:
     enum class WaterSource { None, Lake, ToiletTank, RainBarrel };
     WaterSource waterSourceNear(Vec2 p, float reach, int* tx = nullptr, int* ty = nullptr);
     float takeTankWater(int x, int y, float ml);   // returns ml taken
+    float tankWater(int x, int y);                 // ml left (without taking any)
 
     // Foraging state of a tile
     bool harvested(int x, int y, float regrowDays);
     void markHarvested(int x, int y);
+
+    // --- shelters & carpentry ---------------------------------------------
+    std::vector<Tent>& tents() { return tents_; }
+    Tent* tentAt(Vec2 p);
+    bool canPitch(const IRect& r, std::string* why);
+    std::vector<Built>& builds() { return builds_; }
+    bool canBuild(const Built& b, std::string* why);
+    void addBuild(const Built& b);
+    bool removeBuild(const Built& b);
+    const Built* builtAt(int x, int y, BuildKind kind) const;
+    const Built* builtEdgeAt(int x, int y, int dir) const;
+    bool roofAt(int x, int y) const;
 
     // --- fires & snares ---------------------------------------------------
     std::vector<Campfire>& campfires() { return fires_; }
@@ -130,6 +172,9 @@ private:
     std::unordered_map<int64_t, float> tankWater_;
     std::vector<Campfire> fires_;
     std::vector<Snare> snares_;
+    std::vector<Tent> tents_;
+    std::vector<Built> builds_;
+    void applyBuild(const Built& b, bool on);
     int nextId_ = 1;
     float clockTime_ = 0;
     uint32_t versionCounter_ = 1;

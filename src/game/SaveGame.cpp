@@ -10,7 +10,7 @@ namespace alone {
 
 class SaveGame {
 public:
-    static constexpr int kVersion = 2;
+    static constexpr int kVersion = 4;   // 3: dressings per body part, 4: tents, carpentry, stoves
 
     // --- writing -------------------------------------------------------------
     static void item(std::ostream& o, const ItemInstance& it) {
@@ -33,7 +33,8 @@ public:
         o << g.seed_ << ' ' << w.clock().totalMinutes() << ' ' << w.snowCover_ << ' ' << w.wetness_ << '\n';
         // player
         const Player& p = g.player_;
-        o << p.pos.x << ' ' << p.pos.y << ' ' << p.facing << ' ' << p.stamina << ' ' << p.weaponUid << ' ' << p.flashlightOn << '\n';
+        o << p.pos.x << ' ' << p.pos.y << ' ' << p.facing << ' ' << p.stamina << ' ' << p.weaponUid << ' ' << p.flashlightOn << ' '
+          << p.knowsCarpentry << '\n';
         items(o, p.inventory.items());
         for (const auto& wi : p.worn) item(o, wi);
         // body
@@ -48,8 +49,11 @@ public:
           << b.nauseaExtra << ' ' << b.painkiller << ' ' << b.minutesAlive << ' ' << b.woundAntibioticH << '\n';
         o << b.wounds.size() << '\n';
         for (const auto& wd : b.wounds)
-            o << (int)wd.part << ' ' << (int)wd.type << ' ' << wd.severity << ' ' << wd.bleeding << ' ' << wd.bandaged << ' '
-              << wd.disinfected << ' ' << wd.bandageDirt << ' ' << wd.contamination << ' ' << wd.infection << ' ' << wd.healed << '\n';
+            o << (int)wd.part << ' ' << (int)wd.type << ' ' << wd.severity << ' ' << wd.bleeding << ' ' << wd.contamination << ' '
+              << wd.infection << ' ' << wd.healed << '\n';
+        for (const auto& d : b.dressings)
+            o << (int)d.kind << ' ' << d.dirt << ' ' << d.blood << ' ' << d.hours << ' ' << d.sterile << '\n';
+        o << b.sting << '\n';
         o << b.infections.size() << '\n';
         for (const auto& inf : b.infections)
             o << (int)inf.type << ' ' << inf.incubationH << ' ' << inf.load << ' ' << inf.peak << ' ' << inf.immunity << ' ' << inf.ageH
@@ -74,9 +78,15 @@ public:
         o << w.tankWater_.size() << '\n';
         for (const auto& [k, ml] : w.tankWater_) o << k << ' ' << ml << '\n';
         o << w.fires_.size() << '\n';
-        for (const auto& f : w.fires_) o << f.pos.x << ' ' << f.pos.y << ' ' << f.fuelMinutes << ' ' << f.lit << ' ' << f.id << '\n';
+        for (const auto& f : w.fires_)
+            o << f.pos.x << ' ' << f.pos.y << ' ' << f.fuelMinutes << ' ' << f.lit << ' ' << f.id << ' ' << f.stove << ' ' << f.fuelMl << '\n';
         o << w.snares_.size() << '\n';
         for (const auto& s : w.snares_) o << s.pos.x << ' ' << s.pos.y << ' ' << s.minutesSet << ' ' << s.caught << ' ' << s.id << '\n';
+        o << w.tents_.size() << '\n';
+        for (const auto& t : w.tents_)
+            o << t.id << ' ' << t.rect.x << ' ' << t.rect.y << ' ' << t.rect.w << ' ' << t.rect.h << ' ' << t.dir << ' ' << t.item << '\n';
+        o << w.builds_.size() << '\n';
+        for (const auto& b : w.builds_) o << (int)b.kind << ' ' << b.x << ' ' << b.y << ' ' << b.dir << '\n';
         o << w.nextId_ << '\n';
         o << "END\n";
     }
@@ -125,9 +135,10 @@ public:
         w.wetness_ = wet;
         uint32_t maxUid = 0;
         Player& p = g.player_;
-        int flash = 0;
-        in >> p.pos.x >> p.pos.y >> p.facing >> p.stamina >> p.weaponUid >> flash;
+        int flash = 0, carpentry = 0;
+        in >> p.pos.x >> p.pos.y >> p.facing >> p.stamina >> p.weaponUid >> flash >> carpentry;
         p.flashlightOn = flash;
+        p.knowsCarpentry = carpentry;
         items(g, in, p.inventory.items(), maxUid);
         for (auto& wi : p.worn) { item(g, in, wi, maxUid); }
         BodyState& b = p.body.mutableState();
@@ -144,11 +155,18 @@ public:
         b.wounds.clear();
         for (size_t i = 0; i < n && in; ++i) {
             Wound wd;
-            int part, type, band, dis;
-            in >> part >> type >> wd.severity >> wd.bleeding >> band >> dis >> wd.bandageDirt >> wd.contamination >> wd.infection >> wd.healed;
-            wd.part = (BodyPart)part; wd.type = (WoundType)type; wd.bandaged = band; wd.disinfected = dis;
+            int part, type;
+            in >> part >> type >> wd.severity >> wd.bleeding >> wd.contamination >> wd.infection >> wd.healed;
+            wd.part = (BodyPart)part; wd.type = (WoundType)type;
             b.wounds.push_back(wd);
         }
+        for (auto& d : b.dressings) {
+            int kind, sterile;
+            in >> kind >> d.dirt >> d.blood >> d.hours >> sterile;
+            d.kind = (DressingKind)std::clamp(kind, 0, (int)DressingKind::Count - 1);
+            d.sterile = sterile;
+        }
+        in >> b.sting;
         in >> n;
         b.infections.clear();
         for (size_t i = 0; i < n && in; ++i) {
@@ -196,9 +214,10 @@ public:
         in >> n;
         w.fires_.clear();
         for (size_t i = 0; i < n && in; ++i) {
-            Campfire f; int lit;
-            in >> f.pos.x >> f.pos.y >> f.fuelMinutes >> lit >> f.id;
+            Campfire f; int lit, stove;
+            in >> f.pos.x >> f.pos.y >> f.fuelMinutes >> lit >> f.id >> stove >> f.fuelMl;
             f.lit = lit;
+            f.stove = stove;
             w.fires_.push_back(f);
         }
         in >> n;
@@ -209,6 +228,21 @@ public:
             s.caught = false;   // the catch itself isn't saved; the snare is reset
             (void)caught;
             w.snares_.push_back(s);
+        }
+        in >> n;
+        w.tents_.clear();
+        for (size_t i = 0; i < n && in; ++i) {
+            Tent t;
+            in >> t.id >> t.rect.x >> t.rect.y >> t.rect.w >> t.rect.h >> t.dir >> t.item;
+            w.tents_.push_back(t);
+        }
+        in >> n;
+        w.builds_.clear();
+        for (size_t i = 0; i < n && in; ++i) {
+            Built b; int kind;
+            in >> kind >> b.x >> b.y >> b.dir;
+            b.kind = (BuildKind)std::clamp(kind, 0, (int)BuildKind::Count - 1);
+            w.builds_.push_back(b);
         }
         in >> w.nextId_;
         std::string end;

@@ -71,16 +71,35 @@ void Renderer::addRoadSurfaces(MeshBuilder& mb, World& world, int x0, int y0) {
     const MapData& map = world.map();
     Color asphalt = groundColour(Ground::Asphalt), walk = groundColour(Ground::Sidewalk), gravel = groundColour(Ground::Gravel);
     Color curb = hexColor(0xb0aea8);
+    // In pieces of 2 m or so, each corner on the ground under it
     auto strip = [&](Vec2 a, Vec2 b, float hw, float y, Color c) {
         Vec2 d = (b - a).normalized();
-        Vec2 n{-d.y * hw, d.x * hw};
-        mb.quad(V(a.x - n.x, y, a.y - n.y), V(a.x + n.x, y, a.y + n.y), V(b.x + n.x, y, b.y + n.y), V(b.x - n.x, y, b.y - n.y), c);
+        Vec2 n{-d.y, d.x};
+        float len = (b - a).length();
+        int along = std::max(1, (int)std::ceil(len / 2.0f)), across = std::max(1, (int)std::ceil(hw * 2.0f / 2.5f));
+        for (int i = 0; i < along; ++i) {
+            Vec2 p0 = a + d * (len * i / along), p1 = a + d * (len * (i + 1) / along);
+            for (int j = 0; j < across; ++j) {
+                float s0 = -hw + 2 * hw * j / across, s1 = -hw + 2 * hw * (j + 1) / across;
+                Vec2 q00 = p0 + n * s0, q01 = p0 + n * s1, q11 = p1 + n * s1, q10 = p1 + n * s0;
+                mb.quad(V(q00.x, y, q00.y), V(q01.x, y, q01.y), V(q11.x, y, q11.y), V(q10.x, y, q10.y), c);
+            }
+        }
     };
     auto disc = [&](Vec2 c, float r, float y, Color col) {
         const int n = 12;
+        int rings = r > 3.0f ? 2 : 1;
         for (int i = 0; i < n; ++i) {
             float a0 = 2 * PI * i / n, a1 = 2 * PI * (i + 1) / n;
-            mb.tri(V(c.x, y, c.y), V(c.x + std::cos(a1) * r, y, c.y + std::sin(a1) * r), V(c.x + std::cos(a0) * r, y, c.y + std::sin(a0) * r), col);
+            Vec2 u0{std::cos(a0), std::sin(a0)}, u1{std::cos(a1), std::sin(a1)};
+            float ri = rings == 2 ? r * 0.5f : 0.0f;
+            if (rings == 2) {
+                mb.tri(V(c.x, y, c.y), V(c.x + u1.x * ri, y, c.y + u1.y * ri), V(c.x + u0.x * ri, y, c.y + u0.y * ri), col);
+                mb.quad(V(c.x + u0.x * ri, y, c.y + u0.y * ri), V(c.x + u1.x * ri, y, c.y + u1.y * ri),
+                        V(c.x + u1.x * r, y, c.y + u1.y * r), V(c.x + u0.x * r, y, c.y + u0.y * r), col);
+            } else {
+                mb.tri(V(c.x, y, c.y), V(c.x + u1.x * r, y, c.y + u1.y * r), V(c.x + u0.x * r, y, c.y + u0.y * r), col);
+            }
         }
     };
     for (int pass = 0; pass < 3; ++pass)
@@ -97,33 +116,38 @@ void Renderer::addRoadSurfaces(MeshBuilder& mb, World& world, int x0, int y0) {
             float extra = s.cls == RoadClass::Motorway ? 1.6f : town ? 1.8f : 0.8f;
             if (pass == 0) {
                 mb.material(town ? MPaving : MDirt);
-                strip(s.a, s.b, s.halfWidth + extra, 0.004f, town ? walk : gravel);
-                disc(s.a, s.halfWidth + extra, 0.004f, town ? walk : gravel);
-                disc(s.b, s.halfWidth + extra, 0.004f, town ? walk : gravel);
+                strip(s.a, s.b, s.halfWidth + extra, 0.025f, town ? walk : gravel);
+                disc(s.a, s.halfWidth + extra, 0.025f, town ? walk : gravel);
+                disc(s.b, s.halfWidth + extra, 0.025f, town ? walk : gravel);
             } else if (pass == 1 && town) {
                 mb.material(MConcrete);
-                strip(s.a, s.b, s.halfWidth + 0.18f, 0.006f, curb);   // kerb stones
-                disc(s.a, s.halfWidth + 0.18f, 0.006f, curb);
-                disc(s.b, s.halfWidth + 0.18f, 0.006f, curb);
+                strip(s.a, s.b, s.halfWidth + 0.18f, 0.035f, curb);   // kerb stones
+                disc(s.a, s.halfWidth + 0.18f, 0.035f, curb);
+                disc(s.b, s.halfWidth + 0.18f, 0.035f, curb);
             } else if (pass == 2) {
                 mb.material(MAsphalt);
-                strip(s.a, s.b, s.halfWidth, 0.008f, asphalt);
-                disc(s.a, s.halfWidth, 0.008f, asphalt);
-                disc(s.b, s.halfWidth, 0.008f, asphalt);
+                strip(s.a, s.b, s.halfWidth, 0.045f, asphalt);
+                disc(s.a, s.halfWidth, 0.045f, asphalt);
+                disc(s.b, s.halfWidth, 0.045f, asphalt);
             }
         }
     mb.material(MPlain);
 }
 
 void Renderer::addRoadMarkings(MeshBuilder& mb, const MapData& map, int x0, int y0) {
-    const float y = 0.014f;
+    const float y = 0.06f;   // just above the asphalt
     Color white = hexColor(0xd8d6ce), yellow = hexColor(0xd0b040);
     mb.material(MPlain);
     auto inChunk = [&](Vec2 p) { return p.x >= x0 && p.y >= y0 && p.x < x0 + kChunkSize && p.y < y0 + kChunkSize; };
     auto stripe = [&](Vec2 a, Vec2 b, float w, Color c) {
         Vec2 d = (b - a).normalized();
         Vec2 n{-d.y * w * 0.5f, d.x * w * 0.5f};
-        mb.quad(V(a.x - n.x, y, a.y - n.y), V(a.x + n.x, y, a.y + n.y), V(b.x + n.x, y, b.y + n.y), V(b.x - n.x, y, b.y - n.y), c);
+        float len = (b - a).length();
+        int k = std::max(1, (int)std::ceil(len / 1.5f));   // in short pieces, to follow the ground
+        for (int i = 0; i < k; ++i) {
+            Vec2 p = a + (b - a) * ((float)i / k), q = a + (b - a) * ((float)(i + 1) / k);
+            mb.quad(V(p.x - n.x, y, p.y - n.y), V(p.x + n.x, y, p.y + n.y), V(q.x + n.x, y, q.y + n.y), V(q.x - n.x, y, q.y - n.y), c);
+        }
     };
     for (const auto& s : map.roads()) {
         float minx = std::min(s.a.x, s.b.x), maxx = std::max(s.a.x, s.b.x);
@@ -208,6 +232,58 @@ void Renderer::addRoadMarkings(MeshBuilder& mb, const MapData& map, int x0, int 
     }
 }
 
+// Walls, doors, windows and roofs the player nailed together
+void Renderer::addBuilt(MeshBuilder& mb, World& world, int x0, int y0) {
+    Color wood = hexColor(0x9c7a50), dark = hexColor(0x6a5034);
+    for (const Built& b : world.builds()) {
+        if (b.x < x0 || b.y < y0 || b.x >= x0 + kChunkSize || b.y >= y0 + kChunkSize) continue;
+        float ax = (float)b.x, az = (float)b.y;
+        bool alongX = b.dir == 0;
+        Vec2 mid = b.kind == BuildKind::Roof ? Vec2{ax + 0.5f, az + 0.5f} : alongX ? Vec2{ax + 0.5f, az} : Vec2{ax, az + 0.5f};
+        mb.setLift(world.map().elevation(mid.x, mid.y));
+        // a slab along the edge from y0 to y1
+        auto slab = [&](float y0s, float y1s, Color c) {
+            if (alongX) mb.box(V(ax, y0s, az - 0.06f), V(ax + 1, y1s, az + 0.06f), c);
+            else mb.box(V(ax - 0.06f, y0s, az), V(ax + 0.06f, y1s, az + 1), c);
+        };
+        auto post = [&](float u) {
+            if (alongX) mb.box(V(ax + u - 0.05f, 0, az - 0.08f), V(ax + u + 0.05f, 2.5f, az + 0.08f), dark);
+            else mb.box(V(ax - 0.08f, 0, az + u - 0.05f), V(ax + 0.08f, 2.5f, az + u + 0.05f), dark);
+        };
+        switch (b.kind) {
+            case BuildKind::Wall:
+                mb.material(MSiding, 1.0f);
+                slab(0, 2.5f, wood);
+                mb.material(MPlain);
+                post(0.05f); post(0.95f);
+                break;
+            case BuildKind::Door:
+                mb.material(MSiding, 1.0f);
+                slab(2.15f, 2.5f, wood);
+                mb.material(MPlain);
+                post(0.05f); post(0.95f);
+                break;
+            case BuildKind::Window:
+                mb.material(MSiding, 1.0f);
+                slab(0, 0.95f, wood);
+                slab(1.9f, 2.5f, wood);
+                mb.material(MGlass);
+                if (alongX) mb.box(V(ax + 0.1f, 0.95f, az - 0.02f), V(ax + 0.9f, 1.9f, az + 0.02f), hexColor(0x3c4e5a));
+                else mb.box(V(ax - 0.02f, 0.95f, az + 0.1f), V(ax + 0.02f, 1.9f, az + 0.9f), hexColor(0x3c4e5a));
+                mb.material(MPlain);
+                post(0.05f); post(0.95f); post(0.5f);
+                break;
+            case BuildKind::Roof:
+                mb.material(MFloorWood);
+                mb.box(V(ax - 0.02f, 2.5f, az - 0.02f), V(ax + 1.02f, 2.62f, az + 1.02f), shade(wood, 0.8f));
+                mb.material(MPlain);
+                break;
+            default: break;
+        }
+        mb.setLift(0);
+    }
+}
+
 void Renderer::addPowerLines(MeshBuilder& mb, World& world, int x0, int y0) {
     // Wooden utility poles along roads outside the town centre, wires sagging between them
     const MapData& map = world.map();
@@ -231,8 +307,10 @@ void Renderer::addPowerLines(MeshBuilder& mb, World& world, int x0, int y0) {
             const Tile& tile = world.tile((int)std::floor(p.x), (int)std::floor(p.y));
             if (tile.building >= 0 || isWater(tile.ground)) continue;
             Color wood = hexColor(0x5a4632);
+            float hp = map.elevation(p.x, p.y);
+            mb.setLift(hp);
             mb.material(MBark);
-            mb.tube(V(p.x, 0, p.y), V(p.x, 8.0f, p.y), 0.14f, 0.11f, 6, wood);
+            mb.tube(V(p.x, -0.3f, p.y), V(p.x, 8.0f, p.y), 0.14f, 0.11f, 6, wood);
             Vec2 a0 = p - d * 0.9f, a1 = p + d * 0.9f;
             mb.tube(V(a0.x, 7.6f, a0.y), V(a1.x, 7.6f, a1.y), 0.06f, 0.06f, 4, wood);
             mb.material(MMetal);
@@ -241,16 +319,18 @@ void Renderer::addPowerLines(MeshBuilder& mb, World& world, int x0, int y0) {
                 mb.tube(V(ip.x, 7.66f, ip.y), V(ip.x, 7.82f, ip.y), 0.035f, 0.025f, 4, hexColor(0x5a6a5a));
             }
             // Wires to the next pole
+            mb.setLift(0);
             if (t + spacing < len) {
                 Vec2 q = s.a + d * (t + spacing) + n * off;
+                float hq = map.elevation(q.x, q.y);
                 for (float k : {-0.7f, 0.0f, 0.7f}) {
                     Vec2 pa = p + d * k, pb = q + d * k;
-                    Vector3 prev = V(pa.x, 7.8f, pa.y);
+                    Vector3 prev = V(pa.x, hp + 7.8f, pa.y);
                     for (int i = 1; i <= 6; ++i) {
                         float u = i / 6.0f;
                         Vec2 pp = pa + (pb - pa) * u;
                         float sag = 0.7f * 4.0f * u * (1 - u);
-                        Vector3 cur = V(pp.x, 7.8f - sag, pp.y);
+                        Vector3 cur = V(pp.x, hp + (hq - hp) * u + 7.8f - sag, pp.y);
                         mb.tube(prev, cur, 0.012f, 0.012f, 3, hexColor(0x202020), false);
                         prev = cur;
                     }
@@ -453,7 +533,7 @@ void Renderer::addProp(MeshBuilder& mb, World& world, const Tile& t, int x, int 
             mb.box(V(cx + arm.x - 0.25f, 5.35f, cz + arm.y - 0.18f), V(cx + arm.x + 0.25f, 5.52f, cz + arm.y + 0.18f), hexColor(0x2a2c2e));
             mb.material(MLamp);
             mb.box(V(cx + arm.x - 0.2f, 5.32f, cz + arm.y - 0.14f), V(cx + arm.x + 0.2f, 5.36f, cz + arm.y + 0.14f), hexColor(0xd8d0b0));
-            g.lamps.push_back(V(cx + arm.x, 5.2f, cz + arm.y));
+            g.lamps.push_back(V(cx + arm.x, 5.2f + mb.lift(), cz + arm.y));
             break;
         }
         case Prop::Bench: {
@@ -535,6 +615,21 @@ void Renderer::addProp(MeshBuilder& mb, World& world, const Tile& t, int x, int 
             mb.box(V(x + 0.02f, 0.8f, y + 0.1f), V(x + 0.98f, 0.86f, y + 0.9f), hexColor(0x3a3a3c));
             break;
         }
+        case Prop::Crate: {
+            Color wood = hexColor(0xa88458);
+            mb.material(MSiding, 0.0f);
+            mb.box(V(x + 0.08f, 0, y + 0.12f), V(x + 0.92f, 0.78f, y + 0.88f), wood);
+            mb.material(MFloorWood);
+            mb.box(V(x + 0.05f, 0.78f, y + 0.09f), V(x + 0.95f, 0.86f, y + 0.91f), shade(wood, 0.9f));
+            mb.material(MPlain);
+            for (float cx2 : {x + 0.1f, x + 0.84f})
+                mb.box(V(cx2, 0, y + 0.1f), V(cx2 + 0.06f, 0.8f, y + 0.9f), shade(wood, 0.75f));
+            break;
+        }
+        case Prop::Pillar:
+            mb.material(MConcrete);
+            mb.box(V(x + 0.22f, 0, y + 0.22f), V(x + 0.78f, 2.62f, y + 0.78f), hexColor(0xa8a8a2));
+            break;
         case Prop::RainBarrel:
             mb.material(MMetal);
             mb.tube(V(cx, 0, cz), V(cx, 0.9f, cz), 0.35f, 0.38f, 10, hexColor(0x2a4a32));
@@ -767,59 +862,143 @@ void Renderer::addProp(MeshBuilder& mb, World& world, const Tile& t, int x, int 
 void Renderer::buildChunk(World& world, Chunk& c, ChunkGfx& g) {
     unloadChunk(g);
     g.lamps.clear();
-    MeshBuilder ground, props;
+    // Props in four 16 m cells (plus one for things spread over the chunk:
+    // road markings, power lines), so the camera can skip the cells it can't
+    // see. detail: small stuff that casts no shadow.
+    MeshBuilder ground, cellProps[5], cellDetail[4];
     int x0 = c.cx * kChunkSize, y0 = c.cy * kChunkSize;
     int doy = world.clock().dayOfYear();
+    const MapData& map = world.map();
+    ground.fixedAo(0.0f);   // the ground is the ground: always at the foot of the AO
+    // Heights of the ground at the tile corners
+    const int cs = kChunkSize + 1;
+    std::vector<float> corner((size_t)cs * cs);
+    for (int j = 0; j < cs; ++j)
+        for (int i = 0; i < cs; ++i) corner[(size_t)j * cs + i] = map.elevation((float)(x0 + i), (float)(y0 + j));
+    // The surface of a tile, corner by corner (x,y) (x,y+1) (x+1,y+1) (x+1,y):
+    // level floors in buildings, flat water and jetties, else the ground
+    auto surface = [&](const Tile& t, int x, int y, float out[4]) {
+        if (t.building >= 0)
+            if (const Building* b = world.building(t.building)) { out[0] = out[1] = out[2] = out[3] = b->floorY; return; }
+        if (isWater(t.ground) || t.ground == Ground::Deck) {
+            float lv = map.waterLevel(x + 0.5f, y + 0.5f) + groundHeight(t.ground);
+            out[0] = out[1] = out[2] = out[3] = lv;
+            return;
+        }
+        int lx = x - x0, ly = y - y0;
+        if (lx >= 0 && ly >= 0 && lx < kChunkSize && ly < kChunkSize) {
+            out[0] = corner[(size_t)ly * cs + lx];
+            out[1] = corner[(size_t)(ly + 1) * cs + lx];
+            out[2] = corner[(size_t)(ly + 1) * cs + lx + 1];
+            out[3] = corner[(size_t)ly * cs + lx + 1];
+        } else {
+            out[0] = map.elevation((float)x, (float)y);
+            out[1] = map.elevation((float)x, y + 1.0f);
+            out[2] = map.elevation(x + 1.0f, y + 1.0f);
+            out[3] = map.elevation(x + 1.0f, (float)y);
+        }
+    };
     for (int ly = 0; ly < kChunkSize; ++ly)
         for (int lx = 0; lx < kChunkSize; ++lx) {
             const Tile& t = c.at(lx, ly);
             int x = x0 + lx, y = y0 + ly;
-            float h = groundHeight(t.ground);
+            int cell = (lx >= kChunkSize / 2 ? 1 : 0) + (ly >= kChunkSize / 2 ? 2 : 0);
+            MeshBuilder& props = cellProps[cell];
+            MeshBuilder& detail = cellDetail[cell];
+            float sf[4];
+            surface(t, x, y, sf);
             Color col = groundColour(t.ground);
-            if (t.ground == Ground::Asphalt) col = groundColour(t.building >= 0 ? Ground::FloorConcrete : Ground::Gravel);
+            // Car parks are asphalt with painted bays; road asphalt is drawn by the road strips
+            bool parking = t.ground == Ground::Asphalt && t.building < 0 && world.map().zoneAt(x + 0.5f, y + 0.5f) == Zone::Parking;
+            if (t.ground == Ground::Asphalt) col = parking ? groundColour(Ground::Asphalt) : groundColour(t.building >= 0 ? Ground::FloorConcrete : Ground::Gravel);
             if (t.ground == Ground::Grass && t.building < 0)
                 col = mixColor(col, hexColor(0x8a8648), std::clamp((doy - 260) / 60.0f, 0.0f, 0.55f));   // grass yellows
             float n = fbm(x * 0.09f, y * 0.09f, 3, 2);
             col = shade(col, 0.94f + (n - 0.5f) * 0.18f + 0.04f * ((t.variant & 7) / 7.0f));
-            ground.material(groundMaterial(t.ground == Ground::Asphalt ? Ground::Gravel : t.ground));
-            ground.quad(V((float)x, h, (float)y), V((float)x, h, y + 1.0f), V(x + 1.0f, h, y + 1.0f), V(x + 1.0f, h, (float)y), col);
+            // (param 2: under a roof, so the shader puts no snow or puddles on it)
+            ground.material(groundMaterial(t.ground == Ground::Asphalt && !parking ? Ground::Gravel : t.ground),
+                            t.building >= 0 ? 2.0f : t.ground == Ground::Deck ? 1.0f : 0.0f);
+            ground.quad(V((float)x, sf[0], (float)y), V((float)x, sf[1], y + 1.0f), V(x + 1.0f, sf[2], y + 1.0f), V(x + 1.0f, sf[3], (float)y), col);
+            if (parking && ((x % 3) + 3) % 3 == 0 && ((y % 16) + 16) % 16 < 10) {   // bay lines: two rows of bays, then an aisle
+                props.material(MPlain);
+                props.drape(&map);
+                props.quad(V(x + 0.0f, 0.02f, y + 0.1f), V(x + 0.0f, 0.02f, y + 0.9f), V(x + 0.09f, 0.02f, y + 0.9f), V(x + 0.09f, 0.02f, y + 0.1f), hexColor(0xd8d8d0));
+                props.drape(nullptr);
+            }
+            if (t.ground == Ground::Deck && ((x + y) & 1) == 0) {   // posts down into the water
+                props.material(MBark);
+                props.setLift(sf[0] - groundHeight(Ground::Deck));   // the water's surface
+                props.box(V(x + 0.05f, kShallowWater - 0.1f, y + 0.05f), V(x + 0.2f, groundHeight(Ground::Deck), y + 0.2f), hexColor(0x4a3a2a));
+                props.setLift(0);
+            }
             // Banks where land meets water
             if (!isWater(t.ground)) {
                 Color bank = hexColor(0x5a4a36);
                 ground.material(MDirt);
+                // from this tile's edge down to the water's surface
                 auto edge = [&](int nx, int ny, Vector3 a, Vector3 b) {
                     const Tile& o = (nx >= x0 && ny >= y0 && nx < x0 + kChunkSize && ny < y0 + kChunkSize)
                                         ? c.at(nx - x0, ny - y0) : world.tile(nx, ny);
                     if (!isWater(o.ground)) return;
-                    float oh = groundHeight(o.ground);
-                    ground.quad(a, V(a.x, oh, a.z), V(b.x, oh, b.z), b, bank);
+                    float ow = map.waterLevel(nx + 0.5f, ny + 0.5f) + groundHeight(o.ground);
+                    ground.quad(a, V(a.x, std::min(ow, a.y - 0.05f), a.z), V(b.x, std::min(ow, b.y - 0.05f), b.z), b,
+                                t.ground == Ground::Deck ? hexColor(0x6a5038) : bank);
                 };
-                edge(x, y - 1, V(x + 1.0f, 0, (float)y), V((float)x, 0, (float)y));
-                edge(x, y + 1, V((float)x, 0, y + 1.0f), V(x + 1.0f, 0, y + 1.0f));
-                edge(x - 1, y, V((float)x, 0, (float)y), V((float)x, 0, y + 1.0f));
-                edge(x + 1, y, V(x + 1.0f, 0, y + 1.0f), V(x + 1.0f, 0, (float)y));
+                edge(x, y - 1, V(x + 1.0f, sf[3], (float)y), V((float)x, sf[0], (float)y));
+                edge(x, y + 1, V((float)x, sf[1], y + 1.0f), V(x + 1.0f, sf[2], y + 1.0f));
+                edge(x - 1, y, V((float)x, sf[0], (float)y), V((float)x, sf[1], y + 1.0f));
+                edge(x + 1, y, V(x + 1.0f, sf[2], y + 1.0f), V(x + 1.0f, sf[3], (float)y));
             }
             // Tufts of grass
             if ((t.ground == Ground::TallGrass || t.ground == Ground::Stubble || (t.ground == Ground::Grass && t.building < 0 && (t.variant & 7) == 0)) &&
                 t.prop == Prop::None) {
                 uint32_t s = hash2(x, y, 31);
                 Color gc = t.ground == Ground::Stubble ? hexColor(0xb8a868) : mixColor(hexColor(0x7a8a48), hexColor(0xa89a58), std::clamp((doy - 250) / 50.0f, 0.0f, 1.0f));
-                props.material(MLeaves);
+                detail.material(MLeaves);
+                detail.setLift((sf[0] + sf[1] + sf[2] + sf[3]) * 0.25f);
                 int blades = t.ground == Ground::TallGrass ? 3 : 2;
                 for (int i = 0; i < blades; ++i) {
                     float bx = x + 0.15f + 0.7f * rnd(s), bz = y + 0.15f + 0.7f * rnd(s);
                     float bh = (t.ground == Ground::TallGrass ? 0.45f : 0.22f) * (0.7f + 0.6f * rnd(s));
-                    props.spike(V(bx, 0, bz), V(bx + (rnd(s) - 0.5f) * 0.25f, bh, bz + (rnd(s) - 0.5f) * 0.25f), 0.06f, 3, shade(gc, 0.85f + 0.3f * rnd(s)));
+                    detail.spike(V(bx, -0.05f, bz), V(bx + (rnd(s) - 0.5f) * 0.25f, bh, bz + (rnd(s) - 0.5f) * 0.25f), 0.06f, 3, shade(gc, 0.85f + 0.3f * rnd(s)));
                 }
+                detail.setLift(0);
             }
-            if (t.prop != Prop::None) addProp(props, world, t, x, y, doy, g);
+            // Furniture inside a building belongs to the building's mesh, which is
+            // only drawn when you can see in (open car parks keep theirs out here)
+            bool indoorProp = false;
+            if (t.building >= 0 && t.prop != Prop::None) {
+                const Building* b = world.building(t.building);
+                indoorProp = b && b->type != BuildingType::ParkingGarage;
+            }
+            if (t.prop != Prop::None && !indoorProp) {
+                bool small = t.prop == Prop::LingonBush || t.prop == Prop::BlueberryBush || t.prop == Prop::Rock ||
+                             t.prop == Prop::Reeds || t.prop == Prop::Stump || t.prop == Prop::Shrub || t.prop == Prop::RoseBush;
+                MeshBuilder& into = small ? detail : props;
+                // stands level at the height of the ground under its middle
+                bool flat = t.building >= 0 || isWater(t.ground) || t.ground == Ground::Deck;
+                into.setLift(flat ? sf[0] : map.elevation(x + 0.5f, y + 0.5f));
+                addProp(into, world, t, x, y, doy, g);
+                into.setLift(0);
+            }
         }
+    ground.drape(&map);   // roads lie on the ground
     addRoadSurfaces(ground, world, x0, y0);
-    addRoadMarkings(props, world.map(), x0, y0);
-    addPowerLines(props, world, x0, y0);
+    ground.drape(nullptr);
+    addBuilt(cellProps[4], world, x0, y0);
+    cellProps[4].drape(&map);
+    addRoadMarkings(cellProps[4], world.map(), x0, y0);
+    cellProps[4].drape(nullptr);
+    addPowerLines(cellProps[4], world, x0, y0);
     g.ground = ground.build();
     g.hasGround = true;
-    if (!props.empty()) { g.props = props.build(); g.hasProps = true; }
+    for (auto& mb : cellProps) addPart(g.props, mb);
+    for (auto& mb : cellDetail) addPart(g.detail, mb);
+    // the chunk's box: its ground and everything standing on it
+    g.mn = ground.boundsMin();
+    g.mx = ground.boundsMax();
+    for (const auto* list : {&g.props, &g.detail})
+        for (const Part& p : *list) { g.mn = Vector3Min(g.mn, p.mn); g.mx = Vector3Max(g.mx, p.mx); }
     g.version = c.version;
 }
 

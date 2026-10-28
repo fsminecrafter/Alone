@@ -24,6 +24,7 @@ Color groundColour(Ground g) {
         case Ground::FloorTile: return hexColor(0xc8c6c0);
         case Ground::FloorConcrete: return hexColor(0x8a8884);
         case Ground::FloorCarpet: return hexColor(0x7e5a58);
+        case Ground::Deck: return hexColor(0x8a6c4c);
         default: return MAGENTA;
     }
 }
@@ -41,6 +42,7 @@ int groundMaterial(Ground g) {
         case Ground::FloorWood: return MFloorWood;
         case Ground::FloorTile: return MFloorTile;
         case Ground::FloorCarpet: return MCarpet;
+        case Ground::Deck: return MFloorWood;
         default: return MPlain;
     }
 }

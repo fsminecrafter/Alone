@@ -2,6 +2,7 @@
 #include "core/Config.h"
 #include "core/Log.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 
@@ -99,6 +100,18 @@ bool ItemRegistry::loadDirectory(const std::string& dir) {
             d.clo = sec.num("clo", 0);
             d.waterproof = sec.num("waterproof", 0);
             d.carryBonusKg = sec.num("carry_bonus", 0);
+            d.shortSleeves = sec.str("sleeves", "long") == "short";
+            // Clothes and textiles can be ripped into rags; tough fabric needs a knife
+            int defaultRags = d.category == ItemCategory::Clothing && d.slot != ClothingSlot::Feet && d.slot != ClothingSlot::Back
+                                  ? std::clamp((int)std::lround(d.weightKg / 0.1f), 1, 5) : 0;
+            d.rags = sec.integer("rags", defaultRags);
+            d.ripNeedsKnife = sec.flag("rip_needs_knife");
+            d.tentW = sec.integer("tent_width", 0);
+            d.tentL = sec.integer("tent_length", 0);
+
+            d.dressing = dressingFromString(sec.str("dressing", "none"));
+            d.washesInto = sec.str("washes_into");
+            d.openedName = sec.str("name_opened");
 
             d.uses = sec.integer("uses", 0);
             d.treats = pathogenFromString(sec.str("treats", "none").c_str());
@@ -115,6 +128,9 @@ bool ItemRegistry::loadDirectory(const std::string& dir) {
             Log::warn("Item %s cooks into unknown item %s", d->id.c_str(), d->cookedInto.c_str());
         if (!d->ammo.empty() && !find(d->ammo))
             Log::warn("Item %s uses unknown ammo %s", d->id.c_str(), d->ammo.c_str());
+        if (!d->cookedInto.empty() && find(d->cookedInto) == nullptr) {}
+        if (!d->washesInto.empty() && !find(d->washesInto))
+            Log::warn("Item %s washes into unknown item %s", d->id.c_str(), d->washesInto.c_str());
     }
     Log::info("Loaded %d items", (int)items_.size());
     return true;

@@ -1,3 +1,4 @@
+#include "client/Input.h"
 #include "client/Ui.h"
 #include "core/Paths.h"
 #include <algorithm>
@@ -128,7 +129,7 @@ void panel(Rectangle r, Color c, bool border) {
 
 bool hovered(Rectangle r) { return CheckCollisionPointRec(GetMousePosition(), r); }
 
-bool clicked(Rectangle r, int b) { return hovered(r) && IsMouseButtonPressed(b); }
+bool clicked(Rectangle r, int b) { return hovered(r) && input::pressed(b); }
 
 bool button(Rectangle r, const std::string& label, bool enabled, float size) {
     bool h = enabled && hovered(r);
@@ -139,7 +140,7 @@ bool button(Rectangle r, const std::string& label, bool enabled, float size) {
     Vector2 m = measure(label, s);
     text(label, r.x + (r.width - m.x) / 2, r.y + (r.height - m.y) / 2, s, enabled ? g_theme.text : g_theme.dim);
     claim(r);
-    return h && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    return h && input::pressed(MOUSE_BUTTON_LEFT);
 }
 
 bool slider(Rectangle r, float& v, float lo, float hi) {

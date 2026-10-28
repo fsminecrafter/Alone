@@ -19,7 +19,7 @@ if(MSVC)
     add_compile_options(/W3 /utf-8)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 else()
-    add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+    add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
 
 # ---------------------------------------------------------------------------

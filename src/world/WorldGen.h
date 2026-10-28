@@ -33,14 +33,18 @@ private:
     void makeDenseBlocks();
     void makeOsmBuildings();
     void layoutMall(Building& b, uint32_t& h);
+    void dressBuilding(Building& b, uint32_t& h);
     void layoutCorridors(Building& b, uint32_t& h);
     bool siteIsClear(const IRect& r, bool allowRoads = false) const;
     bool tryPlace(BuildingType type, const IRect& area, uint32_t h, Building& out);
     void layout(Building& b);
-    void splitRooms(Building& b, IRect r, int depth, uint32_t& h);
+    void layoutHome(Building& b, uint32_t& h);
+    int roadSide(const Building& b) const;
+    float floorHeight(const IRect& r) const;
     void assignRooms(Building& b, uint32_t& h);
     void furnish(Building& b, uint32_t& h);
-    void addExteriorDoor(Building& b, uint32_t& h);
+    // presetSide/presetIndex: where the front door goes (else: the side facing the road)
+    void addExteriorDoor(Building& b, uint32_t& h, int presetSide = -1, int presetIndex = -1);
     void styleBuilding(Building& b, uint32_t& h);
     int addBuilding(Building b);
 

@@ -98,6 +98,32 @@ void drawItemIcon(const ItemDef* def, Rectangle r) {
         rect(-0.4f, -0.55f, 0.8f, 0.2f, WHITE);
     } else if (i == "log" || i == "stick" || i == "rope" || i == "wire") {
         DrawLineEx({cx - s * 0.7f, cy + s * 0.4f}, {cx + s * 0.7f, cy - s * 0.4f}, s * (i == "log" ? 0.45f : 0.15f), c);
+    } else if (i == "stove") {   // a storm kitchen: windshield, pot, lid handle
+        rect(-0.6f, -0.05f, 1.2f, 0.65f, c);
+        rect(-0.5f, -0.45f, 1.0f, 0.42f, shade(c, 0.85f));
+        rect(-0.15f, -0.6f, 0.3f, 0.15f, DARKGRAY);
+        DrawCircle((int)cx, (int)(cy + s * 0.25f), s * 0.18f, Color{80, 120, 220, 255});
+    } else if (i == "tent") {
+        DrawTriangle({cx, cy - s * 0.7f}, {cx - s * 0.85f, cy + s * 0.6f}, {cx + s * 0.85f, cy + s * 0.6f}, c);
+        DrawTriangle({cx, cy - s * 0.2f}, {cx - s * 0.3f, cy + s * 0.6f}, {cx + s * 0.3f, cy + s * 0.6f}, shade(c, 0.55f));
+    } else if (i == "saw") {
+        DrawTriangle({cx - s * 0.75f, cy - s * 0.2f}, {cx - s * 0.75f, cy + s * 0.35f}, {cx + s * 0.6f, cy + s * 0.35f}, LIGHTGRAY);
+        rect(-0.95f, -0.35f, 0.3f, 0.6f, c);
+    } else if (i == "nails") {
+        for (int k = -1; k <= 1; ++k) {
+            DrawLineEx({cx + k * s * 0.3f, cy - s * 0.6f}, {cx + k * s * 0.3f, cy + s * 0.6f}, std::max(1.5f, s * 0.1f), c);
+            rect(k * 0.3f - 0.13f, -0.66f, 0.26f, 0.1f, c);
+        }
+    } else if (i == "plank") {
+        DrawLineEx({cx - s * 0.8f, cy + s * 0.5f}, {cx + s * 0.8f, cy - s * 0.5f}, s * 0.45f, c);
+        DrawLineEx({cx - s * 0.7f, cy + s * 0.48f}, {cx + s * 0.7f, cy - s * 0.4f}, 1.0f, shade(c, 0.8f));
+    } else if (i == "rag") {
+        rect(-0.6f, -0.45f, 1.2f, 0.9f, c);
+        DrawLineEx({cx - s * 0.6f, cy}, {cx + s * 0.6f, cy}, 1.0f, shade(c, 0.75f));
+        DrawLineEx({cx - s * 0.2f, cy - s * 0.45f}, {cx - s * 0.2f, cy + s * 0.45f}, 1.0f, shade(c, 0.75f));
+    } else if (i == "bandaid") {
+        DrawRectanglePro({cx, cy, s * 1.5f, s * 0.5f}, {s * 0.75f, s * 0.25f}, -35, c);
+        DrawRectanglePro({cx, cy, s * 0.5f, s * 0.42f}, {s * 0.25f, s * 0.21f}, -35, Color{240, 236, 228, 255});
     } else if (i == "watch" || i == "clock") {
         if (i == "watch") { rect(-0.18f, -0.9f, 0.36f, 1.8f, Color{60, 45, 35, 255}); }
         else {

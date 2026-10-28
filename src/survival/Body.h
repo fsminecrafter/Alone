@@ -2,6 +2,7 @@
 #include "core/Rng.h"
 #include "survival/Nutrients.h"
 #include "survival/Wound.h"
+#include <array>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,8 @@ struct BodyState {
     float painkiller = 0;           // 0..1 active painkiller effect
     float hallucination = 0;        // 0..1
     std::vector<Wound> wounds;
+    std::array<Dressing, (size_t)BodyPart::Count> dressings{};   // one per body part
+    float sting = 0;                // 0..1 short sharp pain (disinfectant in a wound)
     std::vector<Infection> infections;
     std::vector<ToxinDose> toxins;
 
@@ -143,9 +146,22 @@ public:
     void addWound(const Wound& w);
     void vomit();
 
-    // Treatments
-    void bandageWound(int index, bool sterile);
-    void disinfectWound(int index);
+    // Treatments, per body part
+    // Puts a dressing on (replacing any old one, which is returned).
+    // `dirt` is how dirty the dressing already is (a used rag, a washed bandage).
+    Dressing applyDressing(BodyPart part, DressingKind kind, bool sterile, float dirt);
+    Dressing removeDressing(BodyPart part);
+    // Cleans the wounds on a part. strength 1 = proper disinfectant, less for vodka.
+    void disinfect(BodyPart part, float strength = 1.0f);
+    // Dirt reaching a body part from outside: soils its dressing, or gets
+    // into an open wound when there is none.
+    void soil(BodyPart part, float amount);
+    const Dressing& dressing(BodyPart part) const { return s_.dressings[(size_t)part]; }
+    bool woundedAt(BodyPart part) const;
+    float worstSeverityAt(BodyPart part) const;
+    float bleedingAt(BodyPart part) const;   // ml/min getting past any dressing
+    // 0..1 how much an injured part hampers you (limping, a useless hand)
+    float impairment(BodyPart part) const;
     void takePainkiller(float strength = 0.6f);
     void takeAntibiotic(Pathogen against);      // marks matching infections treated
     void takeVitaminC(float mg) { s_.vitaminCMg += mg * 0.7f; }

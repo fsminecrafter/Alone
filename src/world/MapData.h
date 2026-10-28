@@ -30,7 +30,16 @@ struct RoadHit {
 struct District { std::string name; Vec2 centre; float radius; };
 struct WaterName { std::string name; Vec2 pos; };
 // A real building from OpenStreetMap, already snapped to the grid.
-struct OsmBuilding { std::string kind; int levels = 0; Vec2 centre; int w = 0, h = 0; std::string name; };
+struct OsmBuilding {
+    std::string kind;
+    int levels = 0;
+    Vec2 centre;
+    int w = 0, h = 0;
+    std::string name;
+    uint32_t colour = 0, roofColour = 0;   // 0 = not mapped
+    int roof = -1;                          // -1 not mapped, 0 gable, 1 flat, 2 hip
+};
+struct Pier { std::vector<Vec2> pts; bool area = false; };
 
 struct MapLabel { std::string text; Vec2 pos; float angle = 0; };
 struct Plaza { std::string name; Vec2 centre; Vec2 size; };
@@ -89,7 +98,19 @@ public:
     const std::vector<OsmBuilding>& osmBuildings() const { return osmBuildings_; }
     const std::vector<Vec2>& osmTrees() const { return osmTrees_; }
     const std::vector<Vec2>& osmLamps() const { return osmLamps_; }
+    const std::vector<Pier>& piers() const { return piers_; }
+    bool pierAt(float x, float y) const;
     float terrainMetresPerPixel() const { return tmpp_; }
+
+    // Height of the ground above sea level (metres), from elevation.pgm
+    // (tools/mapgen/dem_import.py). Lakes and rivers: their surface. 0 when
+    // the map has no elevation.
+    bool hasElevation() const { return !elev_.empty(); }
+    float elevation(float x, float y) const;            // smooth (Catmull-Rom)
+    float elevationLinear(float x, float y) const;      // cheaper, for drawing the map
+    float waterLevel(float x, float y) const;           // flat over water, no rise at the shore
+    float lowestElevation() const { return elevMin_; }
+    float highestElevation() const { return elevMax_; }
 
 private:
     void index(const std::vector<RoadSegment>& segs, std::vector<std::vector<int>>& grid);
@@ -113,10 +134,15 @@ private:
     std::vector<std::string> roadNames_;
     std::vector<OsmBuilding> osmBuildings_;
     std::vector<Vec2> osmTrees_, osmLamps_;
+    std::vector<Pier> piers_;
     std::vector<std::array<float, 4>> coverage_;
     float tmpp_ = 1;        // terrain metres per pixel (may differ from feature units)
     std::vector<MapLabel> labels_;
     std::vector<DenseArea> dense_;
+    std::vector<float> elev_;
+    int ew_ = 0, eh_ = 0;
+    float empp_ = 8, elevMin_ = 0, elevMax_ = 0;
+    float elevAt(int ix, int iy) const;
 };
 
 } // namespace alone

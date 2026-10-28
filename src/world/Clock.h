@@ -35,6 +35,8 @@ public:
     float outdoorTempC() const;
     float indoorTempC() const;         // unheated houses
     const Weather& weather() const { return weather_; }
+    // Keep this weather until the clock reaches `untilMinutes` (screenshots, tests)
+    void forceWeather(const Weather& w, double untilMinutes) { weather_ = forced_ = w; forcedUntil_ = untilMinutes; weatherBlock_ = -1; }
 
 private:
     void updateWeather();
@@ -43,7 +45,8 @@ private:
     float latitude_;
     int startDay_;
     double minutes_;
-    Weather weather_;
+    Weather weather_, forced_;
+    double forcedUntil_ = -1;
     int weatherBlock_ = -1;
 };
 

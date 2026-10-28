@@ -4,7 +4,7 @@
 //    (vertexTexCoord.x) and projected in world space, so meshes need no UVs.
 //  - Sun/moon shadow map with soft PCF.
 //  - Up to 32 coloured point lights plus a flashlight cone.
-//  - See-through cutaway around the player, vision cone, snow, wetness, fog.
+//  - See-through cutaway around the player (CUTAWAY variant only), vision cone, snow, wetness, fog.
 in vec3 fragWorld;
 in vec3 fragNormal;
 in vec4 fragColor;
@@ -41,11 +41,19 @@ uniform sampler2D shadowMap;
 uniform float shadowOn;
 uniform float shadowTexel;
 uniform float brightness;    // player setting, 1 = neutral
+uniform float sheltered;     // 1 while drawing what stands under a roof: no snow or rain on it
+uniform float rainNow;       // how hard it's raining right now (ripples in puddles)
 
 out vec4 finalColor;
 
 // ---------------------------------------------------------------------------
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// Hash without sine (Dave Hoskins): only multiply-adds, much cheaper than
+// sin() on most GPUs and stable at any precision
+float hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
 float vnoise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     vec2 u = f * f * (3.0 - 2.0 * f);
@@ -160,6 +168,10 @@ vec3 material(int id, float param, vec3 p, vec3 n, vec3 base) {
         m = (0.9 + 0.1 * fbm(uv * 2.5) + 0.06 * hash(floor(q))) * mix(0.8, 1.0, grout(q.x, 0.004) * grout(q.y, 0.004));
     } else if (id == 21) {    // metal / painted surfaces
         m = 0.96 + 0.06 * vnoise(uv * 8.0);
+    } else if (id == 23) {    // metal cladding: long horizontal panels with seams
+        float c = p.y / 0.6;
+        float col = (abs(n.x) > abs(n.z) ? p.z : p.x) / 3.0;
+        m = (0.93 + 0.05 * hash(vec2(floor(c), floor(col)))) * mix(0.7, 1.0, grout(c, 0.02)) * mix(0.82, 1.0, grout(col, 0.006));
     }
     return base * m;
 }
@@ -183,6 +195,10 @@ void main() {
     vec4 base = fragColor * colDiffuse;
     int mat = int(fragMat.x + 0.5);
 
+#ifdef CUTAWAY
+    // Only in the variant used for the few chunks between you and the camera:
+    // a shader that may discard can't use the early depth test, so everything
+    // else is drawn with the variant without it.
     if (cutaway > 0.5 && cutRadius > 0.0) {
         vec3 rel = fragWorld - playerPos;
         float towardsCamera = -dot(rel, viewDir);
@@ -193,18 +209,28 @@ void main() {
             if (edge > bayer4(gl_FragCoord.xy) * 0.999) discard;
         }
     }
+#endif
 
     vec3 n = normalize(fragNormal);
     if (!gl_FrontFacing) n = -n;
     vec3 albedo = material(mat, fragMat.y, fragWorld, n, base.rgb);
 
-    // Snow settles on upward faces; rain darkens the ground
+    // Snow settles on upward faces; rain darkens the ground and fills hollows
+    // with puddles. Not under a roof (floors indoors carry param 2).
+    bool underRoof = sheltered > 0.5 || fragMat.y > 1.5;
     float up = smoothstep(0.55, 0.9, n.y);
-    if (snow > 0.0 && mat != 19 && mat != 18) {
+    if (snow > 0.0 && mat != 19 && mat != 18 && !underRoof) {
         float patchy = smoothstep(0.25, 0.75, snow + (vnoise(fragWorld.xz * 0.7) - 0.5) * 0.5);
         albedo = mix(albedo, vec3(0.86, 0.88, 0.92), up * patchy);
     }
-    if (wet > 0.0 && up > 0.5 && mat != 19) albedo *= 1.0 - 0.28 * wet;
+    float puddle = 0.0;
+    if (wet > 0.0 && up > 0.5 && mat != 19 && !underRoof) {
+        albedo *= 1.0 - 0.28 * wet;
+        if (mat == 3 || mat == 4 || mat == 5 || mat == 6 || mat == 20) {   // hard or bare ground
+            float hollow = vnoise(fragWorld.xz * 0.31) * 0.7 + vnoise(fragWorld.xz * 1.3 + 7.0) * 0.3;
+            puddle = smoothstep(0.6, 0.66, hollow + wet * 0.1) * smoothstep(0.25, 0.7, wet);
+        }
+    }
 
     vec3 c;
     if (unlit > 0.5) {
@@ -212,14 +238,17 @@ void main() {
     } else {
         float sun = max(dot(n, normalize(sunDir)), 0.0);
         float sh = sun > 0.0 ? shadowAt(fragWorld, n) : 1.0;
-        // Sky from above, ground bounce from below, darker near the ground (cheap AO)
-        float ao = mix(0.72, 1.0, smoothstep(0.0, 0.9, fragWorld.y + 0.05));
+        // Sky from above, ground bounce from below, darker near the ground
+        // (cheap AO: the vertex alpha says how high above its ground a point is)
+        float ao = mix(0.72, 1.0, fragColor.a);
         vec3 amb = mix(ambientColor * 0.75, ambientColor * 0.6 + skyColor * 0.25, n.y * 0.5 + 0.5) * ao;
         vec3 light = amb + sunColor * sun * sh;
         for (int i = 0; i < lightCount; ++i) {
             vec3 dl = lights[i].xyz - fragWorld;
-            float dist = length(dl);
             float r = lights[i].w;
+            float d2 = dot(dl, dl);
+            if (d2 >= r * r) continue;   // out of this light's reach
+            float dist = sqrt(d2);
             float att = clamp(1.0 - dist / r, 0.0, 1.0);
             att = att * att * (3.0 - 2.0 * att);
             float facingL = max(dot(n, dl / max(dist, 0.001)), 0.0) * 0.7 + 0.3;
@@ -233,6 +262,19 @@ void main() {
             light += vec3(1.0, 0.95, 0.82) * 1.6 * cone * att * att * (max(dot(n, -dl / max(dist, 0.001)), 0.0) * 0.7 + 0.3);
         }
         c = albedo * light;
+    }
+    // Puddles: dark water mirroring the sky, rings spreading where drops land
+    if (puddle > 0.0) {
+        float ring = 0.0;
+        if (rainNow > 0.02) {
+            vec2 q = fragWorld.xz * 2.2;
+            vec2 cell = floor(q);
+            float t = fract(time * 1.3 + hash(cell));
+            float r = length(fract(q) - 0.5 - (vec2(hash(cell + 3.1), hash(cell + 5.7)) - 0.5) * 0.4);
+            ring = smoothstep(0.035, 0.0, abs(r - t * 0.45)) * (1.0 - t) * step(hash(cell + 9.3), rainNow + 0.15);
+        }
+        vec3 mirror = skyColor * (0.55 + 0.3 * ring) + vec3(0.04, 0.05, 0.06);
+        c = mix(c, c * 0.35 + mirror * 0.5, puddle * 0.85);
     }
     // Lit windows glow at night
     if (mat == 18) c += emissive;

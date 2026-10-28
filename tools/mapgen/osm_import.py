@@ -321,9 +321,30 @@ AMENITY_KIND = {
 }
 
 
+
+CSS_NAMES = {"white": "f2f1ee", "grey": "9a9996", "gray": "9a9996", "black": "2a2a2c", "red": "a8322a", "brown": "6a4a30",
+             "yellow": "e3c565", "beige": "d9cbb0", "blue": "6f8fa8", "green": "6a8a5a", "orange": "d86a2a", "darkgrey": "5e5c64"}
+
+
+def css_colour(v):
+    """'#ff7800', 'White', 'grey' -> 'ff7800' (or '')."""
+    v = v.strip().lower()
+    if re.fullmatch(r"#?[0-9a-f]{6}", v):
+        return v.lstrip("#")
+    if re.fullmatch(r"#[0-9a-f]{3}", v):
+        return "".join(ch * 2 for ch in v[1:])
+    return CSS_NAMES.get(v, "")
+
 def building_kind(tags, pois, area, landuse):
     """Decide what a building is from its own tags, POIs inside it and land use around it."""
     name = tags.get("name", "")
+    low = name.lower()
+    if "vårdcentral" in low or "vårdcentral" in low or "tandvård" in low:
+        return "clinic"
+    if low.startswith("apotek") or "apotek" in low.split():
+        return "pharmacy"
+    if tags.get("amenity") == "parking" or tags.get("building") == "parking":
+        return "parking_garage" if tags.get("parking") == "multi-storey" or tags.get("building") == "parking" else "skip"
     for k, table in (("shop", SHOP_KIND), ("amenity", AMENITY_KIND)):
         v = tags.get(k)
         if v in table:
@@ -332,7 +353,7 @@ def building_kind(tags, pois, area, landuse):
     kinds = [p for p in pois if p]
     if "mall" in kinds or name.lower().startswith("gallerian"):
         return "mall"
-    if len(kinds) >= 3 and area > 600:
+    if len(kinds) >= 5 and area > 2500:
         return "mall"
     if kinds:
         return kinds[0]
@@ -345,10 +366,16 @@ def building_kind(tags, pois, area, landuse):
         "retail": "variety", "supermarket": "grocery", "commercial": "office", "office": "office",
         "school": "school", "kindergarten": "school", "university": "school", "church": "church", "chapel": "church",
         "hospital": "hospital", "train_station": "station", "transportation": "station", "public": "office",
-        "civic": "office", "government": "townhall", "sports_hall": "sports", "parking": "skip", "fire_station": "firestation",
+        "civic": "office", "government": "townhall", "sports_hall": "sports", "parking": "parking_garage", "fire_station": "firestation",
     }
     if b in direct:
         return direct[b]
+    try:
+        lv = int(float(tags.get("building:levels", "0")))
+    except ValueError:
+        lv = 0
+    if lv >= 4 and landuse in (RESIDENTIAL, COMMERCIAL, UNKNOWN) and area > 300:
+        return "apartments"   # tall blocks without a shop in them are flats
     # building=yes: guess from size and surroundings
     if landuse in (COMMERCIAL, PAVED):
         return "variety" if area < 400 else "office"
@@ -554,6 +581,12 @@ def main():
             pts = [W_(p) for p in way_xy(nodes, refs)]
             if len(pts) >= 2:
                 out.append("railway " + " ".join(f"{x:.1f} {y:.1f}" for x, y in pts))
+    for wid, (refs, tags) in ways.items():
+        if tags.get("man_made") == "pier":
+            pts = [W_(p) for p in way_xy(nodes, refs)]
+            if len(pts) >= 2:
+                closed = len(refs) >= 4 and refs[0] == refs[-1]
+                out.append(("pier_area " if closed else "pier ") + " ".join(f"{x:.1f} {y:.1f}" for x, y in pts))
     for nid, (lat, lon, tags) in nodes.items():
         x, y = W_(project(lat, lon))
         if tags.get("place") in ("suburb", "neighbourhood", "quarter") and tags.get("name"):
@@ -600,7 +633,8 @@ def main():
     nb = 0
     kinds_count = {}
     for ai, (tags, outers, inners) in enumerate(all_areas):
-        if "building" not in tags or not outers:
+        is_garage = tags.get("amenity") == "parking" and tags.get("parking") == "multi-storey"
+        if ("building" not in tags and not is_garage) or not outers:
             continue
         ring = max(outers, key=len)
         xy = way_xy(nodes, ring)
@@ -632,9 +666,25 @@ def main():
             levels = max(1, min(12, int(float(levels))))
         except ValueError:
             levels = 0
+            try:
+                levels = max(1, min(12, int(round(float(tags.get("height", "").replace("m", "").strip()) / 2.8))))
+            except ValueError:
+                levels = 0
+        extra = ""
+        for key, field in (("building:colour", "colour"), ("roof:colour", "roof_colour")):
+            c = css_colour(tags.get(key, ""))
+            if c:
+                extra += f" {field}={c}"
+        shape = tags.get("roof:shape", "")
+        if shape in ("gabled", "gabled_height_moved", "crosspitched", "saltbox"):
+            extra += " roof=gable"
+        elif shape in ("hipped", "half-hipped", "pyramidal"):
+            extra += " roof=hip"
+        elif shape in ("flat", "skillion"):
+            extra += " roof=flat"
         name = tags.get("name", "") or (names[0] if names else "")
         name = name.replace('"', "'")
-        out.append(f'building {kind} {levels} {wx:.1f} {wy:.1f} {bw} {bh} "{name}"')
+        out.append(f'building {kind} {levels} {wx:.1f} {wy:.1f} {bw} {bh} "{name}"{extra}')
         kinds_count[kind] = kinds_count.get(kind, 0) + 1
         nb += 1
     with open(os.path.join(map_dir, "osm_features.txt"), "w", encoding="utf-8") as f:
@@ -650,6 +700,13 @@ def main():
     ini = setkey(ini, "terrain_osm_metres_per_pixel", f"{OUT_MPP}")
     ini = setkey(ini, "roads_metres", "roads_m.txt")
     ini = setkey(ini, "osm_features", "osm_features.txt")
+    # world = geo_scale * project(lat, lon) + geo_offset, around (geo_lat0, geo_lon0):
+    # lets other tools (dem_import.py) place real-world data on the map
+    ini = setkey(ini, "geo_lat0", f"{LAT0}")
+    ini = setkey(ini, "geo_lon0", f"{LON0}")
+    ini = setkey(ini, "geo_scale", f"{s:.6f}")
+    ini = setkey(ini, "geo_offset_x", f"{tx:.2f}")
+    ini = setkey(ini, "geo_offset_y", f"{ty:.2f}")
     with open(os.path.join(map_dir, "map.ini"), "w", encoding="utf-8") as f:
         f.write(ini)
     print("Updated map.ini")

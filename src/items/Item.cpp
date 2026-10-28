@@ -32,6 +32,7 @@ float ItemInstance::spoilage() const {
 std::string ItemInstance::displayName(bool knowsMushrooms) const {
     if (!def) return "?";
     std::string n = (knowsMushrooms && !def->trueName.empty()) ? def->trueName : def->name;
+    if (opened && !def->openedName.empty()) n = def->openedName;
     if (def->capacityMl > 0) {
         if (liquidMl <= 0) return "Empty " + n;
         char buf[64];

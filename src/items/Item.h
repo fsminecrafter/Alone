@@ -1,5 +1,6 @@
 #pragma once
 #include "survival/Nutrients.h"
+#include "survival/Wound.h"
 #include <cstdint>
 #include <map>
 #include <set>
@@ -56,6 +57,15 @@ struct ItemDef {
     float clo = 0;
     float waterproof = 0;
     float carryBonusKg = 0;      // backpacks
+    bool shortSleeves = false;   // t-shirts: forearms show
+    int rags = 0;                // rags you get by ripping it up (0 = can't)
+    int tentW = 0, tentL = 0;    // tents: footprint in tiles
+    bool ripNeedsKnife = false;  // denim and jackets need cutting
+
+    // --- dressings ----------------------------------------------------------
+    DressingKind dressing = DressingKind::None;   // can be tied over a wound
+    std::string washesInto;      // a dirty dressing washed in water becomes this
+    std::string openedName;      // name once the sterile pack is opened/washed
 
     // --- tools / medical / stacks ----------------------------------------
     int uses = 0;                // > 0: limited uses (lighter, pills, ammo count)

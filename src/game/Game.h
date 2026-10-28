@@ -32,6 +32,11 @@ enum class ActionKind {
     // items
     Eat, Drink, OpenCan, Equip, Unequip, Wear, TakeOff, Drop, PickUp, Bandage, Disinfect,
     TakePill, Purify, PourOut, TearIntoRags, Read,
+    // body (health screen)
+    RemoveDressing, WashItem, TearUpSheet,
+    // camping, fishing, carpentry
+    PlaceStove, FillStove, LightStove, StoveOff, PackStove, PitchTent, PackTent,
+    SawPlanks, SplitLog, ReplaceBatteries, Fish, Build, Dismantle,
 };
 
 struct ActionOption {
@@ -39,6 +44,7 @@ struct ActionOption {
     ActionKind kind = ActionKind::None;
     int x = 0, y = 0, dir = 0;   // target tile / door edge
     int targetId = 0;            // animal / fire / snare id
+    int part = -1;               // body part (health actions); -1 = pick the worst wound
     ItemRef item;                // item involved
     float amount = 1;            // e.g. fraction to eat
     bool enabled = true;
@@ -78,6 +84,9 @@ struct Player {
     float facing = 0;            // radians
     float stamina = 1;           // 0..1 short-term breath
     bool moving = false, running = false, sneaking = false, asleep = false;
+    bool knowsCarpentry = false;  // read a carpentry book: doors, windows, roofs
+    float grade = 0;             // slope of the ground you're walking along: rise per metre, + uphill
+    float fallen = 0;            // seconds left lying on the ground after tripping
     float attackTimer = 0;
     float swing = 0;             // animation 0..1 after an attack
     Body body = Body(1);
@@ -143,6 +152,24 @@ public:
     // --- actions -------------------------------------------------------------
     std::vector<ActionOption> actionsAt(Vec2 worldPoint);
     std::vector<ActionOption> actionsForItem(const ItemRef& ref);
+    // Carpentry (the build menu)
+    struct BuildRecipe {
+        BuildKind kind;
+        const char* name;
+        int planks, nails;
+        bool saw, tarp, book;
+        float seconds;
+        const char* description;
+    };
+    static const std::vector<BuildRecipe>& buildRecipes();
+    static const BuildRecipe* recipe(BuildKind k);
+    bool canAffordBuild(BuildKind k, std::string* why) const;
+    // An option that builds a piece there (enabled or with the reason it can't)
+    ActionOption buildOption(BuildKind k, int x, int y, int dir);
+    // Right-click on a body part in the health screen
+    std::vector<ActionOption> actionsForBodyPart(BodyPart part);
+    // What you can see when you look at a body part (wounds and dressings)
+    std::vector<std::string> describeBodyPart(BodyPart part) const;
     void perform(const ActionOption& option);
     void cancelAction();
     bool transfer(const ItemRef& ref, ItemLoc to);   // move between player / container / ground
@@ -164,6 +191,13 @@ private:
     void finishAction();
     void startTimed(const ActionOption& o, float seconds, float timeScale = 1);
     void handleBodyEvents();
+    void soilDressings(float gameMinutes);        // dirt from walking and working gets into dressings
+    bool waterForWashing(bool consume);           // a lake, tap or bottle within reach
+    int worstWoundPart(DressingKind forKind) const;   // -1 if none needs it
+    int facingDir() const;                        // 0 N, 1 E, 2 S, 3 W
+    IRect tentFootprint(const ItemDef& tent) const;
+    int dirtiestWoundPart() const;
+    void returnUsedDressing(const Dressing& d);    // what you get back when you take one off
     void eat(ItemInstance& it, float fraction);
     void drinkFrom(ItemInstance& it);
     void drinkWater(float ml, bool safe, const char* sourceDesc);
@@ -180,6 +214,7 @@ private:
     std::unique_ptr<World> world_;
     Player player_;
     Rng rng_;
+    void checkTrip(float dt, float grade, float limp);   // steep ground can bring you down
     CurrentAction action_;
     std::deque<Message> messages_;
     std::vector<SoundEvent> sounds_;

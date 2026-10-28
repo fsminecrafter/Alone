@@ -110,6 +110,7 @@ float Clock::indoorTempC() const {
 }
 
 void Clock::updateWeather() {
+    if (minutes_ < forcedUntil_) { weather_ = forced_; return; }
     // Weather changes in blocks of ~3 hours, smoothly varying underneath
     int block = (int)(minutes_ / 180.0);
     if (block == weatherBlock_) return;

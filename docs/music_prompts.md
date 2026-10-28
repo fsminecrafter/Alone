@@ -46,6 +46,11 @@ Aggressive cinematic chase music, survival horror, cold northern atmosphere. 140
 Paranoid electronic thriller score for being hunted by other people in an abandoned Swedish town at night. 110 BPM, ticking hi-hat clock pulse, gritty analog bass, glitching radio static, tense string swells, low male choir hum without words, sudden silences. Cold, human, threatening. No lyrics. Seamless loop, 2 minutes.
 ```
 
+## In the game now
+
+`data/assets/audio/danger/` has three danger tracks made from these prompts:
+*Stalked*, *FrozenDrift Hunted* and *FrostGauntlet Chase*.
+
 ## Tips
 
 - If MusicGPT adds a fade-out at the end, cut it off. The track loops, so a

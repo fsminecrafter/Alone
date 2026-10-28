@@ -14,7 +14,7 @@ public:
 
 private:
     enum class State { Menu, Playing, Dead };
-    enum class Overlay { None, Inventory, Map, Health, Pause, Settings, Help };
+    enum class Overlay { None, Inventory, Map, Health, Pause, Settings, Help, Build };
 
     struct ContextMenu {
         bool open = false;
@@ -51,6 +51,8 @@ private:
     void update(float dt);
     void updatePlaying(float dt);
     void worldInput();
+    // What F does: the door or thing in front of you, else what the mouse is on
+    bool interactTarget(ActionOption& out);
     void openItemMenu(const ItemRef& ref, Vector2 at);
     Color hoverColour();
 
@@ -102,6 +104,8 @@ private:
     bool tour_ = false;              // --screenshots / --anim-showcase run
     std::string showcaseDir_;
     int runShowcase(const std::string& dir);
+    int runBench();
+    bool bench_ = false;
     void frame();                    // one iteration of the main loop
     void shutdownApp();
     void persistFiles();             // web: flush saves to browser storage
@@ -112,6 +116,14 @@ private:
 
     // inventory window
     uint32_t selectedUid_ = 0;
+    bool lootPending_ = false;       // a search is running: show the container when it's done
+    int buildKind_ = -1;             // placing this BuildKind (-1: not building)
+    int buildX_ = 0, buildY_ = 0, buildDir_ = 0;
+    void drawBuildMenu();
+    void updateBuildPlacement();
+    struct Drag { ItemRef ref; bool armed = false, active = false; Vector2 start{}; int fromPane = -1; } drag_;
+    Rectangle paneRect_[2]{};        // where the item lists were drawn (drop targets)
+    ItemLoc paneLoc_[2]{ItemLoc::Player, ItemLoc::Ground};
     uint32_t lastClickUid_ = 0;
     double lastClickTime_ = 0;
     float scroll_[2] = {0, 0};

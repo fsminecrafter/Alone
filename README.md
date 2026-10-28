@@ -9,40 +9,85 @@ and listen to your body, because it will tell you *how* you feel but never
 
 | | |
 |---|---|
+| ![Vimpeln, the shopping centre by Gerdsken](docs/screenshots/vimpeln.jpg) | ![The food court inside Vimpeln](docs/screenshots/vimpeln_inside.jpg) |
+| ![Kungsgatan and Gallerian Storken](docs/screenshots/kungsgatan.jpg) | ![Hjortmarka: forest from an orienteering map](docs/screenshots/hjortmarka.jpg) |
+| ![Houses on a hillside: the ground has its real heights](docs/screenshots/hills.jpg) | ![A downpour on the square: streaks, splashes and puddles](docs/screenshots/rain.jpg) |
+| ![A camp: tent, storm kitchen and a plank cabin](docs/screenshots/camp.jpg) | ![Treating wounds, one body part at a time](docs/screenshots/health.jpg) |
 | ![Symptoms with a tooltip](docs/screenshots/symptoms.jpg) | ![Map of Alingsås](docs/screenshots/map.jpg) |
-| ![Forest near Lövekulle](docs/screenshots/forest.jpg) | ![The old town around Stora torget](docs/screenshots/torget.jpg) |
-| ![Gallerian Storken's food court](docs/screenshots/storken_inside.jpg) | ![Alingsås station at night](docs/screenshots/station_night.jpg) |
-| ![Gerdsken at dusk](docs/screenshots/gerdsken_dusk.jpg) | ![You only know the time once you find a watch](docs/screenshots/watch.jpg) |
-| ![Inventory](docs/screenshots/inventory.jpg) | ![Cause of death is revealed only when you die](docs/screenshots/death.jpg) |
+| ![Alingsås station at night](docs/screenshots/station_night.jpg) | ![You only know the time once you find a watch](docs/screenshots/watch.jpg) |
+| ![Inventory and a searched container](docs/screenshots/inventory.jpg) | ![Cause of death is revealed only when you die](docs/screenshots/death.jpg) |
 
-**The player** is a bone-based rig with procedural animations
-([MP4](docs/media/character_animations.mp4)):
+**The player** is one smooth body mesh skinned to a bone rig, with procedural
+animations that react to how you are: a hurt leg makes you limp, a hurt arm is
+held close, pain bends you over, cold makes you hug yourself and shiver, nausea
+puts a hand on your stomach, and when you're out of breath you rest your hands
+on your knees ([MP4](docs/media/character_animations.mp4)):
 
-![Character animations: idle, walk, run, sneak, axe swing, rifle aim, eat, search, sleep](docs/media/character_animations.gif)
+![Character animations](docs/media/character_animations.gif)
 
 > Early prototype (v0.1). The game was originally an NDS project; it has been
 > rewritten from scratch in C++17 for PC (Linux and Windows), with a browser version on the side.
 
 ## What's in it
 
-**A real place.** Alingsås is built from OpenStreetMap data: more than 4,000
-real buildings with their real size and use, every named street, footpath and
-forest track, the railway and the station, parks, car parks, squares, single
-trees and street lamps. Lake Mjörn, Gerdsken and Säveån winding through
-Nolhaga; Christinae kyrka; the hospital; the E20. **Gallerian Storken** in the
-centre is a two-storey shopping centre with walkways, shop units (clothes,
-shoes, a watchmaker, electronics, books, sport & outdoor, Systembolaget, a
-pharmacy, a grocer) and a food court where you can find leftover burgers,
-cold fries and kebab - edible, if you're desperate and lucky. Forests are as
-thick as the real ones around town. One tile is one metre; the map covers
-about 9.4 x 5.3 km. Interiors, furniture and loot are generated
-deterministically on top of the real footprints, and areas outside the
-mapped part are filled in procedurally.
+**A real place.** Alingsås is built from OpenStreetMap data: more than 5,500
+real buildings with their real size, use and (where mapped) colour, every named
+street, footpath and forest track, the railway and the station, parks, car
+parks, squares, piers, single trees and street lamps. Lake Mjörn, Gerdsken and
+Säveån winding through Nolhaga; Christinae kyrka; the hospital; the E20.
 
-**Light.** Sun and moon cast real shadows; at night street lamps, lit windows
-and flickering TVs make warm pools of light (while the power lasts - it goes
-out within the first two weeks). A flashlight cone, see-through walls around
-you, wet ground after rain and snow cover in winter.
+* **Vimpeln**, the big shopping centre by Gerdsken, has its glass entrance
+  hall with the orange sign, a car park full of abandoned cars, and inside:
+  a supermarket, electronics, home goods, a pharmacy, a tool and hardware
+  store, clothes and shoes, sport and outdoor gear (tents, storm kitchens),
+  and a food court where you can find leftover burgers, cold fries and kebab.
+* **Gallerian Storken** is the small gallery on Kungsgatan, with its café,
+  clothes and books. The old town around it is wooden houses in pastel
+  colours with tile roofs, shop windows and striped awnings.
+* The waterfront flats at Gerdska Strand have their balconies.
+* **Inside, like Project Zomboid:** the building you're in loses its roof and
+  upper floors, and the walls between you and the camera are cut down to a low
+  stub so you can see the rooms - the walls behind you stay up. A building that
+  hides you from outside is cut open along your line of sight. Anything else in
+  the way shows a faint outline of you.
+* **Homes have real floor plans:** the front door opens into a hall that leads
+  to a corridor; the living room and kitchen are at the front, bedrooms and the
+  bathroom open off the corridor. Small cottages have a kitchen-living room with
+  the bedroom and bathroom off it.
+* **Forests from orienteering maps.** Around Hjortmarka and Kvarnsjön the
+  forest comes from local orienteering maps: open forest, dense young
+  forest, near-impassable thickets, bogs and the small paths orienteers use.
+  Thickets and bogs are slow going. Elsewhere forests are as thick as the
+  real ones around town.
+
+**Hills.** The ground has its real heights, from the Copernicus elevation
+model: the valley Säveån runs through, Mjörn at 57 m above sea level, the town
+around 65-70 m, Hjortmarka's ridges over 100 m. Buildings stand level on
+slopes with a foundation on the downhill side. Walking uphill is slow and
+leaves you out of breath (and burns more), steep downhills are slow too - and
+running down a steep slope, especially when it's wet, dark or you're tired,
+can make you trip, fall and scrape your hands or knees. The map shows the hills
+with shading and 5 m contour lines.
+
+One tile is one metre; the map covers about 9.4 x 5.3 km. Interiors, furniture
+and loot are generated deterministically on top of the real footprints, and
+areas outside the mapped part are filled in procedurally.
+
+**Light and weather.** Sun and moon cast real shadows; at night street lamps,
+lit windows and flickering TVs make warm pools of light (while the power lasts -
+it goes out within the first two weeks). A flashlight cone, rain in streaks
+that slant with the wind and splash on the ground, puddles that fill up and
+mirror the sky (never indoors), and snow cover in winter.
+
+**Runs on modest hardware.** Only what the camera (or the sun) can see is drawn,
+nearest first; big buildings and forests are cut into cells so hidden parts are
+skipped; the sun's shadow map is cached and only redrawn, a little per frame,
+when you've walked a fair way or the sun has moved. Settings > Graphics has the
+render resolution (Auto lowers it while the frame rate is low and raises it when
+there's room), shadows and lights; the browser version starts with lighter
+settings. On laptops with an NVIDIA card the game asks to run on it. The mouse
+pointer is the system's own, so it stays smooth even when the game isn't, and
+short clicks between frames aren't lost.
 
 **Know only what you can know.** There's no clock on screen until you find a
 wristwatch or an alarm clock - before that you only see roughly what part of
@@ -78,13 +123,34 @@ infections and toxins. Some consequences:
 what it feels like. The cause is only revealed after death. All symptom text
 lives in `data/text/symptoms.ini`.
 
+**Wounds, one body part at a time.** The health screen (H) shows your body;
+hover over a part to look at it, right-click to treat it: disinfect it, put on
+a bandaid (only good for small cuts), a bandage or a rag, or take a dressing
+off. Dressings soak up blood and what the wound weeps, and get dirty from
+where you walk and what you do - fast on mud and forest floor, slowly indoors
+on a wooden floor, faster in the rain. A clean dressing protects a wound; a
+filthy one infects it. Rip clothes, towels and sheets into rags (jeans and
+jackets need a knife or scissors), wash dirty rags and bandages in water.
+Bandaids, bandages and disinfectant are in bathrooms, pharmacies and
+hospitals; their dirty versions turn up in rubbish bins. Blood drips from
+wounds nothing covers, and the rain washes it away.
+
+**Camping and carpentry.** Pitch a tent (a 1x2 bivvy or a 2x2 dome) to get out
+of the wind and rain and sleep warmer; a sleeping bag and a mat help too. Cook
+on a **storm kitchen**, a spirit stove that burns red alcohol - and never top
+it up while it's burning, or the bottle goes up in your hand. Chop a tree for a
+log, saw it into planks, find nails, and build (B): walls, doors, windows,
+floors, roofs, storage crates, rain collectors, beds and fences. A carpentry
+book teaches you doors, windows and roofs. Fish from the shore with a rod.
+
 **Things to do:** search kitchens, wardrobes, sheds, shops, the pharmacy and the
-hospital; eat (all, half, a quarter) and drink; open cans (or pry them open with
-a knife and maybe cut yourself); fill bottles at lakes, toilet tanks and rain
-barrels; boil or purify water; pick lingonberries, blueberries and rose hips;
-forage for mushrooms; gather sticks, chop trees, build and light campfires,
-cook; set snares for hares; hunt hare, roe deer, wild boar and moose with melee
-weapons or a moose rifle; butcher carcasses; bandage and disinfect wounds; take
+hospital - a search opens the container so you can look through it and take
+what you want; eat (all, half, a quarter) and drink; open cans (or pry them
+open with a knife and maybe cut yourself); fill bottles at lakes, toilet tanks
+and rain barrels; boil or purify water; pick lingonberries, blueberries and
+rose hips; forage for mushrooms; gather sticks, chop trees, build and light
+campfires, cook; set snares for hares; hunt hare, roe deer, wild boar and moose
+with melee weapons, a shotgun or a moose rifle; butcher carcasses; take
 painkillers, antibiotics and vitamins; wear clothing for warmth and rain;
 sleep (beds are warmer); read the map.
 
@@ -97,9 +163,13 @@ danger tracks in `data/assets/audio/danger/` (prompts for making them are in
 [docs/music_prompts.md](docs/music_prompts.md)). Rain, wind, campfires,
 footsteps, gunshots, doors and the rest are synthesised on the fly.
 
-**Items:** ~90 items with real nutrition values per 100 g (from food
-composition tables), defined in plain text in `data/items/*.ini`. Store food has
-a nutrition label you can read; wild food doesn't.
+**Items:** over 200 items, defined in plain text in `data/items/*.ini`: a
+Swedish pantry (pasta, crispbread, pea soup, fish roe spread, lingonberry jam,
+pick-and-mix, princess cake), fridge and freezer food that spoils, drinks,
+clothes, tools, camping gear, building materials, weapons from a Mora knife to a
+moose rifle, medicine, books and the odds and ends of people's lives. Food has
+real nutrition values per 100 g (from food composition tables); store food has a
+nutrition label you can read, wild food doesn't.
 
 ## Building
 
@@ -156,6 +226,11 @@ only allows sound after your first click or key press.
   `ALONE_SHOTS=storken,forest` limits it to some stops.
 * `alone --anim-showcase DIR` renders the character animations to PNG frames
   (`ffmpeg -framerate 30 -i DIR/frame_%04d.png out.mp4`).
+* `alone --bench` prints frame timings at four places (the start house, inside
+  Vimpeln, Kungsgatan, the Hjortmarka forest). `ALONE_BENCH_FINISH=1` waits for
+  the GPU after each phase so the times are the GPU's; `ALONE_BENCH_SHOTS=DIR`
+  saves a picture of each place.
+* `ALONE_NO_GPU_SWITCH=1` stops the game from asking for the NVIDIA GPU on Linux.
 
 ## Controls
 
@@ -163,10 +238,11 @@ only allows sound after your first click or key press.
 |---|---|
 | W A S D | Walk (Shift run, Ctrl sneak) |
 | Right click | Interact with what's under the cursor |
-| F | Quick interact (doors, search) |
+| F | Use what's in front of you: the door you face, a cupboard, a tree (else what's under the cursor) |
 | Left click / Space | Attack with what you hold |
-| Tab / I | Inventory - double-click moves items, right-click for options |
-| H | Look yourself over (wounds, build) |
+| Tab / I | Inventory - double-click or drag to move items, right-click for options |
+| H | Health: look at each body part, right-click to treat it |
+| B | Build: walls, doors, floors, roofs, crates... |
 | M | Map |
 | Z / R | Sleep / rest for an hour |
 | L | Flashlight |
@@ -187,7 +263,8 @@ src/game/       Game (simulation, actions, combat), wildlife AI
 src/client/     raylib renderer, UI, app (menus, HUD, inventory, map)
 tests/          unit tests for the backend (diet scenarios, world, gameplay)
 data/           everything moddable: items, loot, animals, symptoms, map, shaders, fonts, music
-tools/mapgen/   digitize.py: map image -> terrain + roads; osm_import.py: OpenStreetMap -> buildings, streets, land use
+tools/mapgen/   digitize.py: map image -> terrain + roads; osm_import.py: OpenStreetMap -> buildings, streets, land use;
+                omap_import.py: orienteering maps -> forest detail, paths; dem_import.py: elevation model -> heights
 tools/worlddump world generation preview tool
 ```
 
@@ -212,15 +289,42 @@ a 2 m land-use grid (`terrain2m.pgm`), named streets and paths in metres
 (`osm_features.txt`). Building use comes from OSM tags and the shops and
 amenities inside each building.
 
+`tools/mapgen/omap_import.py <map dir> <map.pdf>... [--scale 10000 --angle 3]`
+reads orienteering maps (OCAD PDFs). It finds where each one lies by matching its
+black building shapes against the OpenStreetMap buildings (searching scale,
+rotation and offset), turns the map colours into land cover in the 2 m grid
+(open forest, dense forest, thicket, marsh, rock, open land), and joins the
+dashed path symbols from the PDF's vector data into paths that OpenStreetMap
+doesn't have. Run it after `osm_import.py`. The orienteering maps themselves are
+not in the repository.
+
+`tools/mapgen/dem_import.py <map dir> <dem.tif> [--preview relief.png]` turns
+an elevation model into `elevation.pgm`, heights in centimetres on an 8 m grid
+(the Alingsås one is the Copernicus GLO-30 DEM from OpenTopography, in
+`tools/mapgen/dem/`). It places the model with the latitude/longitude transform
+`osm_import.py` writes into `map.ini`. Copernicus measures the top of whatever
+is there, so the tool lowers forests by how far the radar saw into the canopy,
+cuts out big buildings and fills them in from the ground around them, and gives
+lakes and rivers a flat surface with banks above it. At this latitude the model
+is made at 1.5 arcseconds east-west; files resampled to 1" repeat every third
+column, and the tool rebuilds the real columns so slopes don't come out striped.
+Run it last.
+
 ## Roadmap
 
-* Procedural Swedish countryside beyond the map edge
+* Procedural Swedish countryside beyond the map edge (Västra Bodarna and the
+  rest of Mjörn's shore; its orienteering map is waiting)
 * Upper floors, basements, more building types (farms, summer cottages)
-* Fishing, trapping more animals, preserving food (smoking, drying, salting)
+* Carpentry skill levels, more to build (stairs, shelves, drying racks)
+* Trapping more animals, preserving food (smoking, drying, salting)
 * Other survivors
 
 ## License
 
 GPL-3.0 (see `LICENSE`). Fonts: DejaVu (see `data/fonts/LICENSE-DejaVu.txt`).
 raylib is zlib-licensed. Map data © OpenStreetMap contributors, available
-under the Open Database License (ODbL).
+under the Open Database License (ODbL). Forest detail around Hjortmarka and
+Kvarnsjön is derived from local orienteering maps. Elevation produced using
+Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space
+GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all
+rights reserved.

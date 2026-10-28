@@ -21,6 +21,8 @@ void lerpBones(Pose& p, const Pose& b, float t, std::initializer_list<int> bones
     for (int i : bones) p.rot[i] = Vector3Lerp(p.rot[i], b.rot[i], t);
 }
 
+float lerp(float a, float b, float t) { return a + (b - a) * t; }
+
 float approach(float v, float target, float rate, float dt) {
     float k = 1.0f - std::exp(-rate * dt);
     return v + (target - v) * k;
@@ -85,17 +87,23 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
     idle.rootOffset = {0, -0.005f * breath, 0.012f * std::sin(t * 0.4f)};
 
     // --- walk / run: the step phase follows distance so feet don't slide -----
+    // A hurt leg makes a limp: you hurry off it (the step phase is warped),
+    // keep it stiff, take a shorter step with it and dip as it takes your weight.
     auto gait = [&](float stride, float thighAmp, float kneeAmp, float armAmp, float elbow, float lean, float bob) {
         Pose p = idle;
         float ph = in.distance / stride * 2.0f * PI;
-        float sL = std::sin(ph), sR = std::sin(ph + PI);
-        float cL = std::cos(ph), cR = std::cos(ph + PI);
+        float warp = 0.55f * (wLimpL_ - wLimpR_);
+        float phw = ph + warp * std::sin(ph);
+        float sL = std::sin(phw), sR = std::sin(phw + PI);
+        float cL = std::cos(phw), cR = std::cos(phw + PI);
+        float ampL = thighAmp * (1.0f - 0.35f * wLimpL_), ampR = thighAmp * (1.0f - 0.35f * wLimpR_);
+        float kneeL = kneeAmp * (1.0f - 0.6f * wLimpL_), kneeR = kneeAmp * (1.0f - 0.6f * wLimpR_);
         // legs reach further forward than back
-        auto swingOf = [&](float sn) { return sn > 0 ? thighAmp * sn : thighAmp * 0.55f * sn; };
-        p.rot[BThighL] = {0.02f, 0, swingOf(sL) + lean * 0.3f};
-        p.rot[BThighR] = {-0.02f, 0, swingOf(sR) + lean * 0.3f};
-        p.rot[BShinL] = {0, 0, -(0.08f + kneeAmp * std::max(0.0f, cL))};
-        p.rot[BShinR] = {0, 0, -(0.08f + kneeAmp * std::max(0.0f, cR))};
+        auto swingOf = [&](float sn, float amp) { return sn > 0 ? amp * sn : amp * 0.55f * sn; };
+        p.rot[BThighL] = {0.02f, 0, swingOf(sL, ampL) + lean * 0.3f};
+        p.rot[BThighR] = {-0.02f, 0, swingOf(sR, ampR) + lean * 0.3f};
+        p.rot[BShinL] = {0, 0, -(0.08f + kneeL * std::max(0.0f, cL))};
+        p.rot[BShinR] = {0, 0, -(0.08f + kneeR * std::max(0.0f, cR))};
         p.rot[BFootL] = {0, 0, 0.25f * sL - 0.1f};
         p.rot[BFootR] = {0, 0, 0.25f * sR - 0.1f};
         p.rot[BUpperArmL] = {0.1f, 0, armAmp * sR};
@@ -107,6 +115,11 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
         p.rot[BChest] = {0, -0.12f * sL, -lean * 0.3f};
         p.rot[BHead] = {0, 0.1f * sL, lean * 0.8f};
         p.rootOffset = {0, -bob + bob * std::fabs(std::cos(ph)) * 1.6f, 0};
+        // the bad leg taking the weight (its thigh moving back)
+        float loadL = wLimpL_ * std::max(0.0f, -cL), loadR = wLimpR_ * std::max(0.0f, -cR);
+        p.rootOffset.y -= 0.04f * (loadL + loadR);
+        p.rootRoll += 0.12f * (loadR - loadL);
+        p.rot[BHead].x -= 0.08f * (loadR - loadL);
         return p;
     };
     Pose walk = gait(1.35f, 0.42f, 0.7f, 0.32f, 0.25f, 0.05f, 0.025f);
@@ -190,27 +203,139 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
     p = lerpPose(p, run, wMove_ * wRun_);
     p = lerpPose(p, sneak, wSneak_);
     p = lerpPose(p, work, wWork_);
+    float still = (1.0f - wMove_) * (1.0f - wWork_) * (1.0f - wSneak_);
+
+    // --- how you feel shows ------------------------------------------------------
+    // Bent over with pain or weakness
+    if (wHunch_ > 0.01f) {
+        float h = wHunch_;
+        p.rot[BSpine].z -= 0.34f * h;
+        p.rot[BChest].z -= 0.16f * h;
+        p.rot[BNeck].z += 0.08f * h;
+        p.rot[BHead].z += 0.18f * h;
+        p.rot[BThighL].z += 0.1f * h; p.rot[BThighR].z += 0.1f * h;
+        p.rot[BShinL].z -= 0.2f * h; p.rot[BShinR].z -= 0.2f * h;
+        p.rootOffset.y -= 0.025f * h;
+    }
+    // Out of breath: hands on the knees
+    if (wWinded_ * still > 0.01f) {
+        Pose w = p;
+        w.rot[BSpine].z = -0.62f; w.rot[BChest].z = -0.22f; w.rot[BHead].z = 0.5f; w.rot[BNeck].z = 0.15f;
+        w.rot[BThighL] = {0.06f, 0, 0.42f}; w.rot[BThighR] = {-0.06f, 0, 0.42f};
+        w.rot[BShinL] = {0, 0, -0.5f}; w.rot[BShinR] = {0, 0, -0.5f};
+        w.rot[BFootL] = {0, 0, 0.08f}; w.rot[BFootR] = {0, 0, 0.08f};
+        w.rot[BUpperArmL] = {-0.05f, 0, 0.62f}; w.rot[BUpperArmR] = {0.05f, 0, 0.62f};
+        w.rot[BForearmL] = {0, 0, 0.12f}; w.rot[BForearmR] = {0, 0, 0.12f};
+        float pant = std::sin(t * 9.0f);
+        w.rot[BChest].z += 0.04f * pant;
+        w.rootOffset = {-0.04f, -0.075f, 0};
+        p = lerpPose(p, w, wWinded_ * still);
+    }
+    // A hand pressed to the stomach
+    if (wNausea_ * still > 0.01f) {
+        Pose n = p;
+        n.rot[BUpperArmL] = {-0.12f, -0.95f, 0.32f};   // turned in so the hand reaches the belly
+        n.rot[BForearmL] = {0, 0, 1.6f};
+        n.rot[BHandL] = {0, 0, 0.3f};
+        n.rot[BSpine].z -= 0.1f;
+        n.rot[BHead].z -= 0.06f;
+        lerpBones(p, n, wNausea_ * still, {BUpperArmL, BForearmL, BHandL, BSpine, BHead});
+    }
+    // Cold: arms wrapped around yourself, shivering
+    if (wShiver_ > 0.01f) {
+        float hug = wShiver_ * still;
+        if (hug > 0.01f) {
+            Pose c = p;
+            c.rot[BUpperArmL] = {-0.15f, -1.05f, 0.55f};  c.rot[BForearmL] = {0, 0, 1.9f};
+            c.rot[BUpperArmR] = {0.15f, 1.05f, 0.62f};    c.rot[BForearmR] = {0, 0, 1.85f};
+            c.rot[BChest].z -= 0.08f;
+            c.rot[BHead].z += 0.06f;
+            lerpBones(p, c, hug, {BUpperArmL, BForearmL, BUpperArmR, BForearmR, BChest, BHead});
+        }
+        float tremble = 0.025f * wShiver_;
+        p.rot[BChest].x += tremble * std::sin(t * 131.0f);
+        p.rot[BHead].x += tremble * 0.8f * std::sin(t * 117.0f + 1.3f);
+        p.rot[BUpperArmL].z += tremble * std::sin(t * 109.0f + 2.1f);
+        p.rot[BUpperArmR].z += tremble * std::sin(t * 123.0f + 0.4f);
+        p.rootOffset.y += 0.004f * wShiver_ * std::sin(t * 97.0f);
+    }
+    // A hurt arm is held close and guarded, and barely swings
+    for (int side = 0; side < 2; ++side) {
+        float w = side ? wArmR_ : wArmL_;
+        if (side == 1) w *= 1.0f - wHold_ * 0.7f;   // still holds what it carries
+        if (w < 0.01f) continue;
+        int ua = side ? BUpperArmR : BUpperArmL, fa = side ? BForearmR : BForearmL, hd = side ? BHandR : BHandL;
+        float sg = side ? 1.0f : -1.0f;   // roll towards the body
+        Pose g = p;
+        g.rot[ua] = {0.15f * sg, 0.7f * sg, 0.3f};
+        g.rot[fa] = {0, 0, 1.5f};
+        g.rot[hd] = {0, 0, 0.15f};
+        lerpBones(p, g, w * (1.0f - wWork_ * 0.6f), {ua, fa, hd});
+    }
+
+    // --- what's in the hand ------------------------------------------------------
+    // The grip: a weapon sticks out of the fist along the hand's forward axis,
+    // so bending the wrist points it. At rest it points forward and down.
+    if (wHold_ > 0.01f && in.weapon != 0) {
+        Pose hold = p;
+        if (in.weapon == 3) {   // rifle at the low ready, the left hand on the fore-end
+            hold.rot[BUpperArmR] = {-0.1f, 0, 0.22f};
+            hold.rot[BForearmR] = {0, 0, 0.75f};
+            hold.rot[BHandR] = {0, 0, -0.55f};
+            hold.rot[BUpperArmL] = {-0.42f, 0, 0.6f};
+            hold.rot[BForearmL] = {0, 0, 1.05f};
+        } else {
+            hold.rot[BHandR] = {0, 0, in.weapon == 2 ? -0.35f : -0.75f};
+            hold.rot[BForearmR].z += 0.12f;
+        }
+        lerpBones(p, hold, wHold_ * (1.0f - wAim_) * (1.0f - wWork_ * 0.8f),
+                  {BUpperArmR, BForearmR, BHandR, BUpperArmL, BForearmL});
+    }
     lerpBones(p, aim, wAim_, {BUpperArmL, BForearmL, BUpperArmR, BForearmR, BChest, BHead});
     lerpBones(p, eat, wEat_, {BUpperArmL, BForearmL, BUpperArmR, BForearmR, BHead});
 
-    // Melee swing: wind up over the shoulder, then strike down and across
-    if (in.swing > 0.01f) {
+    // --- attacks ------------------------------------------------------------------
+    if (in.swing > 0.01f && in.weapon != 3) {
         float k = 1.0f - in.swing;            // 0 .. 1 through the attack
-        float raise, elbow, twist;
-        if (k < 0.35f) {
-            float u = k / 0.35f;
-            raise = 2.7f * u; elbow = 1.3f * u; twist = -0.45f * u;
-        } else if (k < 0.6f) {
-            float u = (k - 0.35f) / 0.25f;
-            raise = 2.7f - 2.2f * u; elbow = 1.3f - 1.1f * u; twist = -0.45f + 0.8f * u;
+        float raise, elbow, wrist, twist, bend;
+        float rest0 = p.rot[BUpperArmR].z, elbow0 = p.rot[BForearmR].z, wrist0 = p.rot[BHandR].z;
+        if (in.weapon == 1) {
+            // Chop: wind up over the shoulder (the head of the axe behind you,
+            // its edge facing up), then bring it down so the edge leads.
+            if (k < 0.35f) {
+                float u = k / 0.35f;
+                raise = lerp(rest0, 2.7f, u); elbow = lerp(elbow0, 1.3f, u); wrist = lerp(wrist0, 0.05f, u);
+                twist = -0.45f * u; bend = 0.08f * u;
+            } else if (k < 0.6f) {
+                float u = (k - 0.35f) / 0.25f;
+                raise = lerp(2.7f, 0.45f, u); elbow = lerp(1.3f, 0.2f, u); wrist = lerp(0.05f, -0.95f, u);
+                twist = -0.45f + 0.8f * u; bend = lerp(0.08f, -0.3f, u);
+            } else {
+                float u = (k - 0.6f) / 0.4f;
+                raise = lerp(0.45f, rest0, u); elbow = lerp(0.2f, elbow0, u); wrist = lerp(-0.95f, wrist0, u);
+                twist = 0.35f * (1.0f - u); bend = -0.3f * (1.0f - u);
+            }
         } else {
-            float u = (k - 0.6f) / 0.4f;
-            raise = 0.5f * (1.0f - u); elbow = 0.2f + 0.1f * u; twist = 0.35f * (1.0f - u);
+            // Stab or punch: draw back, then thrust straight out
+            if (k < 0.3f) {
+                float u = k / 0.3f;
+                raise = lerp(rest0, 0.55f, u); elbow = lerp(elbow0, 1.75f, u); wrist = lerp(wrist0, -0.2f, u);
+                twist = -0.35f * u; bend = 0;
+            } else if (k < 0.55f) {
+                float u = (k - 0.3f) / 0.25f;
+                raise = lerp(0.55f, 1.45f, u); elbow = lerp(1.75f, 0.08f, u); wrist = lerp(-0.2f, -1.4f, u);
+                twist = -0.35f + 0.75f * u; bend = -0.12f * u;
+            } else {
+                float u = (k - 0.55f) / 0.45f;
+                raise = lerp(1.45f, rest0, u); elbow = lerp(0.08f, elbow0, u); wrist = lerp(-1.4f, wrist0, u);
+                twist = 0.4f * (1.0f - u); bend = -0.12f * (1.0f - u);
+            }
         }
-        p.rot[BUpperArmR] = {-0.25f, 0, raise};
+        p.rot[BUpperArmR] = {-0.15f, 0, raise};
         p.rot[BForearmR] = {0, 0, elbow};
+        p.rot[BHandR] = {0, 0, wrist};
         p.rot[BChest].y += twist;
-        p.rot[BSpine].z -= 0.15f * std::sin(k * PI);
+        p.rot[BSpine].z += bend;
     }
     p = lerpPose(p, lie, wLie_);
     return p;
@@ -224,6 +349,16 @@ void CharacterRig::update(const AnimInput& in, float dt) {
     wWork_ = approach(wWork_, in.working ? 1.0f : 0.0f, 5.0f, dt);
     wEat_ = approach(wEat_, in.eating ? 1.0f : 0.0f, 6.0f, dt);
     wLie_ = approach(wLie_, (in.asleep || in.dead) ? 1.0f : 0.0f, in.dead ? 3.0f : 2.5f, dt);
+    wHold_ = approach(wHold_, in.weapon != 0 ? 1.0f : 0.0f, 6.0f, dt);
+    // the body's state changes slowly
+    wLimpL_ = approach(wLimpL_, std::clamp(in.limpL, 0.0f, 1.0f), 2.0f, dt);
+    wLimpR_ = approach(wLimpR_, std::clamp(in.limpR, 0.0f, 1.0f), 2.0f, dt);
+    wArmL_ = approach(wArmL_, std::clamp(in.armHurtL, 0.0f, 1.0f), 2.0f, dt);
+    wArmR_ = approach(wArmR_, std::clamp(in.armHurtR, 0.0f, 1.0f), 2.0f, dt);
+    wHunch_ = approach(wHunch_, std::clamp(in.hunch, 0.0f, 1.0f), 1.5f, dt);
+    wShiver_ = approach(wShiver_, std::clamp(in.shiver, 0.0f, 1.0f), 1.5f, dt);
+    wNausea_ = approach(wNausea_, std::clamp(in.nausea, 0.0f, 1.0f), 1.5f, dt);
+    wWinded_ = approach(wWinded_, std::clamp(in.winded, 0.0f, 1.0f), 3.0f, dt);
     pose_ = computeTarget(in);
     solve();
 }

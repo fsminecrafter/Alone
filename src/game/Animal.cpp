@@ -10,7 +10,8 @@ namespace alone {
 
 namespace {
 Zone zoneFromString(const std::string& s) {
-    static const char* n[] = {"unknown", "water", "forest", "woodland", "park", "residential", "field", "meadow", "commercial", "hospital", "paved", "parking"};
+    static const char* n[] = {"unknown", "water", "forest", "woodland", "park", "residential", "field", "meadow", "commercial", "hospital", "paved", "parking",
+                              "dense_forest", "thicket", "marsh", "rock"};
     for (int i = 0; i < (int)Zone::Count; ++i)
         if (s == n[i]) return (Zone)i;
     return Zone::Unknown;
