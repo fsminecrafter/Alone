@@ -123,6 +123,32 @@ bool Game::loadSurvivors(const std::string& path) {
         d.joinText = s.str("join_text", "All right. I'll come with you.");
         d.refuseText = s.str("refuse_text", "No. Not now.");
         d.partners = s.list("partners");
+        std::string g = s.str("gender", "man");
+        d.gender = g == "woman" ? Gender::Woman : g == "other" ? Gender::Other : Gender::Man;
+        d.hairStyle = std::clamp(s.integer("hair_style", d.gender == Gender::Woman ? 1 : 0), 0, kHairStyles - 1);
+        auto lines = [&](const char* key) {
+            std::vector<std::string> out;
+            for (auto& l : split(s.str(key), '|')) {
+                std::string t = trim(l);
+                if (!t.empty()) out.push_back(t);
+            }
+            return out;
+        };
+        d.about = lines("about");
+        d.friendChat = lines("friend_chat");
+        d.closeChat = lines("close_chat");
+        d.idle = lines("idle");
+        d.night = lines("night");
+        d.morning = lines("morning");
+        d.loverChat = lines("lover_chat");
+        d.romanceable = s.flag("romanceable", d.age >= 18 && d.disposition != Disposition::Raider);
+        d.flirtYes = s.str("flirt_yes");
+        d.flirtNo = s.str("flirt_no");
+        d.confessYes = s.str("confess_yes");
+        d.confessNo = s.str("confess_no");
+        d.familyText = s.str("family_text");
+        d.bedtime = s.integer("bedtime", 22);
+        d.wakeup = s.integer("wakeup", 7);
         for (const auto& w : d.wear)
             if (!items_.find(w)) Log::warn("Survivor %s wears unknown item %s", d.id.c_str(), w.c_str());
         survivorDefs_.push_back(d);
@@ -242,7 +268,15 @@ void Game::placeSurvivors() {
             }
         // Whoever lives closest is the light you saw in the window
         s.known = d.home.rfind("start:", 0) == 0;
+        s.shownBond = Bond::Stranger;
         survivors_.push_back(std::move(s));
+        if (d.disposition != Disposition::Raider) findBed(survivors_.back());
+        survivors_.back().idleTimer = rng_.range(2, 20);
+        // already in bed if you start at night
+        if (survivors_.back().hasBed && sleepTime(survivors_.back())) {
+            survivors_.back().state = SurvivorState::Sleep;
+            survivors_.back().pos = survivors_.back().bed;
+        }
     }
 }
 
@@ -429,12 +463,48 @@ void Game::takeFor(const std::string& want, int count) {
 // Talking and trading
 // ---------------------------------------------------------------------------
 
+namespace {
+const char* bondKey(Bond b) {
+    switch (b) {
+        case Bond::Enemy: return "enemy";
+        case Bond::Stranger: return "stranger";
+        case Bond::Acquaintance: return "acquaintance";
+        case Bond::Friend: return "friend";
+        case Bond::BestFriend: return "bestfriend";
+        case Bond::Family: return "family";
+        case Bond::Lover: return "lover";
+        default: return "any";
+    }
+}
+} // namespace
+
 std::string Game::greeting(int id) {
     Survivor* s = survivor(id);
     if (!s) return "";
     const SurvivorDef& d = *s->def;
     bool hostile = d.disposition == Disposition::Hostile && !s->admitted;
     bool raider = d.disposition == Disposition::Raider;
+    // Woken up in the night
+    if (s->asleep()) {
+        wakeSurvivor(*s);
+        s->awakeHold = 120;
+        s->wokenUp = true;
+        s->rumourPos = s->pos;
+        if (!s->met) {
+            s->met = true;
+            s->known = true;
+            s->rumoured = false;
+            log("You met " + d.name + ".", hostile ? MessageKind::Info : MessageKind::Good);
+            if (hostile) { s->warned = 4; return "WHAT - who's there?! How did you get in here? Don't move!"; }
+            addTrust(*s, -4);
+            return personal(line("night.firstmeet"));
+        }
+        Bond b = s->bond();
+        if (hostile) { s->warned = 4; return "You?! In here, at night? Give me one reason not to shoot."; }
+        if (b <= Bond::Acquaintance) addTrust(*s, -3);
+        else if (b == Bond::Friend) addTrust(*s, -1);
+        return personal(pickOf(b >= Bond::Friend ? std::vector<std::string>{} : d.night, std::string("night.") + bondKey(b)));
+    }
     if (hostile) s->warned = std::min(s->warned, -15.0f);   // he'll hear you out for a moment
     if (raider && !s->truce)   // a moment before the first blow
         for (auto& o : survivors_)
@@ -447,13 +517,44 @@ std::string Game::greeting(int id) {
         s->rumoured = false;
         log("You met " + d.name + ".", raider || hostile ? MessageKind::Info : MessageKind::Good);
         if (raider) return s->truce ? "You again. We had a deal - so walk." : "Ha! Now you want to talk? Empty that bag on the ground.";
-        return (d.greet.empty() ? std::string(hostile ? "Stop right there! What do you want?" : "Hello.") : d.greet) + warn;
+        std::string intro = hostile ? "" : " " + line("intro.any");
+        return personal((d.greet.empty() ? std::string(hostile ? "Stop right there! What do you want?" : "Hello.") : d.greet) + intro) + warn;
     }
     s->rumoured = false;
     if (raider) return s->truce ? "Keep walking. The deal holds till tomorrow." : "Back again? Then you know what we want.";
     if (hostile) return s->trust > 0 ? "You. What now? Say it from there." : "I told you to stay away!";
-    if (s->trust < -10) return "What do you want?" + warn;
-    return pickLine(d.hello, rng_) + warn;
+    Bond b = s->bond();
+    if (b == Bond::Enemy) return personal(line("hello.enemy")) + warn;
+    std::string hello = b >= Bond::Friend && rng_.chance(0.6f) ? line(std::string("hello.") + bondKey(b)) : pickLine(d.hello, rng_);
+    if (hello.empty()) hello = pickLine(d.hello, rng_);
+    // They notice how you look
+    std::string concern;
+    if (b >= Bond::Acquaintance && rng_.chance(0.6f)) {
+        BodySignals g = player_.body.signals();
+        const char* key = g.bleeding > 0.1f ? "concern.bleeding" : g.pain > 0.45f ? "concern.hurt" : g.cold > 0.45f ? "concern.cold"
+                        : g.fever > 0.4f ? "concern.sick" : g.tired > 0.7f ? "concern.tired" : g.hunger > 0.75f ? "concern.hungry" : nullptr;
+        if (key) concern = " " + line(key);
+    }
+    // Family and lovers keep something aside for you now and then
+    std::string gift;
+    int today = world_->clock().day();
+    if ((b == Bond::Family || b == Bond::Lover) && s->lastGiftDay != today && rng_.chance(0.45f)) {
+        s->lastGiftDay = today;
+        int pick = -1;
+        for (size_t i = 0; i < s->inventory.items().size(); ++i) {
+            const ItemInstance& it = s->inventory.items()[i];
+            if (it.uid == s->weaponUid) continue;
+            ItemCategory c = it.def->category;
+            if ((c == ItemCategory::Food && !it.rotten()) || c == ItemCategory::Medical || c == ItemCategory::Drink) { pick = (int)i; if (rng_.chance(0.5f)) break; }
+        }
+        if (pick >= 0) {
+            ItemInstance it = s->inventory.take(pick);
+            gift = " " + line(b == Bond::Lover ? "gift.lover" : "gift.family");
+            log(firstName(d) + " gives you: " + it.def->name + ".", MessageKind::Good);
+            giveItem(it);
+        }
+    }
+    return personal(hello + concern + gift) + warn;
 }
 
 std::vector<std::pair<Topic, std::string>> Game::talkTopics(int id) {
@@ -486,7 +587,18 @@ std::vector<std::pair<Topic, std::string>> Game::talkTopics(int id) {
         out.push_back({Topic::Bye, "(Back away.)"});
         return out;
     }
-    out.push_back({Topic::Chat, "How are you holding up?"});
+    Bond b = s->bond();
+    int today = world_->clock().day();
+    if (s->wokenUp && sleepTime(*s)) out.push_back({Topic::BackToSleep, "Sorry I woke you. Go back to sleep."});
+    if (b == Bond::Enemy) {
+        if (s->lastSorryDay != today) out.push_back({Topic::Sorry, "I'm sorry. For whatever I did."});
+        out.push_back({Topic::Bye, "(Leave them be.)"});
+        return out;
+    }
+    out.push_back({Topic::Chat, b >= Bond::Friend ? "So, how are you, really?" : "How are you holding up?"});
+    if (s->storiesTold < (int)d.about.size())
+        out.push_back({Topic::About, s->storiesTold == 0 ? "Tell me about yourself." : "Tell me more about you."});
+    if (s->lastJokeDay != today) out.push_back({Topic::Joke, "Want to hear a joke?"});
     out.push_back({Topic::Others, "Have you seen anyone else?"});
     if (d.wantCount > 0 && !s->requestDone) {
         if (!s->requestKnown) out.push_back({Topic::Request, "Is there anything you need?"});
@@ -498,14 +610,33 @@ std::vector<std::pair<Topic, std::string>> Game::talkTopics(int id) {
         }
     }
     out.push_back({Topic::Trade, "Do you want to trade?"});
+    // Getting closer
+    if (d.romanceable && b != Bond::Lover && !s->family && s->trust >= 20 && s->lastFlirtDay != today) {
+        static const char* flirts[] = {"You look good today, you know.", "I like spending time with you.", "Has anyone told you that you have a lovely smile?",
+                                       "I find myself thinking about you out there.", "You make this place feel less empty."};
+        out.push_back({Topic::Flirt, flirts[(today + s->id) % 5]});
+    }
+    // ...or growing close the other way: looking out for each other
+    if (b != Bond::Lover && !s->family && s->trust >= 20 && s->lastKinDay != today) {
+        static const char* kin[] = {"Whatever happens out there, I've got your back.", "Tell me about the people you lost. I want to know.",
+                                    "Let's eat together tonight. Like a proper family.", "Can I tell you about my family? Before all this.",
+                                    "If you ever need anything, you come to me. Anything."};
+        out.push_back({Topic::Kin, kin[(today * 3 + s->id) % 5]});
+    }
+    if (d.romanceable && b != Bond::Lover && !s->family && s->romance >= kBondNeeded && s->trust >= kTrustBestFriend)
+        out.push_back({Topic::Confess, "I think I'm falling for you."});
+    if (!s->family && b != Bond::Lover && s->kinship >= kBondNeeded && s->trust >= kTrustBestFriend)
+        out.push_back({Topic::Family, "You're family to me now. You know that?"});
+    if (b >= Bond::BestFriend) out.push_back({Topic::Hug, b == Bond::Lover ? "Come here. (Hold them close.)" : "Come here. (Hug them.)"});
     if (s->joined) {
         if (s->state == SurvivorState::Wait) out.push_back({Topic::Follow, "Come with me."});
         else out.push_back({Topic::Wait, "Wait here."});
         out.push_back({Topic::Dismiss, "Go back home for now."});
-    } else if (d.canJoin) {
-        out.push_back({Topic::Join, "Come with me. We're safer together."});
+    } else if (d.canJoin || b == Bond::Family || b == Bond::Lover) {
+        out.push_back({Topic::Join, b == Bond::Lover ? "Come with me. I want you by my side." : "Come with me. We're safer together."});
     }
-    out.push_back({Topic::Bye, "Goodbye."});
+    if (b == Bond::Lover) out.push_back({Topic::Breakup, "I think we should just be friends."});
+    out.push_back({Topic::Bye, b >= Bond::Friend ? "See you later." : "Goodbye."});
     return out;
 }
 
@@ -514,15 +645,120 @@ std::string Game::talk(int id, Topic t) {
     if (!s || !s->alive()) return "";
     const SurvivorDef& d = *s->def;
     bool wary = d.disposition == Disposition::Wary;
+    Bond b = s->bond();
+    int today = world_->clock().day();
+    std::string bk = bondKey(b);
+    auto say = [&](const std::string& l) { return personal(l); };
     switch (t) {
-        case Topic::Chat:
-            if (s->trust < 25) s->trust += 2;
-            if (d.chat.empty()) return "We get by.";
-            return d.chat[(size_t)rng_.rangeInt(0, (int)d.chat.size() - 1)];
+        case Topic::Chat: {
+            // Once a day, a proper talk brings you closer
+            if (s->lastChatDay != today) { s->lastChatDay = today; addTrust(*s, 3, kTrustBestFriend + 5); }
+            else addTrust(*s, 0.5f, 25);
+            // Something about right now, or something of their own
+            float rain = world_->clock().weather().rain;
+            float h = world_->clock().hourOfDay();
+            if (rng_.chance(0.3f)) {
+                std::string now = rain > 0.3f ? line(world_->clock().weather().kind == WeatherKind::Snow ? "chat.snow" : "chat.rain")
+                                : world_->outdoorTemp() < 2 ? line("chat.cold") : h >= 20 || h < 5 ? line("chat.night") : h < 10 ? line("chat.morning") : "";
+                if (!now.empty()) return say(now);
+            }
+            const std::vector<std::string>* own = &d.chat;
+            if (b == Bond::Lover && !d.loverChat.empty()) own = &d.loverChat;
+            else if (b >= Bond::BestFriend && !d.closeChat.empty() && rng_.chance(0.6f)) own = &d.closeChat;
+            else if (b >= Bond::Friend && !d.friendChat.empty() && rng_.chance(0.6f)) own = &d.friendChat;
+            if (own->empty() || rng_.chance(0.35f)) {
+                std::string g = line("chat." + bk);
+                if (!g.empty()) return say(g);
+            }
+            if (own->empty()) return "We get by.";
+            return say(pickOf(*own, "chat.any"));
+        }
+        case Topic::About: {
+            if (s->storiesTold >= (int)d.about.size()) return say(line("about.none"));
+            // each piece of their story needs a little more trust
+            float need = s->storiesTold * 10.0f - (wary ? 0.0f : 5.0f);
+            if (s->trust < need) return say(line("about.notyet"));
+            std::string story = d.about[(size_t)s->storiesTold++];
+            addTrust(*s, 2, 90);
+            return say(story);
+        }
+        case Topic::Joke: {
+            s->lastJokeDay = today;
+            float odds = 0.55f + s->trust / 200.0f - (wary ? 0.15f : 0.0f);
+            if (rng_.chance(odds)) { addTrust(*s, 2, 95); return say(line("joke.good")); }
+            addTrust(*s, -0.5f);
+            return say(line("joke.bad"));
+        }
+        case Topic::Flirt: {
+            s->lastFlirtDay = today;
+            float odds = std::clamp((s->trust - 15) / 55.0f + s->romance / 200.0f, 0.1f, 0.95f);
+            if (rng_.chance(odds)) {
+                s->romance = std::min(100.0f, s->romance + rng_.range(10, 16));
+                s->kinship = std::max(0.0f, s->kinship - 8);   // it stops feeling like family
+                addTrust(*s, 2, 100);
+                std::string l = !d.flirtYes.empty() && rng_.chance(0.5f) ? pickLine(d.flirtYes, rng_) : line(s->romance >= 50 ? "flirt.warm" : "flirt.yes");
+                return say(l);
+            }
+            addTrust(*s, -2);
+            return say(!d.flirtNo.empty() && rng_.chance(0.5f) ? pickLine(d.flirtNo, rng_) : line("flirt.no"));
+        }
+        case Topic::Kin: {
+            s->lastKinDay = today;
+            float odds = std::clamp((s->trust - 10) / 50.0f + s->kinship / 200.0f, 0.15f, 0.95f);
+            if (rng_.chance(odds)) {
+                s->kinship = std::min(100.0f, s->kinship + rng_.range(10, 16));
+                s->romance = std::max(0.0f, s->romance - 8);   // and less like romance
+                addTrust(*s, 2, 100);
+                return say(line(s->kinship >= kBondNeeded ? "kin.warm" : "kin.yes"));
+            }
+            addTrust(*s, -1);
+            return say(line("kin.no"));
+        }
+        case Topic::Confess:
+            if (s->kinship >= 40) {   // they see you as family, not like that
+                s->romance = std::max(0.0f, s->romance - 20);
+                return say(line("confess.family"));
+            }
+            if (s->romance >= kBondNeeded && s->trust >= kTrustBestFriend) {
+                s->lover = true;
+                s->romance = std::max(s->romance, 70.0f);
+                addTrust(*s, 5, 100);
+                sound(Sfx::Click, player_.pos);
+                return say(d.confessYes.empty() ? line("confess.yes") : d.confessYes);
+            }
+            s->romance = std::max(0.0f, s->romance - 20);
+            return say(d.confessNo.empty() ? line("confess.no") : d.confessNo);
+        case Topic::Family:
+            if (s->romance >= 40) return say(line("family.romance"));   // they hoped for something else
+            if (s->kinship >= kBondNeeded && s->trust >= kTrustBestFriend) {
+                s->family = true;
+                addTrust(*s, 3, 100);
+                return say(d.familyText.empty() ? line("family.yes") : d.familyText);
+            }
+            return say(line("family.no"));
+        case Topic::Hug:
+            addTrust(*s, 0.5f, 100);
+            if (player_.body.signals().cold > 0.3f) player_.body.mutableState().coreTempC += 0.05f;   // a little warmth
+            return say(line(b == Bond::Lover ? "hug.lover" : b == Bond::Family ? "hug.family" : "hug.friend"));
+        case Topic::Breakup:
+            s->lover = false;
+            s->romance = 20;
+            addTrust(*s, -10);
+            announceBond(*s);
+            return say(line("breakup.any"));
+        case Topic::Sorry:
+            s->lastSorryDay = today;
+            if (s->angry) return "...";
+            addTrust(*s, 6);
+            return say(line(s->bond() == Bond::Enemy ? "sorry.no" : "sorry.ok"));
+        case Topic::BackToSleep:
+            s->awakeHold = 0;
+            s->wokenUp = false;
+            return say(line("sleep.back"));
         case Topic::Others:
             if (s->trust < (wary ? 15 : d.disposition == Disposition::Hostile ? 0 : -50))
                 return d.disposition == Disposition::Hostile ? "Why would I tell you anything?" : "I don't know you well enough to tell you that.";
-            return rumour(*s);
+            return say(rumour(*s));
         case Topic::Parley:
             s->warned = -40;
             if (s->state == SurvivorState::Hunt) s->state = SurvivorState::Home;
@@ -558,7 +794,7 @@ std::string Game::talk(int id, Topic t) {
                         o.stateTimer = 20;
                     }
                 s->truceUntil = world_->clock().totalMinutes() + 90;
-            return loaded ? "Whoa - okay, OKAY. We're going." : "...You're crazy. Fine. Not worth it.";
+                return loaded ? "Whoa - okay, OKAY. We're going." : "...You're crazy. Fine. Not worth it.";
             }
             s->state = SurvivorState::Hunt;
             s->stateTimer = 25;
@@ -566,12 +802,12 @@ std::string Game::talk(int id, Topic t) {
         }
         case Topic::Request:
             s->requestKnown = true;
-            return d.wantText;
+            return say(d.wantText);
         case Topic::Give: {
             if (countFor(d.wantItem) < d.wantCount) return "You don't have it.";
             takeFor(d.wantItem, d.wantCount);
             s->requestDone = true;
-            s->trust += 40;
+            addTrust(*s, 40);
             std::string got;
             for (const auto& [rid, n] : d.reward)
                 for (int k = 0; k < n; ++k) {
@@ -599,32 +835,38 @@ std::string Game::talk(int id, Topic t) {
                 s->admitted = true;
                 log(d.name + " lets you in.", MessageKind::Good);
             }
-            return d.thanksText;
+            return say(d.thanksText);
         }
         case Topic::Trade:
+            if (b == Bond::Enemy) return "Trade? With you? No.";
             if (wary && s->trust < 0) return "Trade? I don't even know your name.";
             if (d.disposition == Disposition::Hostile && !s->admitted)
                 return s->trust > -30 ? "Let's see what you've got. Leave it by the door." : "Get lost.";
             return "Let's see what you've got.";
-        case Topic::Join:
-            if (!d.canJoin) return d.refuseText;
-            if (s->trust < d.joinTrust) return d.refuseText;
+        case Topic::Join: {
+            bool close = b == Bond::Family || b == Bond::Lover;
+            if (!close && (!d.canJoin || s->trust < d.joinTrust)) return say(d.refuseText);
             s->joined = true;
             s->state = SurvivorState::Follow;
+            s->path.clear();
             log(d.name + " is coming with you.", MessageKind::Good);
-            return d.joinText;
+            if (close && !d.canJoin) return say(line(b == Bond::Lover ? "join.lover" : "join.family"));
+            return say(d.joinText);
+        }
         case Topic::Follow:
             s->state = SurvivorState::Follow;
-            return "Right behind you.";
+            return say(b >= Bond::Friend ? line("follow.friend") : "Right behind you.");
         case Topic::Wait:
             s->state = SurvivorState::Wait;
             s->target = s->pos;
-            return "I'll wait here. Don't be long.";
+            return say(b >= Bond::Friend ? line("wait.friend") : "I'll wait here. Don't be long.");
         case Topic::Dismiss:
             s->joined = false;
             s->state = SurvivorState::Home;
-            return "I'll head home. You know where to find me.";
+            s->path.clear();
+            return say(b == Bond::Lover ? line("dismiss.lover") : "I'll head home. You know where to find me.");
         case Topic::Bye:
+            if (b >= Bond::Friend) return say(line("bye." + bk));
             return wary ? "Mm." : "Take care out there.";
         default: break;
     }
@@ -676,7 +918,13 @@ bool Game::tradeFair(int id, const std::vector<uint32_t>& mine, const std::vecto
     if (s->def->disposition == Disposition::Raider) { if (why) *why = "They don't trade."; return false; }
     if (give == 0 && take == 0) { if (why) *why = "Pick what to give and what to take."; return false; }
     // Friends give you a better deal; companions share
-    float markup = s->joined ? 0.0f : s->trust >= 40 ? 1.0f : s->trust >= 10 ? 1.25f : 1.5f;
+    Bond b = s->bond();
+    if (b == Bond::Enemy) { if (why) *why = "\"I'm not trading with you.\""; return false; }
+    float markup = s->joined ? 0.0f
+                 : b == Bond::Lover || b == Bond::Family ? 0.6f
+                 : b == Bond::BestFriend ? 0.85f
+                 : b == Bond::Friend ? 1.0f
+                 : b == Bond::Acquaintance ? 1.25f : 1.5f;
     if (s->def->disposition == Disposition::Hostile && !s->admitted) markup = 1.8f;   // he names the price
     if (give < take * markup) {
         if (why) *why = "\"That's not enough. I'd want more for that.\"";
@@ -705,9 +953,8 @@ bool Game::trade(int id, const std::vector<uint32_t>& mine, const std::vector<ui
         giveItem(s->inventory.take(i));
     }
     // A gift (or a generous deal) makes friends
-    if (give > take) s->trust += std::min(20.0f, 2.0f + (give - take) / 4.0f);
-    else s->trust += 1;
-    s->trust = std::min(100.0f, s->trust);
+    if (give > take) addTrust(*s, std::min(20.0f, 2.0f + (give - take) / 4.0f));
+    else addTrust(*s, 1, 60);
     sound(Sfx::Click, player_.pos);
     // A companion without a weapon picks up the best one they have
     if (s->weaponUid == 0) {
@@ -768,6 +1015,8 @@ void Game::hurtSurvivor(Survivor& s, float damage, bool byPlayer) {
         s.angry = true;
         s.joined = false;
         s.trust = -100;
+        s.lover = s.family = false;
+        if (s.asleep()) wakeSurvivor(s);
         if (!wasHunting) survivorSay(s, rng_.chance(0.5f) ? "What are you doing?!" : "Stop! STOP!");
         // the others hear about it
         for (auto& o : survivors_)
@@ -834,7 +1083,6 @@ void Game::survivorAttack(Survivor& s, Vec2 targetPos, bool atPlayer, Animal* an
 }
 
 void Game::updateSurvivors(float dt, float gameMinutes) {
-    (void)gameMinutes;
     Player& p = player_;
     float daylight = world_->clock().daylight();
     for (auto& s : survivors_) {
@@ -863,11 +1111,19 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                 for (auto& o : survivors_)
                     if (o.alive() && o.def->id == d.partners[0] && distance(o.pos, s.pos) > 3)
                         s.pos = o.pos + Vec2{1.5f, 1.0f};
+            } else if (!raider && !s.joined && s.hasBed && !s.angry) {
+                // Nobody's watching: to bed at night, up in the morning
+                s.awakeHold = 0;
+                s.path.clear();
+                if (sleepTime(s)) { s.state = SurvivorState::Sleep; s.pos = s.bed; }
+                else if (s.asleep()) { wakeSurvivor(s); s.pos = s.home; }
             }
             continue;
         }
-        // stepped into view inside something solid: out of it
-        if (world_->tileBlocked((int)std::floor(s.pos.x), (int)std::floor(s.pos.y)))
+        announceBond(s);
+        s.dozing = false;
+        // stepped into view inside something solid: out of it (a bed is fine while they're in it)
+        if (!s.asleep() && world_->tileBlocked((int)std::floor(s.pos.x), (int)std::floor(s.pos.y)))
             for (int k = 0; k < 12; ++k) {
                 Vec2 q = s.pos + Vec2{rng_.range(-3, 3), rng_.range(-3, 3)};
                 if (!world_->tileBlocked((int)std::floor(q.x), (int)std::floor(q.y))) { s.pos = q; break; }
@@ -878,6 +1134,8 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
         float sight = (raider ? 38.0f : 28.0f) * (0.35f + 0.65f * daylight) * (p.sneaking ? 0.6f : 1.0f);
         bool sees = !dead() && dist < std::max(sight, p.noise * 1.2f) && (dist < p.noise || world_->lineOfSight(s.pos, p.pos));
         if (p.vehicle >= 0 && dist < 60) sees = true;   // an engine is hard to miss
+        if (s.asleep()) sees = false;
+        if (s.asleep() && s.joined) wakeSurvivor(s);
 
         // Pick what to do
         Vec2 goal = s.pos;
@@ -885,6 +1143,19 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
         bool face = false;
         Vec2 faceAt;
         if (s.joined) {
+            // Time together brings you closer
+            if (dist < 30) {
+                s.companyMinutes += gameMinutes;
+                while (s.companyMinutes >= 60) { s.companyMinutes -= 60; addTrust(s, 1, 80); }
+                // now and then they say something
+                if (!p.asleep && s.speechTimer <= 0 && rng_.chance(dt / 150.0f)) {
+                    float rain = world_->clock().weather().rain;
+                    BodySignals g = p.body.signals();
+                    std::string key = g.bleeding > 0.1f ? "companion.hurt" : rain > 0.3f ? "companion.rain"
+                                    : daylight < 0.2f ? "companion.night" : "companion." + std::string(s.bond() >= Bond::BestFriend ? "close" : "any");
+                    survivorSay(s, personal(line(key)));
+                }
+            }
             // Companions: protect you first, then follow
             Animal* foeA = nullptr;
             Survivor* foeS = nullptr;
@@ -908,6 +1179,9 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
             } else if (s.state == SurvivorState::Wait) {
                 goal = s.target;
                 speed = distance(s.pos, goal) > 1 ? 1.4f : 0;
+                s.dozing = p.asleep && dist < 25;
+            } else if (p.asleep && dist < 6) {
+                s.dozing = true;    // you're sleeping: they doze off beside you
             } else {
                 // in the car with you
                 if (p.vehicle >= 0 && dist < 12) { s.pos = p.pos; continue; }
@@ -980,12 +1254,14 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                 if (s.speechTimer <= 0 && s.warned > 0) survivorSay(s, pickLine(d.warn, rng_));
                 float tooClose = s.trust > 0 ? 6.0f : 14.0f;
                 if ((dist < tooClose && s.warned > -5) || s.warned > 12) { s.state = SurvivorState::Hunt; s.stateTimer = 20; }
-            } else if (dist > 45) {
-                s.warned = std::max(0.0f, s.warned - dt);
+            } else {
+                if (dist > 45) s.warned = std::max(0.0f, s.warned - dt);
+                updateHomeLife(s, dt, sees, goal, speed, face);
             }
         } else {
             // Friendly and wary people keep to their homes, and watch you come
-            if (sees && dist < 14) {
+            bool bedtime = sleepTime(s) && s.met && s.awakeHold <= 0 && s.bond() >= Bond::Acquaintance;
+            if (sees && dist < 14 && !s.asleep() && !bedtime) {
                 face = true; faceAt = p.pos;
                 if (!s.met && s.speechTimer <= 0 && s.stateTimer <= 0) {
                     survivorSay(s, d.disposition == Disposition::Wary ? "Who's there? Stay where you are!" : "Hello? Is someone there?");
@@ -997,12 +1273,8 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                     goal = s.pos + (s.pos - p.pos).normalized() * 3;
                     speed = 1.6f;
                 }
-            } else if (s.stateTimer <= 0) {
-                s.stateTimer = rng_.range(6, 16);
-                if (rng_.chance(0.6f)) s.target = s.home + Vec2{rng_.range(-d.roam, d.roam), rng_.range(-d.roam, d.roam)};
-                else s.target = s.pos;
             }
-            if (speed == 0 && distance(s.pos, s.target) > 0.8f && !face) { goal = s.target; speed = 1.2f; }
+            if (speed == 0) updateHomeLife(s, dt, sees, goal, speed, face);
         }
 
         // Move
@@ -1023,7 +1295,10 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                 // stuck on a wall: slide sideways for a moment
                 Vec2 side{-s.vel.y, s.vel.x};
                 s.pos = world_->moveCircle(s.pos, side * (dt * (s.id % 2 ? 1.0f : -1.0f)), 0.28f);
-                if (!s.joined && s.state != SurvivorState::Hunt) s.target = s.pos;
+                if (!s.joined && s.state != SurvivorState::Hunt) {
+                    s.target = s.pos;
+                    if (!s.path.empty() && rng_.chance(dt * 0.7f)) { s.path.clear(); s.idleTimer = 2; }
+                }
             }
             s.facing = std::atan2(s.vel.y, s.vel.x);
         }

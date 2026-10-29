@@ -86,6 +86,7 @@ struct ItemInstance {
     bool liquidSafe = true;      // false: untreated lake water
     uint8_t liquid = 0;          // what's in it: 0 water, 1 petrol
     bool opened = false;         // cans/jars
+    uint32_t tint = 0;           // clothes: dyed this colour (0 = the item's own)
     int usesLeft = 0;
     bool carriesPathogen = false;  // rolled when created
     uint32_t uid = 0;

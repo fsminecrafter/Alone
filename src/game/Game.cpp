@@ -42,10 +42,34 @@ bool Game::loadData() {
     ok &= symptoms_.load(Paths::data("text/symptoms.ini"));
     ok &= animals_.load(Paths::data("animals/animals.ini"));
     loadSurvivors(Paths::data("survivors/survivors.ini"));   // optional: the town can be empty
+    loadDialogue(Paths::data("text/dialogue.ini"));          // optional too
     return ok;
 }
 
-void Game::newGame(uint32_t seed) {
+CharacterChoice CharacterChoice::defaults() {
+    CharacterChoice c;
+    c.wear[(size_t)ClothingSlot::Torso] = "tshirt";
+    c.wear[(size_t)ClothingSlot::Sweater] = "fleece";
+    c.wear[(size_t)ClothingSlot::Legs] = "jeans";
+    c.wear[(size_t)ClothingSlot::Feet] = "sneakers";
+    return c;
+}
+
+void Game::dressPlayer(const CharacterChoice& who) {
+    player_.look = who.look;
+    if (player_.look.name.empty()) player_.look.name = "Alex";
+    for (size_t sl = 1; sl < who.wear.size(); ++sl) {
+        if (sl == (size_t)ClothingSlot::Back) continue;    // a backpack is found, not chosen
+        player_.worn[sl] = ItemInstance{};
+        if (who.wear[sl].empty()) continue;
+        ItemInstance it = items_.create(who.wear[sl], rng_);
+        if (!it.def || it.def->slot != (ClothingSlot)sl) continue;
+        it.tint = who.tint[sl];
+        player_.worn[sl] = it;
+    }
+}
+
+void Game::newGame(uint32_t seed, const CharacterChoice* who) {
     seed_ = seed;
     world_ = std::make_unique<World>(map_, items_, seed);
     rng_.reseed(seed * 7919ULL + 17);
@@ -79,14 +103,7 @@ void Game::newGame(uint32_t seed) {
         player_.pos = map_.spawn();
     }
 
-    auto wear = [&](const char* id) {
-        ItemInstance it = items_.create(id, rng_);
-        if (it.def) player_.worn[(size_t)it.def->slot] = it;
-    };
-    wear("tshirt");
-    wear("fleece");
-    wear("jeans");
-    wear("sneakers");
+    dressPlayer(who ? *who : CharacterChoice::defaults());
     ItemInstance bottle = items_.create("water_bottle", rng_);
     bottle.liquidMl = 600;
     player_.inventory.add(bottle);
@@ -277,6 +294,7 @@ void Game::update(float dt, const PlayerInput& input) {
     }
     updatePlayer(dt, gameMinutes, input);
     updateCombat(dt, input);
+    updateAutoDrink(dt);
 
     // Wildlife
     PlayerPresence presence{player_.pos, player_.noise, !dead()};
@@ -1525,6 +1543,35 @@ void Game::eat(ItemInstance& it, float fraction) {
     if (d.id == "surstromming") msg += " The smell is indescribable.";
     log(msg);
     it.portion -= amount;
+}
+
+// Thirsty, and there's clean water in an open bottle: take a sip without
+// being asked. Never untreated water, petrol, or anything still sealed.
+void Game::updateAutoDrink(float dt) {
+    autoDrinkTimer_ -= dt;
+    if (!autoDrink_ || autoDrinkTimer_ > 0 || dead() || player_.asleep || action_.active) return;
+    autoDrinkTimer_ = 2.0f;
+    BodySignals g = player_.body.signals();
+    if (g.thirst < 0.3f || g.nausea > 0.7f) return;
+    // the emptiest bottle first, so the full ones stay full
+    int best = -1;
+    auto& v = player_.inventory.items();
+    for (size_t i = 0; i < v.size(); ++i) {
+        const ItemInstance& it = v[i];
+        const ItemDef& d = *it.def;
+        if (d.capacityMl <= 0 || it.liquid != 0 || !it.liquidSafe || it.liquidMl < 1) continue;
+        if (d.sealed && !it.opened) continue;
+        if (d.hasTag("gascan")) continue;
+        if (best < 0 || it.liquidMl < v[best].liquidMl) best = (int)i;
+    }
+    if (best < 0) return;
+    ItemInstance& it = v[best];
+    float ml = std::min(250.0f, it.liquidMl);
+    it.liquidMl -= ml;
+    drinkWater(ml, true, nullptr);
+    sound(Sfx::Drink, player_.pos);
+    log("Thirsty, you take a few mouthfuls from your " + lower(itemName(it)) + ".");
+    autoDrinkTimer_ = 25.0f;   // give it a moment to help before the next sip
 }
 
 void Game::drinkFrom(ItemInstance& it) {

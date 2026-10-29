@@ -409,17 +409,18 @@ void Game::updateVehicle(float dt, const PlayerInput& in) {
     }
     if (car && !v->running) top = 0;
 
-    // Steer towards where you want to go; back up if that's behind you
-    float len = in.move.length();
-    float throttle = 0;
-    if (len > 0.1f && p.fallen <= 0) {
-        float want = std::atan2(in.move.y, in.move.x);
-        float diff = wrapAngle(want - v->heading);
-        bool reverse = car && std::fabs(diff) > 2.2f && v->speed < 1.5f;
-        if (reverse) diff = wrapAngle(want + kPi - v->heading);
-        float turnRate = car ? 1.7f * std::min(1.0f, std::fabs(v->speed) / 3.0f) : 0.6f + 2.2f * std::min(1.0f, std::fabs(v->speed) / 1.5f);
-        float turn = std::clamp(diff, -turnRate * dt, turnRate * dt);
-        float newHeading = v->heading + turn;
+    // Driving like a car: W/S is the throttle (S brakes, then reverses), A/D
+    // turn the wheel. Steering only bites when you're rolling, and reversing
+    // turns the nose the other way, as in a real car.
+    float throttle = std::clamp(in.throttle, -1.0f, 1.0f), steer = std::clamp(in.steer, -1.0f, 1.0f);
+    if (p.fallen > 0) throttle = steer = 0;
+    float spd0 = std::fabs(v->speed);
+    if (std::fabs(steer) > 0.01f) {
+        float grip = car ? std::min(1.0f, spd0 / 3.5f) * (1.0f - 0.4f * std::clamp((spd0 - 10.0f) / 8.0f, 0.0f, 1.0f))
+                         : std::min(1.0f, 0.25f + spd0 / 1.5f);
+        float turnRate = (car ? 1.55f : 2.3f) * grip;
+        float sign = v->speed < -0.05f ? -1.0f : 1.0f;
+        float newHeading = v->heading + steer * turnRate * sign * dt;
         // only turn if the body fits there
         Vec2 nf{std::cos(newHeading), std::sin(newHeading)};
         bool fits = true;
@@ -429,13 +430,21 @@ void Game::updateVehicle(float dt, const PlayerInput& in) {
                 fits &= !world_->tileBlocked((int)std::floor(q.x), (int)std::floor(q.y));
             }
         if (fits) v->heading = wrapAngle(newHeading);
-        throttle = (reverse ? -0.45f : 1.0f) * std::clamp(std::cos(diff) * 1.2f, 0.25f, 1.0f) * std::min(1.0f, len);
-        if (in.sneak) throttle *= 0.4f;    // Ctrl: creep
     }
-    float target = throttle * top;
-    float accel = car ? (target * v->speed < 0 || std::fabs(target) < std::fabs(v->speed) ? 9.0f : 4.5f)
-                      : (std::fabs(target) < std::fabs(v->speed) ? 5.0f : 2.2f);
-    if (len <= 0.1f) accel = car ? 3.0f : 2.0f;   // rolling to a stop
+    float target = 0, accel = car ? 1.6f : 1.2f;    // nothing pressed: roll to a stop
+    if (throttle > 0.05f) {
+        target = throttle * top;
+        accel = v->speed < -0.1f ? (car ? 10.0f : 6.0f) : car ? 4.5f : 2.2f;
+    } else if (throttle < -0.05f) {
+        if (v->speed > 0.3f) {                       // braking
+            target = 0;
+            accel = car ? 11.0f : 6.5f;
+        } else {                                     // reversing (pushing the bike back)
+            target = throttle * (car ? std::min(top, 5.5f) : 0.9f);
+            accel = car ? 3.0f : 1.5f;
+        }
+    }
+    if (in.sneak) target *= 0.4f;    // Ctrl/C: creep
     if (v->speed < target) v->speed = std::min(target, v->speed + accel * dt);
     else v->speed = std::max(target, v->speed - accel * dt);
 

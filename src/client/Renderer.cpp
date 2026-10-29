@@ -1050,7 +1050,16 @@ void Renderer::drawShowcase(const AnimInput& anim, float facing, float dt, const
     }
     playerRig_.update(anim, dt);
     playerRig_.place(V(0, 0, 0), facing);
-    playerModel_.skin(playerRig_, lookOf(look.worn, &look.body));
+    // the character's own body shape, skin and hair
+    BodyShape shape{look.look.gender == Gender::Woman, look.look.hairStyle};
+    if (!playerModel_.ready() || playerModel_.shape() != shape) {
+        playerModel_.shutdown();
+        playerModel_.init(shape);
+    }
+    CharacterLook L = lookOf(look.worn, &look.body);
+    L.skin = hexColor(look.look.skin);
+    L.hair = hexColor(look.look.hair);
+    playerModel_.skin(playerRig_, L);
 
     Vector3 sunDir = Vector3Normalize(V(-0.5f, 0.8f, 0.4f));
     Vector3 sunCol = V(0.9f, 0.82f, 0.7f), amb = V(0.38f, 0.4f, 0.46f), sky = V(0.55f, 0.62f, 0.7f);
@@ -1079,7 +1088,15 @@ void Renderer::drawShowcase(const AnimInput& anim, float facing, float dt, const
     active_ = &mat_;
     mat_.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     DrawMesh(stage, mat_, MatrixIdentity());
-    drawCharacter(playerRig_, playerModel_, look.worn, &look.body, weapon);
+    if (anim.ride == 1) {
+        // the bike under the rider (the seat is a little behind its centre)
+        Vehicle bike;
+        bike.kind = VehicleKind::Bike;
+        bike.variant = 3;
+        Matrix t = MatrixMultiply(MatrixRotateY(-facing), MatrixTranslate(std::cos(facing) * 0.16f, 0, std::sin(facing) * 0.16f));
+        DrawMesh(vehicleMesh(bike), mat_, t);
+    }
+    drawCharacter(playerRig_, playerModel_, look.worn, &look.body, anim.ride ? nullptr : weapon);
     EndMode3D();
 }
 

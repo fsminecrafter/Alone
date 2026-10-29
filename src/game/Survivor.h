@@ -15,6 +15,23 @@ namespace alone {
 enum class Disposition { Friendly, Wary, Hostile, Raider };
 const char* dispositionName(Disposition d);
 
+// How close you are to someone, from worst to closest. Most steps come from
+// trust alone; Family and Lover are bonds you have to ask for.
+enum class Bond { Enemy, Stranger, Acquaintance, Friend, BestFriend, Family, Lover, Count };
+const char* bondName(Bond b);
+const char* bondBlurb(Bond b);      // one line on what it means
+// Trust needed for each step from trust alone
+constexpr float kTrustAcquaintance = 10, kTrustFriend = 35, kTrustBestFriend = 65;
+// Family and Lover need a best friend and enough of their own meter
+constexpr float kBondNeeded = 50;
+constexpr float kTrustEnemy = -30;
+
+enum class Gender { Man, Woman, Other };
+const char* genderName(Gender g);
+// Hair: 0 short, 1 long, 2 ponytail, 3 bun, 4 shaved
+constexpr int kHairStyles = 5;
+const char* hairStyleName(int style);
+
 // One person, from data/survivors/survivors.ini.
 struct SurvivorDef {
     std::string id, name, bio;
@@ -30,6 +47,8 @@ struct SurvivorDef {
     std::string weapon;                // item id they fight with
     std::vector<std::pair<std::string, int>> carry;   // what they have (to trade, or to drop)
     uint32_t skin = 0xe2b896, hair = 0x4a3626;
+    Gender gender = Gender::Man;
+    int hairStyle = 0;
     float hp = 60;
     float aim = 0.5f;                  // 0..1 how well they shoot
     // Talking
@@ -55,9 +74,22 @@ struct SurvivorDef {
     int joinTrust = 50;
     std::string joinText, refuseText;
     std::vector<std::string> partners; // raiders who travel together
+    // More to say (all optional; generic lines are used when empty)
+    std::vector<std::string> about;    // their story, told one piece at a time as they trust you
+    std::vector<std::string> friendChat, closeChat;   // chat once you're friends / best friends or closer
+    std::vector<std::string> idle;     // muttered at home
+    std::vector<std::string> night;    // woken up at night
+    std::vector<std::string> morning;  // just woken up
+    // Romance
+    bool romanceable = false;
+    std::string flirtYes, flirtNo, confessYes, confessNo;
+    std::vector<std::string> loverChat;
+    std::string familyText;            // when you tell them they're family
+    int bedtime = 22, wakeup = 7;      // hours
 };
 
-enum class SurvivorState { Home, Wander, Follow, Wait, Alert, Hunt, Flee, Dead };
+// (saved as numbers: only ever add to the end)
+enum class SurvivorState { Home, Wander, Follow, Wait, Alert, Hunt, Flee, Dead, Sleep };
 
 struct Survivor {
     const SurvivorDef* def = nullptr;
@@ -88,12 +120,40 @@ struct Survivor {
     Inventory inventory;
     std::array<ItemInstance, 9> worn{};   // by ClothingSlot
     uint32_t weaponUid = 0;
+    // Relationship
+    // Two ways to become closest: flirting builds romance (towards Lover),
+    // looking out for each other builds kinship (towards Family). Each pulls
+    // the other down, so you have to choose.
+    float romance = 0;                 // 0..100
+    float kinship = 0;                 // 0..100
+    int lastKinDay = -1;
+    bool family = false, lover = false;
+    int lastChatDay = -1;              // the day you last chatted (daily trust)
+    int lastFlirtDay = -1, lastGiftDay = -1, lastJokeDay = -1, lastSorryDay = -1;
+    int storiesTold = 0;               // how much of `about` you've heard
+    Bond shownBond = Bond::Stranger;   // last step announced in the log
+    float companyMinutes = 0;          // travelling together: trust grows
+    // Daily life at home
+    int homeBuilding = -1;
+    Vec2 bed, bedSide;                 // where they sleep, and the free tile beside it
+    bool hasBed = false;
+    std::vector<Vec2> path;            // tiles to walk through (indoors, round walls)
+    float idleTimer = 0;               // seconds until they wander somewhere else in the house
+    float snoreTimer = 0;
+    int doorX = 0, doorY = 0, doorDir = -1;   // a door they opened and will close behind them
+    float awakeHold = 0;               // woken up: seconds before they go back to bed
+    bool wokenUp = false;              // you woke them (they'll mention it)
+    bool saidGoodnight = false;
+    bool dozing = false;               // a companion napping while you sleep
+    bool asleep() const { return state == SurvivorState::Sleep; }
+    Bond bond() const;
     bool alive() const { return state != SurvivorState::Dead; }
     bool hostileTo() const;            // fights the player on sight
     const ItemInstance* weapon() const;
 };
 
 // What you can say in a conversation.
-enum class Topic { Chat, Others, Request, Give, Gift, Trade, Join, Follow, Wait, Dismiss, Bye, Parley, LetIn, PayOff, Threaten };
+enum class Topic { Chat, Others, Request, Give, Gift, Trade, Join, Follow, Wait, Dismiss, Bye, Parley, LetIn, PayOff, Threaten,
+                   About, Joke, Flirt, Confess, Family, Hug, Sorry, BackToSleep, Breakup, Kin };
 
 } // namespace alone

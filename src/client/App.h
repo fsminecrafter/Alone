@@ -13,7 +13,7 @@ public:
     int run(int argc, char** argv);
 
 private:
-    enum class State { Menu, Playing, Dead };
+    enum class State { Menu, Create, Playing, Dead };
     enum class Overlay { None, Inventory, Map, Health, Pause, Settings, Help, Build, Talk, Trade, Journal };
 
     struct ContextMenu {
@@ -41,10 +41,19 @@ private:
         bool showFps = false;
         // Game
         float minutesPerSecond = 1.0f;
+        bool autoDrink = true;
     };
 
     // flow
-    void newGame();
+    void newGame(bool create = true);   // create: make your character first
+    // Character creation (AppCreate.cpp)
+    void drawCreate();
+    void updateCreate(float dt);
+    void beginGame();
+    void randomCharacter();
+    CharacterChoice create_ = CharacterChoice::defaults();
+    bool nameFocus_ = false;
+    float createSpin_ = 0;
     void continueGame();
     void autosave();
     std::string savePath() const;

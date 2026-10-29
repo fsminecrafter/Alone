@@ -27,12 +27,45 @@ const char* trustWord(const Survivor& s) {
     if (s.angry) return "Wants you dead";
     if (s.def->disposition == Disposition::Raider) return s.truce ? "Paid off - for now" : "Raider";
     if (s.def->disposition == Disposition::Hostile && !s.admitted) return s.trust > 0 ? "Listening - from a distance" : "Won't let you near";
+    if (s.asleep()) return "Asleep";
     if (s.joined) return "Travelling with you";
-    if (s.trust < -20) return "Hostile";
-    if (s.trust < 0) return "Suspicious of you";
-    if (s.trust < 15) return "Cautious";
-    if (s.trust < 40) return "Friendly";
-    return "Trusts you";
+    return bondName(s.bond());
+}
+
+Color bondColour(Bond b) {
+    switch (b) {
+        case Bond::Enemy: return ui::theme().bad;
+        case Bond::Stranger: return ui::theme().dim;
+        case Bond::Acquaintance: return ui::theme().text;
+        case Bond::Friend: return ui::theme().good;
+        case Bond::BestFriend: return Color{120, 200, 170, 255};
+        case Bond::Family: return Color{130, 180, 236, 255};
+        case Bond::Lover: return Color{232, 120, 150, 255};
+        default: return ui::theme().text;
+    }
+}
+
+// Seven steps from Enemy to Lover, the current one lit, and a bar for
+// how far you are towards the next
+void drawBondMeter(const Survivor& s, float x, float y, float w, float sc) {
+    Bond b = s.bond();
+    int n = (int)Bond::Count;
+    float pip = (w - (n - 1) * 3 * sc) / n;
+    for (int i = 0; i < n; ++i) {
+        Rectangle r{x + i * (pip + 3 * sc), y, pip, 6 * sc};
+        Color c = i == (int)b ? bondColour(b) : i < (int)b ? Fade(bondColour(b), 0.35f) : Color{50, 50, 52, 255};
+        DrawRectangleRounded(r, 0.5f, 3, c);
+    }
+    if (ui::hovered({x, y - 4 * sc, w, 14 * sc})) {
+        std::string body = bondBlurb(b);
+        if (b != Bond::Family && b != Bond::Lover && b != Bond::Enemy && s.met) {
+            body += "\n\nCloser: talk every day, hear their story, bring gifts, help them.";
+            body += "\n\nTwo ways to be closest, and you have to pick one:\n- Family: look out for each other";
+            body += s.def->romanceable ? "\n- Lover: flirt with them\nEach one pulls the other down." : "\n(They're not looking for romance.)";
+            body += fmt("\n\nFamily %d%%   Romance %d%%   (%d%% and best friends needed)", (int)s.kinship, (int)s.romance, (int)kBondNeeded);
+        }
+        ui::tooltip(bondName(b), body, bondColour(b));
+    }
 }
 
 // A small face: skin, hair, and a collar in the colour of their jacket
@@ -44,10 +77,13 @@ void drawPortrait(const Survivor& s, Vector2 c, float r) {
     const ItemInstance& hat = s.worn[(size_t)ClothingSlot::Head];
     DrawCircleV(c, r, Color{30, 32, 34, 255});
     BeginScissorMode((int)(c.x - r), (int)(c.y - r), (int)(2 * r), (int)(2 * r));
+    // long hair falls behind the shoulders
+    if (s.def->hairStyle == 1 && !hat.def) DrawEllipse((int)c.x, (int)(c.y + r * 0.15f), r * 0.52f, r * 0.62f, hair);
     DrawEllipse((int)c.x, (int)(c.y + r * 1.05f), r * 0.95f, r * 0.6f, cloth);
     DrawEllipse((int)c.x, (int)(c.y - r * 0.08f), r * 0.42f, r * 0.52f, skin);
     if (hat.def) DrawCircleSector({c.x, c.y - r * 0.2f}, r * 0.47f, 180, 360, 16, hexColor(hat.def->colour));
-    else DrawCircleSector({c.x, c.y - r * 0.18f}, r * 0.46f, 180, 360, 16, hair);
+    else if (s.def->hairStyle != 4) DrawCircleSector({c.x, c.y - r * 0.18f}, r * 0.46f, 180, 360, 16, hair);
+    if (!hat.def && s.def->hairStyle == 3) DrawCircle((int)c.x, (int)(c.y - r * 0.68f), r * 0.17f, hair);
     DrawCircle((int)(c.x - r * 0.15f), (int)(c.y - r * 0.1f), r * 0.05f, Color{40, 30, 30, 255});
     DrawCircle((int)(c.x + r * 0.15f), (int)(c.y - r * 0.1f), r * 0.05f, Color{40, 30, 30, 255});
     EndScissorMode();
@@ -71,7 +107,7 @@ void App::drawTalk() {
     float sc = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
     auto topics = game_.talkTopics(talkTo_);
-    float ph = 150 * sc + topics.size() * 30 * sc;
+    float ph = 168 * sc + topics.size() * 30 * sc;
     float pw = std::min(760 * sc, W - 20);
     Rectangle p{W / 2 - pw / 2, H - ph - 20 * sc, pw, ph};
     ui::panel(p, Color{16, 17, 19, 240});
@@ -79,13 +115,26 @@ void App::drawTalk() {
     float tx = p.x + 112 * sc;
     ui::text(s->def->name, tx, p.y + 12 * sc, 20 * sc, ui::theme().text, true);
     std::string sub = fmt("%d - %s", s->def->age, trustWord(*s));
-    ui::text(sub, tx, p.y + 38 * sc, 14 * sc, s->trust < 0 ? ui::theme().bad : s->trust >= 40 || s->joined ? ui::theme().good : ui::theme().dim);
+    ui::text(sub, tx, p.y + 36 * sc, 14 * sc, bondColour(s->bond()));
+    drawBondMeter(*s, p.x + p.width - 236 * sc, p.y + 20 * sc, 220 * sc, sc);
+    // The two ways to grow closest: family and romance
+    if (s->met && s->def->disposition != Disposition::Raider && (s->kinship > 0 || s->romance > 0) && !s->family && !s->lover) {
+        float bx = p.x + p.width - 236 * sc, bw = 104 * sc;
+        auto bar = [&](float x0, const char* name, float v, Color c) {
+            ui::text(name, x0, p.y + 32 * sc, 12 * sc, ui::theme().dim);
+            Rectangle r{x0, p.y + 48 * sc, bw, 4 * sc};
+            DrawRectangleRec(r, Color{50, 50, 52, 255});
+            DrawRectangleRec({r.x, r.y, r.width * std::min(1.0f, v / kBondNeeded), r.height}, c);
+        };
+        bar(bx, "Family", s->kinship, Color{130, 180, 236, 255});
+        if (s->def->romanceable) bar(bx + bw + 12 * sc, "Romance", s->romance, Color{232, 120, 150, 255});
+    }
     // what they said
-    Rectangle say{tx, p.y + 60 * sc, p.width - (tx - p.x) - 16 * sc, 70 * sc};
+    Rectangle say{tx, p.y + 60 * sc, p.width - (tx - p.x) - 16 * sc, 88 * sc};
     DrawRectangleRounded(say, 0.1f, 4, Color{30, 31, 34, 255});
     ui::paragraph("\xE2\x80\x9C" + talkLine_ + "\xE2\x80\x9D", say.x + 10 * sc, say.y + 8 * sc, say.width - 20 * sc, 15 * sc, ui::theme().text);
     // what you can say
-    float y = p.y + 140 * sc;
+    float y = p.y + 158 * sc;
     for (const auto& [topic, label] : topics) {
         Rectangle r{tx, y, say.width, 26 * sc};
         bool hov = ui::hovered(r);
@@ -211,7 +260,8 @@ void App::drawJournal() {
         ui::text(sv.def->name + (sv.alive() ? "" : "  \xE2\x80\x93 dead"), tx, row.y + 8 * sc, 17 * sc, nameC, true);
         std::string where = sv.joined ? "With you" : sv.def->disposition == Disposition::Raider ? "Moves around" : sv.def->homeName;
         std::string status = !sv.met ? (bad ? "Dangerous. Stay away." : "Haven't met them yet.") : trustWord(sv);
-        ui::text(where + "  \xC2\xB7  " + status, tx, row.y + 32 * sc, 14 * sc, ui::theme().dim);
+        ui::text(where + "  \xC2\xB7  " + status, tx, row.y + 32 * sc, 14 * sc, sv.met && !bad ? bondColour(sv.bond()) : ui::theme().dim);
+        if (sv.met && sv.alive() && sv.def->disposition != Disposition::Raider) drawBondMeter(sv, row.x + row.width - 190 * sc, row.y + 14 * sc, 176 * sc, sc);
         std::string note;
         if (sv.met && sv.requestKnown && !sv.requestDone) {
             const ItemDef* d = sv.def->wantItem.rfind("tag:", 0) == 0 ? nullptr : game_.items().find(sv.def->wantItem);
@@ -267,7 +317,8 @@ void App::drawSurvivorLabels() {
             }
         } else if (hov || sv.joined) {
             std::string name = sv.met ? sv.def->name : "Stranger";
-            Color c = sv.hostileTo() ? ui::theme().bad : sv.joined ? Color{140, 196, 236, 255} : ui::theme().text;
+            Color c = sv.hostileTo() ? ui::theme().bad : sv.joined ? Color{140, 196, 236, 255} : sv.met ? bondColour(sv.bond()) : ui::theme().text;
+            if (sv.met && sv.bond() == Bond::Lover) name = "\xE2\x99\xA5 " + name;
             Vector2 m = ui::measure(name, 13 * sc, true);
             DrawRectangleRounded({sp.x - m.x / 2 - 5 * sc, sp.y - 20 * sc, m.x + 10 * sc, 18 * sc}, 0.4f, 4, Color{10, 12, 14, 160});
             ui::textCentered(name, sp.x, sp.y - 18 * sc, 13 * sc, c, true);
@@ -301,7 +352,7 @@ void App::drawVehicleHud() {
         ui::text("Bicycle", r.x + 120 * sc, r.y + 8 * sc, 14 * sc, ui::theme().text, true);
         ui::text("Quiet, needs no fuel", r.x + 120 * sc, r.y + 30 * sc, 12 * sc, ui::theme().dim);
     }
-    ui::text(car ? "F: start / get out   C: creep" : "F: get off", r.x + 12 * sc, r.y + r.height + 4 * sc, 12 * sc, ui::theme().dim);
+    ui::text(car ? "W gas  S brake/reverse  A/D steer  F: key / get out" : "W pedal  S brake  A/D steer  F: get off", r.x + 12 * sc, r.y + r.height + 4 * sc, 12 * sc, ui::theme().dim);
 }
 
 } // namespace alone

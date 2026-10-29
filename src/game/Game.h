@@ -86,9 +86,30 @@ struct PlayerInput {
     bool aimHold = false;        // Ctrl held: face the cursor and aim
     Vec2 aim;                    // world point under the cursor
     bool attack = false;         // pressed this frame
+    // Driving (bike or car): -1..1, from W/S and A/D
+    float throttle = 0;          // + accelerate, - brake / reverse
+    float steer = 0;             // + turns the heading angle up (right, as seen on screen)
+};
+
+// Who you are: picked when you start a new game.
+struct PlayerLook {
+    std::string name = "Alex";
+    Gender gender = Gender::Man;
+    uint32_t skin = 0xe2b896, hair = 0x4a3626;
+    int hairStyle = 0;
+};
+
+// The character you make at the start: looks and what you're wearing
+// (an item id per clothing slot, empty = nothing; tint 0 = the item's own colour).
+struct CharacterChoice {
+    PlayerLook look;
+    std::array<std::string, (size_t)ClothingSlot::Count> wear{};
+    std::array<uint32_t, (size_t)ClothingSlot::Count> tint{};
+    static CharacterChoice defaults();
 };
 
 struct Player {
+    PlayerLook look;
     Vec2 pos;
     float facing = 0;            // radians
     float stamina = 1;           // 0..1 short-term breath
@@ -126,7 +147,12 @@ class Game {
     friend class SaveGame;
 public:
     bool loadData();                 // items, map, symptoms, animals (once)
-    void newGame(uint32_t seed);
+    void newGame(uint32_t seed, const CharacterChoice* who = nullptr);
+    // Change who you are (the character screen): looks and clothes, replacing what's worn
+    void dressPlayer(const CharacterChoice& who);
+    // Sip clean water from an open bottle by yourself when thirsty
+    void setAutoDrink(bool on) { autoDrink_ = on; }
+    bool autoDrink() const { return autoDrink_; }
     void update(float realDt, const PlayerInput& input);
 
     // --- state -----------------------------------------------------------
@@ -166,6 +192,10 @@ public:
     // Say it; returns their answer
     std::string talk(int id, Topic t);
     std::string greeting(int id);      // what they say when you walk up (meets them the first time)
+    // How you'd describe where you stand with them (Enemy ... Lover)
+    Bond bondWith(int id) const;
+    // A line with {name} etc. filled in for the player
+    std::string personal(const std::string& line) const;
     // Can you talk to them from where you are? (hostile people: shout from a distance)
     bool canTalk(int id, std::string* why = nullptr) const;
     float talkRange(int id) const;
@@ -256,6 +286,18 @@ private:
     void placeSurvivors();
     bool resolvePlace(const std::string& spec, Vec2& out, std::string* name);
     void updateSurvivors(float dt, float gameMinutes);
+    void updateHomeLife(Survivor& s, float dt, bool sees, Vec2& goal, float& speed, bool& face);
+    bool sleepTime(const Survivor& s) const;      // their night (bedtime .. wake-up)
+    void findBed(Survivor& s);
+    bool planPath(Survivor& s, Vec2 to);           // tiles through the house, round walls (doors are fine)
+    Vec2 roomSpot(const Survivor& s);              // somewhere to stand in their house
+    void wakeSurvivor(Survivor& s);
+    void announceBond(Survivor& s);                // logs when you've become friends, etc.
+    void addTrust(Survivor& s, float amount, float cap = 100);
+    std::string line(const std::string& key);     // a generic line from data/text/dialogue.ini
+    std::string pickOf(const std::vector<std::string>& v, const std::string& fallbackKey);
+    bool loadDialogue(const std::string& path);
+    std::map<std::string, std::vector<std::string>> dialogue_;
     void survivorSay(Survivor& s, const std::string& line, bool log = true);
     void hurtSurvivor(Survivor& s, float damage, bool byPlayer);
     void survivorAttack(Survivor& s, Vec2 targetPos, bool atPlayer, Animal* animal, Survivor* other);
@@ -307,6 +349,9 @@ private:
     struct Announced { int level = 0; float calm = 0; };   // calm: seconds spent below that level
     std::map<std::string, Announced> lastSymptomLevels_;
     float flashlightAcc_ = 0;
+    bool autoDrink_ = true;
+    float autoDrinkTimer_ = 0;
+    void updateAutoDrink(float dt);
 };
 
 } // namespace alone

@@ -332,7 +332,7 @@ void Renderer::updateNpcRigs(Game& game, float time, float dt) {
         NpcGfx& g = npcs_[s.id];
         if (!g.init) {
             g.model = std::make_unique<CharacterModel>();
-            if (!g.model->init()) continue;
+            if (!g.model->init(BodyShape{s.def->gender == Gender::Woman, s.def->hairStyle})) continue;
             g.lastPos = s.pos;
             g.init = true;
         }
@@ -346,7 +346,7 @@ void Renderer::updateNpcRigs(Game& game, float time, float dt) {
         in.speed = g.speed;
         in.distance = g.dist;
         in.dead = !s.alive();
-        in.asleep = !s.alive();
+        in.asleep = !s.alive() || s.asleep() || s.dozing;
         in.swing = s.swing;
         in.time = time + s.id * 3.7f;
         const ItemInstance* wpn = s.weapon();
@@ -362,6 +362,11 @@ void Renderer::updateNpcRigs(Game& game, float time, float dt) {
         in.hunch = s.alive() ? std::clamp(1.0f - s.hp / s.def->hp - 0.3f, 0.0f, 1.0f) : 0;
         g.rig.update(in, dt);
         float stand = w.standHeight(s.pos);
+        if (s.asleep()) {   // in bed, on the sofa
+            Prop under = w.tile((int)std::floor(s.pos.x), (int)std::floor(s.pos.y)).prop;
+            if (under == Prop::Bed || under == Prop::HospitalBed) stand += 0.42f;
+            else if (under == Prop::Sofa) stand += 0.38f;
+        }
         if (std::fabs(stand - g.y) > 3 || moved == 0) g.y = stand;
         else g.y += (stand - g.y) * std::min(1.0f, dt * 14.0f);
         g.rig.place(V(s.pos.x, g.y, s.pos.y), s.facing);

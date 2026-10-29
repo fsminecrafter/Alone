@@ -228,6 +228,7 @@ void App::frame() {
     }
     renderer_.draw(game_, time_, dt, hv);
     if (state_ == State::Menu) drawMenu();
+    else if (state_ == State::Create) drawCreate();
     else {
         drawSurvivorLabels();
         drawHud();
@@ -293,6 +294,9 @@ void App::frame() {
             {1, 1, 13, "screenshot_vimpeln_carpark.png", Overlay::None},
             {0, 0, 0, "screenshot_fuel_station.png", Overlay::None},
             {0, 0, 0, "screenshot_aim.png", Overlay::None},
+            {0, 0, 0, "screenshot_create.png", Overlay::None},
+            {0, 0, 0, "screenshot_sleeping.png", Overlay::None},
+            {0, 0, 0, "screenshot_friends.png", Overlay::None},
             {0, 0, 0, "screenshot_death.png", Overlay::None},
         };
         int n = (int)(sizeof(stops) / sizeof(stops[0]));
@@ -315,7 +319,7 @@ void App::frame() {
             const Stop& st = stops[idx];
             if (sub == 0) {
                 menu_.open = false;
-                if (idx == 1) newGame();
+                if (idx == 1) newGame(false);
                 if (idx == 2 || idx == 3) {
                     // Find a kitchen container in the start house
                     Player& pl = game_.player();
@@ -542,6 +546,53 @@ void App::frame() {
                     for (const auto& it : elin->inventory.items()) if (it.def->id == "bandage") { tradeTheirs_.push_back(it.uid); break; }
                 }
             }
+            if (file == "screenshot_create.png" && sub == 0) {
+                CharacterChoice c = CharacterChoice::defaults();
+                c.look.name = "Maja";
+                c.look.gender = Gender::Woman;
+                c.look.hairStyle = 2;
+                c.look.hair = 0x9a3a20;
+                c.look.skin = 0xe8c4a8;
+                c.wear[(size_t)ClothingSlot::Sweater] = "hoodie";
+                c.tint[(size_t)ClothingSlot::Sweater] = 0x3e5a36;
+                c.wear[(size_t)ClothingSlot::Head] = "";
+                create_ = c;
+                newGame(true);
+                double add = 12.5 - game_.world().clock().hourOfDay();
+                if (add < 0) add += 24;
+                game_.world().clock().advance(add * 60);
+            }
+            if (file == "screenshot_sleeping.png" && sub == 0 && elin) {
+                if (state_ == State::Create) beginGame();
+                double add = 2.0 - game_.world().clock().hourOfDay();
+                if (add < 0) add += 24;
+                game_.world().clock().advance(add * 60);
+                elin->state = SurvivorState::Sleep;
+                elin->pos = elin->bed;
+                game_.player().pos = elin->bedSide + (elin->bedSide - elin->bed) * 0.8f;
+                game_.player().flashlightOn = true;
+                Rng rng(4);
+                game_.player().inventory.add(game_.items().create("flashlight", rng));
+                game_.animals().animals().clear();
+                renderer_.setZoom(14);
+                renderer_.snapTo(game_.player().pos);
+            }
+            if (file == "screenshot_friends.png" && sub == 0 && elin) {
+                double add = 13.0 - game_.world().clock().hourOfDay();
+                if (add < 0) add += 24;
+                game_.world().clock().advance(add * 60);
+                if (elin->asleep()) { elin->state = SurvivorState::Home; elin->pos = elin->bedSide; }
+                elin->met = elin->known = true;
+                elin->trust = 72;
+                elin->romance = 60;
+                elin->lover = true;
+                elin->shownBond = Bond::Lover;
+                game_.player().pos = elin->pos + Vec2{1.3f, 0.4f};
+                renderer_.setZoom(30);
+                renderer_.snapTo(game_.player().pos);
+                openTalk(elin->id);
+                talkLine_ = game_.talk(elin->id, Topic::Chat);
+            }
             if (file == "screenshot_journal.png" && sub == 0) {
                 for (auto& sv : game_.survivors()) {
                     if (sv.def->id == "elin") { sv.met = sv.known = true; sv.requestKnown = true; sv.trust = 30; }
@@ -642,7 +693,7 @@ void App::frame() {
 
 void App::shutdownApp() {
     if (!autoShots_) autosave();
-    saveSettings();
+    if (!tour_) saveSettings();   // a tour's character and resolution aren't yours
     if (musicLoaded_) UnloadMusicStream(music_);
     sound_.shutdown();
     if (audio_) CloseAudioDevice();
@@ -700,16 +751,24 @@ Color App::hoverColour() {
     return Color{235, 235, 230, 255};
 }
 
-void App::newGame() {
+void App::newGame(bool create) {
     seed_ = seed_ * 1664525u + 1013904223u;
     game_.setBaseTimeScale(settings_.minutesPerSecond);
-    game_.newGame(seed_);
+    game_.setAutoDrink(settings_.autoDrink);
+    game_.newGame(seed_, create ? &create_ : nullptr);
     renderer_.invalidateAll();
     renderer_.snapTo(game_.player().pos);
     state_ = State::Playing;
     overlay_ = Overlay::None;
     menu_.open = false;
     selected_ = ItemRef{};
+    if (create) {
+        // Make your character first, standing in the house you wake up in
+        state_ = State::Create;
+        nameFocus_ = false;
+        createSpin_ = 0;
+        renderer_.setZoom(4.2f);
+    }
 }
 
 void App::update(float dt) {
@@ -729,6 +788,7 @@ void App::update(float dt) {
         game_.update(dt * 0.2f, none);
         return;
     }
+    if (state_ == State::Create) { updateCreate(dt); return; }
     if (state_ == State::Playing) updatePlaying(dt);
     else {
         PlayerInput none;
@@ -773,6 +833,9 @@ void App::updatePlaying(float dt) {
         if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)) sx -= 1;
         if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) sx += 1;
         in.move = renderer_.screenToWorldDir(sx, sy);
+        // In a car or on a bike: W/S throttle and brake, A/D steer
+        in.throttle = -sy;
+        in.steer = sx;
         in.run = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         in.sneak = IsKeyDown(KEY_C);
         in.aimHold = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
@@ -1037,6 +1100,11 @@ void App::drawSettings() {
         ui::paragraph("A day in Alingsås lasts this long in real time. Sleeping and the speed keys (1/2/3) still "
                       "fast-forward. The game saves automatically every few minutes.",
                       x, y, w, 14 * s, ui::theme().dim);
+        y += 50 * s;
+        toggle("Drink clean water by yourself", settings_.autoDrink);
+        game_.setAutoDrink(settings_.autoDrink);
+        ui::paragraph("When you're thirsty, take a sip from an open bottle of clean water. Never lake water, "
+                      "and never anything still sealed.", x, y, w, 14 * s, ui::theme().dim);
     }
     if (changed) applySettings();
     Rectangle back{p.x + 30 * s, p.y + p.height - 52 * s, w, 38 * s};
@@ -1051,7 +1119,7 @@ void App::drawHelp() {
     ui::panel(p);
     ui::textCentered("Controls", W / 2, p.y + 16 * s, 28 * s, ui::theme().text, true);
     const char* lines[][2] = {
-        {"W A S D", "Walk (Shift run, C crouch); on a bike or in a car: steer"},
+        {"W A S D", "Walk (Shift run, C crouch); driving: W gas, S brake/reverse, A/D steer"},
         {"Ctrl (hold)", "Aim: face the cursor, steadier shots, walk while you aim"},
         {"Right click", "Interact with what's under the cursor"},
         {"F", "Quick interact (doors, search, talk, get in/out of a car)"},
@@ -1196,7 +1264,19 @@ int App::runShowcase(const std::string& dir) {
     wear("wool_hat", ClothingSlot::Head);
     // facing: -0.79 shows the right side, 0.79 faces the camera
     struct Clip { const char* name; float seconds, speed; bool sneak, aim, eat, work, sleep; const char* weapon; float spin; float facing;
-                  float limp = 0, arm = 0, hunch = 0, shiver = 0, nausea = 0, winded = 0; };
+                  float limp = 0, arm = 0, hunch = 0, shiver = 0, nausea = 0, winded = 0;
+                  int ride = 0;        // 1 on a bike
+                  bool hold = false;   // carry the weapon without swinging it
+                  int who = -1; };     // one of the made-up characters below (-1: the default one)
+    // Characters made on the new-game screen: body, hair, clothes in their own colours
+    struct Who { const char* name; Gender g; int hair; uint32_t skin, hairCol; const char* top; const char* sweater; uint32_t sweaterTint;
+                 const char* jacket; const char* legs; const char* feet; const char* hat; };
+    const Who people[] = {
+        {"Maja", Gender::Woman, 2, 0xe8c4a8, 0x9a3a20, "tshirt", "hoodie", 0x3e5a36, "", "jeans", "sneakers", ""},
+        {"Ali", Gender::Man, 4, 0x8d5a3b, 0x1a1410, "flannel_shirt", "", 0, "work_jacket", "overalls", "hiking_boots", ""},
+        {"Linnea", Gender::Woman, 1, 0xf3d6c0, 0xd8c080, "thermal_top", "cardigan", 0xb06a8a, "", "sweatpants", "rubber_boots", ""},
+        {"Robin", Gender::Other, 3, 0xd4a07a, 0x3a2a20, "tshirt", "fleece", 0, "rain_jacket", "jeans", "sneakers", "cap"},
+    };
     const Clip clips[] = {
         {"Idle", 2.0f, 0, false, false, false, false, false, nullptr, 0.0f, 0.5f},
         {"Walk", 3.0f, 1.4f, false, false, false, false, false, nullptr, 0.5f, 0.0f},
@@ -1214,6 +1294,35 @@ int App::runShowcase(const std::string& dir) {
         {"Nauseous", 2.2f, 0, false, false, false, false, false, nullptr, 0.0f, 0.5f, 0, 0, 0, 0, 1.0f},
         {"Out of breath", 2.2f, 0, false, false, false, false, false, nullptr, 0.0f, -0.2f, 0, 0, 0, 0, 0, 1.0f},
         {"Sleep", 2.0f, 0, false, false, false, false, true, nullptr, 0.0f, 0.4f},
+        {"Walk, axe in hand", 2.6f, 1.4f, false, false, false, false, false, "axe", 0.4f, 0.1f, 0, 0, 0, 0, 0, 0, 0, true},
+        {"Riding a bike", 3.2f, 4.5f, false, false, false, false, false, nullptr, 0.45f, -0.5f, 0, 0, 0, 0, 0, 0, 1},
+        {"Maja", 2.2f, 0, false, false, false, false, false, nullptr, 1.4f, 0.6f, 0, 0, 0, 0, 0, 0, 0, false, 0},
+        {"Ali", 2.2f, 0, false, false, false, false, false, nullptr, 1.4f, 0.6f, 0, 0, 0, 0, 0, 0, 0, false, 1},
+        {"Linnea", 2.2f, 0, false, false, false, false, false, nullptr, 1.4f, 0.6f, 0, 0, 0, 0, 0, 0, 0, false, 2},
+        {"Robin", 2.2f, 1.4f, false, false, false, false, false, nullptr, 0.8f, 0.6f, 0, 0, 0, 0, 0, 0, 0, false, 3},
+    };
+    const Player defaultLook = look;
+    auto dress = [&](int who) {
+        if (who < 0) { look = defaultLook; return; }
+        const Who& w = people[who];
+        look = Player{};
+        look.look.name = w.name;
+        look.look.gender = w.g;
+        look.look.hairStyle = w.hair;
+        look.look.skin = w.skin;
+        look.look.hair = w.hairCol;
+        auto put = [&](const char* id, ClothingSlot slot, uint32_t tint) {
+            if (!*id) return;
+            ItemInstance it = game_.items().create(id, rng);
+            it.tint = tint;
+            look.worn[(size_t)slot] = it;
+        };
+        put(w.top, ClothingSlot::Torso, 0);
+        put(w.sweater, ClothingSlot::Sweater, w.sweaterTint);
+        put(w.jacket, ClothingSlot::Jacket, 0);
+        put(w.legs, ClothingSlot::Legs, 0);
+        put(w.feet, ClothingSlot::Feet, 0);
+        put(w.hat, ClothingSlot::Head, 0);
     };
     const char* onlyClip = getenv("ALONE_CLIP");
     const float dt = 1.0f / 30.0f;
@@ -1222,6 +1331,7 @@ int App::runShowcase(const std::string& dir) {
     for (const Clip& c : clips) {
         if (onlyClip && !std::strstr(c.name, onlyClip)) continue;
         facing = c.facing;
+        dress(c.who);
         const ItemDef* weapon = c.weapon ? game_.items().find(c.weapon) : nullptr;
         float swing = 0, nextSwing = 0.2f;
         int frames = (int)(c.seconds / dt);
@@ -1229,7 +1339,7 @@ int App::runShowcase(const std::string& dir) {
             t += dt;
             distance += c.speed * dt;
             facing += c.spin * dt;
-            if (c.weapon && !game_.items().find(c.weapon)->firearm) {
+            if (c.weapon && !c.hold && !game_.items().find(c.weapon)->firearm) {
                 nextSwing -= dt;
                 if (nextSwing <= 0) { swing = 1; nextSwing = 1.0f; }
                 swing = std::max(0.0f, swing - dt * 3.0f);
@@ -1247,13 +1357,17 @@ int App::runShowcase(const std::string& dir) {
             in.weapon = !weapon ? 0 : weapon->firearm ? 3 : weapon->hasTag("knife") ? 2 : 1;
             in.limpL = c.limp; in.armHurtL = c.arm; in.hunch = c.hunch; in.shiver = c.shiver;
             in.nausea = c.nausea; in.winded = c.winded;
+            in.ride = c.ride;
+            if (c.ride) in.speed = 0;   // pedalling goes by distance, as in the game
             BeginDrawing();
             ClearBackground(Color{24, 26, 30, 255});
             DrawCircleGradient(size / 2, size / 2, size * 0.7f, Color{58, 62, 66, 255}, Color{24, 26, 30, 255});
             renderer_.drawShowcase(in, facing, dt, look, weapon);
             float fs = 26;
-            Vector2 m = ui::measure(c.name, fs, true);
-            ui::text(c.name, size / 2 - m.x / 2, size - 46, fs, Color{230, 226, 214, 255}, true);
+            std::string title = c.who >= 0 ? std::string("Make your own: ") + c.name : c.name;
+            if (c.who >= 0) fs = 22;
+            Vector2 m = ui::measure(title, fs, true);
+            ui::text(title, size / 2 - m.x / 2, size - 46, fs, Color{230, 226, 214, 255}, true);
             ui::text("ALONE", 14, 12, 16, Color{214, 168, 92, 255}, true);
             rlDrawRenderBatchActive();   // flush the text before reading the frame back
             Image img = LoadImageFromScreen();
@@ -2140,6 +2254,23 @@ void App::loadSettings() {
     settings_.screenEffects = s->flag("screen_effects", settings_.screenEffects);
     settings_.showFps = s->flag("show_fps", false);
     settings_.minutesPerSecond = std::clamp(s->num("minutes_per_second", settings_.minutesPerSecond), 0.25f, 4.0f);
+    settings_.autoDrink = s->flag("auto_drink", settings_.autoDrink);
+    game_.setAutoDrink(settings_.autoDrink);
+    // The character you made last time
+    if (const auto* ch = c.find("character")) {
+        CharacterChoice& cc = create_;
+        cc.look.name = ch->str("name", cc.look.name).substr(0, 20);
+        int g = std::clamp(ch->integer("gender", 0), 0, 2);
+        cc.look.gender = (Gender)g;
+        cc.look.skin = (uint32_t)std::strtoul(ch->str("skin", "e2b896").c_str(), nullptr, 16);
+        cc.look.hair = (uint32_t)std::strtoul(ch->str("hair", "4a3626").c_str(), nullptr, 16);
+        cc.look.hairStyle = std::clamp(ch->integer("hair_style", 0), 0, kHairStyles - 1);
+        for (size_t sl = 1; sl < cc.wear.size(); ++sl) {
+            std::string key = std::string("wear_") + slotName((ClothingSlot)sl);
+            if (ch->has(key)) cc.wear[sl] = ch->str(key) == "-" ? "" : ch->str(key);
+            if (ch->has(key + "_tint")) cc.tint[sl] = (uint32_t)std::strtoul(ch->str(key + "_tint").c_str(), nullptr, 16);
+        }
+    }
 }
 
 void App::saveSettings() {
@@ -2166,6 +2297,20 @@ void App::saveSettings() {
     set("screen_effects", flag(settings_.screenEffects));
     set("show_fps", flag(settings_.showFps));
     set("minutes_per_second", fmt("%.2f", settings_.minutesPerSecond));
+    set("auto_drink", flag(settings_.autoDrink));
+    auto& ch = c.getOrAdd("character");
+    auto cset = [&](const std::string& k, const std::string& v) { if (!ch.values.count(k)) ch.keyOrder.push_back(k); ch.values[k] = v; };
+    cset("name", create_.look.name);
+    cset("gender", fmt("%d", (int)create_.look.gender));
+    cset("skin", fmt("%06x", create_.look.skin));
+    cset("hair", fmt("%06x", create_.look.hair));
+    cset("hair_style", fmt("%d", create_.look.hairStyle));
+    for (size_t sl = 1; sl < create_.wear.size(); ++sl) {
+        if (sl == (size_t)ClothingSlot::Back) continue;
+        std::string key = std::string("wear_") + slotName((ClothingSlot)sl);
+        cset(key, create_.wear[sl].empty() ? "-" : create_.wear[sl]);
+        cset(key + "_tint", fmt("%06x", create_.tint[sl]));
+    }
     c.save(settingsPath());
     persistFiles();
 }

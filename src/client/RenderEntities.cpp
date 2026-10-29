@@ -60,7 +60,7 @@ void Renderer::drawOnBone(const Mesh& m, const Matrix& bone, Vector3 lc, Vector3
 CharacterLook Renderer::lookOf(const std::array<ItemInstance, 9>& wornItems, const Body* body) {
     CharacterLook L;
     auto worn = [&](ClothingSlot sl) -> const ItemInstance& { return wornItems[(size_t)sl]; };
-    auto col = [&](ClothingSlot sl) { return hexColor(worn(sl).def->colour); };
+    auto col = [&](ClothingSlot sl) { return hexColor(worn(sl).tint ? worn(sl).tint : worn(sl).def->colour); };
     // Underclothes when nothing is worn in a slot
     L.top = worn(ClothingSlot::Torso).def ? col(ClothingSlot::Torso) : hexColor(0xd8ccb8);
     if (worn(ClothingSlot::Sweater).def) L.top = col(ClothingSlot::Sweater);
@@ -145,7 +145,16 @@ void Renderer::updatePlayerRig(Game& game, float time, float dt) {
     if (std::fabs(stand - playerY_) > 3.0f || moved == 0) playerY_ = stand;   // teleported: no slow rise
     else playerY_ += (stand - playerY_) * std::min(1.0f, dt * 14.0f);
     playerRig_.place(V(seat.x, playerY_, seat.y), p.facing);
-    playerModel_.skin(playerRig_, lookOf(p.worn, &p.body));
+    // Who you made at the start: body shape and hair rebuild the mesh
+    BodyShape shape{p.look.gender == Gender::Woman, p.look.hairStyle};
+    if (!playerModel_.ready() || playerModel_.shape() != shape) {
+        playerModel_.shutdown();
+        playerModel_.init(shape);
+    }
+    CharacterLook look = lookOf(p.worn, &p.body);
+    look.skin = hexColor(p.look.skin);
+    look.hair = hexColor(p.look.hair);
+    playerModel_.skin(playerRig_, look);
 
     // Blood drips from wounds that nothing covers; rain washes it off outdoors
     float bleed = 0;

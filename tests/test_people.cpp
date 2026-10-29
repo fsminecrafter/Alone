@@ -214,7 +214,7 @@ TEST(drive_a_car_and_ride_a_bike) {
     CHECK(v->running);
     Vec2 before = v->pos;
     PlayerInput drive;
-    drive.move = v->forward();
+    drive.throttle = 1;
     run(g, 4, drive);
     float moved = distance(before, v->pos);
     std::printf("    drove %.1f m in 4 s (speed %.1f m/s), fuel %.2f l\n", moved, v->speed, v->fuelL);
@@ -417,4 +417,250 @@ TEST(pay_off_or_face_down_raiders) {
     CHECK(!kalle->hostileTo());
     run(g, 5);
     CHECK(kalle->state != SurvivorState::Hunt);
+}
+
+TEST(driving_steers_like_a_car) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    // A car on an open road: put one down in the middle of a big car park
+    Vec2 at{0, 0};
+    for (const auto& b : g.world().gen().allBuildings())
+        if (b.name == "Vimpeln") at = b.doorPos;
+    Vehicle v;
+    v.id = 77; v.kind = VehicleKind::Car; v.fuelL = 20; v.keyInIgnition = true; v.running = true;
+    // somewhere with room to drive about
+    bool found = false;
+    for (int r = 0; r < 120 && !found; r += 2)
+        for (int k = 0; k < 16 && !found; ++k) {
+            Vec2 p = at + Vec2{std::cos(k * 0.4f) * r, std::sin(k * 0.4f) * r};
+            bool clear = true;
+            for (int dy = -8; dy <= 8 && clear; ++dy)
+                for (int dx = -8; dx <= 8 && clear; ++dx) clear = !g.world().tileBlocked((int)p.x + dx, (int)p.y + dy);
+            if (clear) { v.pos = p; found = true; }
+        }
+    CHECK(found);
+    if (!found) return;
+    g.vehicles().push_back(v);
+    g.player().vehicle = 77;
+    Vehicle* car = g.playerVehicle();
+    // Steering on the spot does nothing: the wheels only turn you when rolling
+    PlayerInput turn;
+    turn.steer = 1;
+    run(g, 1, turn);
+    CHECK(std::fabs(car->heading) < 0.01f);
+    // W: forward along the heading, whichever way the screen points
+    PlayerInput gas;
+    gas.throttle = 1;
+    run(g, 1.5f, gas);
+    CHECK(car->speed > 2);
+    float h0 = car->heading;
+    // D while rolling: turns right (heading up)
+    gas.steer = 1;
+    run(g, 0.6f, gas);
+    CHECK(car->heading > h0 + 0.1f);
+    // S: brakes to a stop, then backs up
+    PlayerInput brake;
+    brake.throttle = -1;
+    run(g, 1.2f, brake);
+    CHECK(car->speed <= 0.3f);
+    run(g, 1.5f, brake);
+    CHECK(car->speed < -0.5f);
+    std::printf("    heading %.2f, reversing at %.1f m/s\n", car->heading, car->speed);
+}
+
+TEST(auto_drink_only_clean_open_water) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Player& p = g.player();
+    p.inventory.items().clear();
+    p.body.mutableState().waterDeficitL = 2.5f;   // properly thirsty
+    Rng rng(3);
+    ItemInstance lake = g.items().create("empty_bottle", rng);
+    lake.liquidMl = 1000;
+    lake.liquidSafe = false;
+    p.inventory.add(lake);
+    ItemInstance sealed = g.items().create("sparkling_water", rng);
+    if (sealed.def) p.inventory.add(sealed);
+    run(g, 3);
+    CHECK(std::fabs(p.inventory.items()[0].liquidMl - 1000) < 0.1f);   // not the lake water
+    if (sealed.def) CHECK(p.inventory.findId("sparkling_water") >= 0 && p.inventory.items()[1].portion > 0.99f);
+    ItemInstance clean = g.items().create("water_bottle", rng);
+    clean.liquidMl = 800;
+    p.inventory.add(clean);
+    float before = p.body.state().waterDeficitL;
+    run(g, 3);
+    int i = p.inventory.findId("water_bottle");
+    CHECK(i >= 0 && p.inventory.items()[i].liquidMl < 800);
+    CHECK(p.body.state().waterDeficitL < before);
+    // and it can be switched off
+    g.setAutoDrink(false);
+    float left = p.inventory.items()[i].liquidMl;
+    run(g, 40);
+    CHECK(std::fabs(p.inventory.items()[i].liquidMl - left) < 0.1f);
+}
+
+TEST(people_sleep_at_night_and_potter_by_day) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* elin = find(g, "elin");
+    CHECK(elin && elin->homeBuilding >= 0 && elin->hasBed);
+    if (!elin) return;
+    // Two in the morning, you a few rooms away
+    double day = std::floor(g.world().clock().totalMinutes() / 1440.0) * 1440.0;
+    g.world().clock().setTotalMinutes(day + 1440 + 2 * 60);
+    g.player().pos = elin->home + Vec2{0, 40};
+    run(g, 30);
+    CHECK(elin->asleep());
+    CHECK(distance(elin->pos, elin->bed) < 0.1f);
+    // Waking her up to talk
+    g.player().pos = elin->bedSide;
+    std::string woke = g.greeting(elin->id);
+    std::printf("    woken: \"%s\"\n", woke.c_str());
+    CHECK(!elin->asleep() && !woke.empty());
+    bool back = false;
+    for (auto& [t, label] : g.talkTopics(elin->id)) back |= t == Topic::BackToSleep;
+    CHECK(back);
+    g.talk(elin->id, Topic::BackToSleep);
+    g.player().pos = elin->home + Vec2{0, 40};
+    run(g, 40);
+    CHECK(elin->asleep());
+    // Morning: up and about the house
+    g.world().clock().setTotalMinutes(day + 1440 + 10 * 60);
+    run(g, 60);
+    CHECK(!elin->asleep());
+    const Building* b = g.world().building(elin->homeBuilding);
+    CHECK(b && b->rect.expanded(3).contains((int)elin->pos.x, (int)elin->pos.y));
+    // Far away, people still keep their hours
+    g.player().pos = elin->home + Vec2{400, 0};
+    g.world().clock().setTotalMinutes(day + 2 * 1440 + 3 * 60);
+    run(g, 1);
+    CHECK(elin->asleep());
+}
+
+TEST(friendship_steps_from_stranger_to_lover) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* elin = find(g, "elin");
+    CHECK(elin != nullptr);
+    if (!elin) return;
+    CHECK(elin->bond() == Bond::Stranger);
+    // stay awake for this
+    double day = std::floor(g.world().clock().totalMinutes() / 1440.0) * 1440.0;
+    g.world().clock().setTotalMinutes(day + 1440 + 13 * 60);
+    g.player().pos = elin->pos + Vec2{1, 0};
+    g.greeting(elin->id);
+    CHECK(elin->met);
+    elin->trust = 12;
+    CHECK(elin->bond() == Bond::Acquaintance);
+    elin->trust = 40;
+    CHECK(elin->bond() == Bond::Friend);
+    // A daily chat helps, but only once a day
+    float t0 = elin->trust;
+    g.talk(elin->id, Topic::Chat);
+    float t1 = elin->trust;
+    g.talk(elin->id, Topic::Chat);
+    CHECK(t1 > t0 + 2 && elin->trust - t1 < 1);
+    // Her story comes out piece by piece
+    std::string story = g.talk(elin->id, Topic::About);
+    CHECK(elin->storiesTold == 1 && !story.empty());
+    elin->trust = 70;
+    CHECK(elin->bond() == Bond::BestFriend);
+    // Flirting, until she feels the same
+    for (int d = 0; d < 30 && elin->romance < 50; ++d) {
+        g.world().clock().setTotalMinutes(day + (2 + d) * 1440 + 13 * 60);
+        g.talk(elin->id, Topic::Flirt);
+        elin->trust = std::max(elin->trust, 70.0f);
+    }
+    CHECK(elin->romance >= 50);
+    // Romance and family pull against each other: with this much romance she won't be "family"
+    elin->kinship = 60;
+    std::string notFamily = g.talk(elin->id, Topic::Family);
+    CHECK(!elin->family);
+    // and if she sees you as family, she won't be your lover
+    std::string notLover = g.talk(elin->id, Topic::Confess);
+    CHECK(!elin->lover);
+    std::printf("    \"%s\" / \"%s\"\n", notFamily.c_str(), notLover.c_str());
+    elin->kinship = 0;
+    elin->romance = 60;
+    bool confess = false;
+    for (auto& [t, label] : g.talkTopics(elin->id)) confess |= t == Topic::Confess;
+    CHECK(confess);
+    std::string yes = g.talk(elin->id, Topic::Confess);
+    std::printf("    \"%s\"\n", yes.c_str());
+    CHECK(elin->bond() == Bond::Lover);
+    // Lovers come along even if they'd usually stay home
+    Survivor* gunnar = find(g, "gunnar");
+    CHECK(gunnar && !gunnar->def->romanceable);
+    gunnar->met = true;
+    gunnar->trust = 90;
+    g.player().pos = gunnar->pos + Vec2{1, 0};
+    // Trust alone isn't enough to be family: you have to look out for each other
+    auto offers = [&](Survivor* sv, Topic t) {
+        for (auto& [tp, label] : g.talkTopics(sv->id)) if (tp == t) return true;
+        return false;
+    };
+    CHECK(!offers(gunnar, Topic::Family) && offers(gunnar, Topic::Kin));
+    CHECK(!offers(gunnar, Topic::Flirt));   // not romanceable
+    for (int d = 0; d < 40 && gunnar->kinship < kBondNeeded; ++d) {
+        g.world().clock().setTotalMinutes(day + (40 + d) * 1440 + 13 * 60);
+        if (offers(gunnar, Topic::Kin)) g.talk(gunnar->id, Topic::Kin);
+    }
+    CHECK(gunnar->kinship >= kBondNeeded && offers(gunnar, Topic::Family));
+    g.talk(gunnar->id, Topic::Family);
+    CHECK(gunnar->bond() == Bond::Family);
+    CHECK(!offers(gunnar, Topic::Kin));
+    g.talk(gunnar->id, Topic::Join);
+    CHECK(gunnar->joined);
+    // Hurting someone ends it
+    g.player().pos = elin->pos + Vec2{1, 0};
+    g.talk(elin->id, Topic::Breakup);
+    CHECK(elin->bond() != Bond::Lover);
+    elin->trust = -50;
+    CHECK(elin->bond() == Bond::Enemy);
+    bool sorry = false;
+    for (auto& [t, label] : g.talkTopics(elin->id)) sorry |= t == Topic::Sorry;
+    CHECK(sorry);
+    // {name} is filled in
+    CHECK(g.personal("Hi {name}!") == "Hi " + g.player().look.name + "!");
+}
+
+TEST(character_and_bonds_survive_saving) {
+    Game g;
+    CHECK(g.loadData());
+    CharacterChoice c = CharacterChoice::defaults();
+    c.look.name = "Åsa Ström";
+    c.look.gender = Gender::Woman;
+    c.look.hairStyle = 2;
+    c.look.skin = 0x8d5a3b;
+    c.wear[(size_t)ClothingSlot::Head] = "wool_hat";
+    c.tint[(size_t)ClothingSlot::Head] = 0x3e5a36;
+    g.newGame(42, &c);
+    CHECK(g.player().look.name == "Åsa Ström");
+    const ItemInstance& hat = g.player().worn[(size_t)ClothingSlot::Head];
+    CHECK(hat.def && hat.def->id == "wool_hat" && hat.tint == 0x3e5a36);
+    CHECK(g.player().worn[(size_t)ClothingSlot::Sweater].def && g.player().worn[(size_t)ClothingSlot::Sweater].def->id == "fleece");
+    Survivor* elin = find(g, "elin");
+    if (!elin) return;
+    elin->met = true;
+    elin->lover = true;
+    elin->romance = 72;
+    elin->kinship = 12;
+    elin->storiesTold = 2;
+    std::string path = "test_people_save2.txt";
+    CHECK(g.save(path));
+    Game h;
+    CHECK(h.loadData());
+    CHECK(h.load(path));
+    CHECK(h.player().look.name == "Åsa Ström" && h.player().look.gender == Gender::Woman && h.player().look.hairStyle == 2);
+    CHECK(h.player().look.skin == 0x8d5a3b);
+    const ItemInstance& hat2 = h.player().worn[(size_t)ClothingSlot::Head];
+    CHECK(hat2.def && hat2.tint == 0x3e5a36);
+    Survivor* e2 = find(h, "elin");
+    CHECK(e2 && e2->lover && e2->bond() == Bond::Lover && std::fabs(e2->romance - 72) < 0.01f && e2->storiesTold == 2);
+    CHECK(e2 && std::fabs(e2->kinship - 12) < 0.01f);
+    std::remove(path.c_str());
 }

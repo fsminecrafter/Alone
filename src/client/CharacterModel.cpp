@@ -128,8 +128,19 @@ void CharacterModel::build() {
             {1.505f, 0.062f, 0.098f, -0.004f, BChest, BNeck, 0.7f},
         };
         std::vector<Ring> rings;
-        for (const auto& r : tr) rings.push_back({{r.cx, r.y, 0}, kX, kZ, r.ru, r.rv, r.b0, r.b1, r.w0, r.y, 0.8f});
+        for (const auto& r : tr) {
+            float ru = r.ru, rv = r.rv;
+            if (shape_.female) {
+                // narrower shoulders and waist, wider hips
+                rv *= r.y > 1.38f ? 0.9f : r.y > 1.03f && r.y < 1.2f ? 0.88f : r.y < 1.0f ? 1.07f : 0.95f;
+                if (r.y > 1.24f && r.y < 1.36f) ru *= 1.04f;
+            }
+            rings.push_back({{r.cx, r.y, 0}, kX, kZ, ru, rv, r.b0, r.b1, r.w0, r.y, 0.8f});
+        }
         tube(rings, 22, RTorso, BodyPart::Torso, true, false);
+        if (shape_.female)
+            for (float s : {-1.0f, 1.0f})
+                ellipsoid({0.088f, 1.305f, 0.056f * s}, {0.040f, 0.046f, 0.046f}, BChest, RTorso, BodyPart::Torso, 6, 10);
     }
     // --- neck ---------------------------------------------------------------------
     {
@@ -164,6 +175,20 @@ void CharacterModel::build() {
         ellipsoid({0.1015f, 1.645f, 0}, {0.006f, 0.0045f, 0.024f}, BHead, RLip, BodyPart::Head, 4, 8);
         // hair (or a hat) over the skull
         ellipsoid({0.002f, 1.712f, 0}, {0.108f, 0.129f, 0.096f}, BHead, RHair, BodyPart::Head, 12, 22, keepHair);
+        // and below it, whatever the hairstyle adds
+        switch (shape_.hair) {
+            case 1:   // long: down the back to the shoulders
+                ellipsoid({-0.050f, 1.590f, 0}, {0.062f, 0.150f, 0.098f}, BHead, RHairLong, BodyPart::Head, 8, 14);
+                break;
+            case 2:   // ponytail
+                ellipsoid({-0.112f, 1.700f, 0}, {0.030f, 0.030f, 0.030f}, BHead, RHairLong, BodyPart::Head, 5, 8);
+                ellipsoid({-0.128f, 1.610f, 0}, {0.028f, 0.085f, 0.026f}, BHead, RHairLong, BodyPart::Head, 6, 8);
+                break;
+            case 3:   // bun
+                ellipsoid({-0.092f, 1.790f, 0}, {0.046f, 0.040f, 0.046f}, BHead, RHairLong, BodyPart::Head, 6, 10);
+                break;
+            default: break;
+        }
     }
     // --- arms and hands ---------------------------------------------------------------
     for (int side = 0; side < 2; ++side) {
@@ -273,7 +298,8 @@ void CharacterModel::computeNormals() {
     for (auto& v : rest_) v.nrm = Vector3Length(v.nrm) > 1e-9f ? Vector3Normalize(v.nrm) : kY;
 }
 
-bool CharacterModel::init() {
+bool CharacterModel::init(const BodyShape& shape) {
+    shape_ = shape;
     build();
     computeNormals();
     int n = (int)rest_.size();
@@ -334,7 +360,14 @@ void CharacterModel::skin(const CharacterRig& rig, const CharacterLook& look) {
             case REye: c = Color{34, 30, 30, 255}; break;
             case RBrow: c = shade(look.hair, 0.8f); break;
             case RLip: c = mixColor(look.skin, Color{150, 70, 66, 255}, 0.55f); break;
-            case RHair: c = look.hat.a > 0 ? look.hat : look.hair; cloth = look.hat.a > 0; break;
+            case RHair:
+                c = look.hat.a > 0 ? look.hat : shape_.hair == 4 ? mixColor(look.skin, look.hair, 0.3f) : look.hair;
+                cloth = look.hat.a > 0;
+                break;
+            case RHairLong:
+                // a bun under a hat looks like the hat's bobble
+                c = shape_.hair == 3 && look.hat.a > 0 ? look.hat : shade(look.hair, 0.94f);
+                break;
             case RTorso: {
                 float y = v.pos.y;
                 cloth = true;

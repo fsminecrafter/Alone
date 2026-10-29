@@ -25,7 +25,10 @@ and listen to your body, because it will tell you *how* you feel but never
 animations that react to how you are: a hurt leg makes you limp, a hurt arm is
 held close, pain bends you over, cold makes you hug yourself and shiver, nausea
 puts a hand on your stomach, and when you're out of breath you rest your hands
-on your knees ([MP4](docs/media/character_animations.mp4)):
+on your knees. You carry what you hold at the ready, pedal a bike, and sit in a
+car seat. The body and hair are your own: a man's or a woman's build, and short,
+long, ponytail, bun or shaved hair, in the clothes and colours you picked
+([MP4](docs/media/character_animations.mp4)):
 
 ![Character animations](docs/media/character_animations.gif)
 
@@ -164,6 +167,34 @@ track of who you know and what they need, the map marks them, and the goal
 under the clock says what to do next. People are defined in
 `data/survivors/survivors.ini`.
 
+**Making your character.** A new game starts in the house you wake up in,
+with you standing in it: pick a name, man, woman or other, skin, hair colour
+and hairstyle (short, long, ponytail, bun, shaved), and what you're wearing -
+shirt, sweater, jacket, trousers, shoes and a hat, each in its own colour.
+People call you by your name. The last character you made is remembered.
+
+**Days and nights.** People live in their houses: they walk from room to
+room (opening and closing the doors behind them), mutter to themselves, go
+to bed at their own bedtime and get up in the morning. Sneak in at night and
+you'll find them asleep; walk past the bed and they may wake up - and they
+have something to say about being woken. Companions doze off next to you
+while you sleep.
+
+**Friendship.** Everyone you meet is somewhere on a ladder: *Enemy, Stranger,
+Acquaintance, Friend, Best friend, Family* or *Lover*. Talk every day, ask
+about their life (each person has a story, told a piece at a time as they
+trust you), tell jokes, bring gifts and help them. Friends give better
+deals and open up. The last steps are two different roads, and you have to
+pick one: look out for each other ("whatever happens, I've got your back")
+and someone becomes *Family*; flirt with them and an adult may become your
+*Lover*. Each pulls the other down - flirt with someone you've made family and
+it gets awkward, and a lover who hears "you're like family to me" is hurt. The
+talk window shows how far along each road you are. Family and lovers
+come with you even if they'd usually stay home, and keep things aside for
+you. Hurt someone and it's over. Hundreds of lines of dialogue, from small
+talk about the weather to what they say when you turn up bleeding, live in
+`data/text/dialogue.ini` and each person's own lines in `survivors.ini`.
+
 **Talking your way out.** You can call out to people who won't let you near.
 Jonas in the police station will hear you out from across the yard: tell him
 you're not here to fight, strike a deal (he names the price), bring what he
@@ -176,11 +207,17 @@ off; with your fists, probably not.
 shops): get on and ride, quietly and without fuel. Cars are harder: one in
 five doors is unlocked (or has the key left in it), and only one in five of
 those has the key in the ignition - otherwise sit in it out of the rain,
-smash a window, or hotwire it once someone has shown you how. Every car has
+smash a window, or hotwire it once someone has shown you how. You drive like
+a car: W is the throttle, S brakes and then reverses, A/D turn the wheel
+(which only turns you while you're rolling). Every car has
 0-40% of a tank. A gas can holds any liquid but is meant for petrol: fill it
 at the pumps of the real fuel stations (while there's power; afterwards a
 hose down the filler pipe works), or siphon any car with a hose. Crash and
 you'll get hurt; run things down and they get hurt.
+
+**Water:** when you're thirsty you take a sip from an open bottle of clean
+water by yourself (never lake water, never anything still sealed). Turn it
+off under Settings > Game.
 
 **Things to do:** search kitchens, wardrobes, sheds, shops, the pharmacy and the
 hospital - a search opens the container so you can look through it and take
@@ -275,7 +312,7 @@ only allows sound after your first click or key press.
 
 | Key | Action |
 |---|---|
-| W A S D | Walk (Shift run, C crouch); on a bike or in a car: steer |
+| W A S D | Walk (Shift run, C crouch); driving: W gas, S brake/reverse, A/D steer |
 | Ctrl (hold) | Aim: face the cursor and walk while aiming, steadier shots |
 | Right click | Interact with what's under the cursor |
 | F | Use what's in front of you: the door you face, a cupboard, a person, a car (else what's under the cursor) |

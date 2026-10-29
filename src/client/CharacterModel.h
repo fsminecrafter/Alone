@@ -22,6 +22,14 @@ struct CharacterLook {
     float blood[(int)BodyPart::Count]{};   // blood soaked into the clothes, 0..1
 };
 
+// Body shape and hairstyle: these change the mesh itself (built once).
+struct BodyShape {
+    bool female = false;
+    int hair = 0;                       // 0 short, 1 long, 2 ponytail, 3 bun, 4 shaved
+    bool operator==(const BodyShape& o) const { return female == o.female && hair == o.hair; }
+    bool operator!=(const BodyShape& o) const { return !(*this == o); }
+};
+
 // One smooth, seamless body mesh hung on the CharacterRig skeleton. It is
 // built once in the rest pose with every vertex weighted to one or two bones;
 // each frame the vertices follow their bones (linear blend skinning on the
@@ -29,7 +37,8 @@ struct CharacterLook {
 // bend instead of showing separate blocks.
 class CharacterModel {
 public:
-    bool init();
+    bool init(const BodyShape& shape = {});
+    const BodyShape& shape() const { return shape_; }
     void shutdown();
     // Pose the mesh like the rig and colour it for this look
     void skin(const CharacterRig& rig, const CharacterLook& look);
@@ -38,7 +47,7 @@ public:
 
     enum Region : uint8_t {
         RHead, RNose, REar, REye, RBrow, RLip, RHair, RNeck,
-        RTorso, RUpperArm, RForearm, RHand, RLeg, RShoe, RSole, Count
+        RTorso, RUpperArm, RForearm, RHand, RLeg, RShoe, RSole, RHairLong, Count
     };
 
 private:
@@ -68,6 +77,7 @@ private:
     void build();
     void computeNormals();
 
+    BodyShape shape_;
     std::vector<Vtx> rest_;
     std::vector<unsigned short> idx_;
     Matrix invBind_[BoneCount];

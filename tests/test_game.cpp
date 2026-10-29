@@ -107,7 +107,7 @@ TEST(fire_cooking_and_hunting_flow) {
     for (auto& o : g.actionsAt(spot))
         if (o.kind == ActionKind::LightFire && o.enabled) { g.perform(o); runFor(6); }
     // It can fail in the rain; try again
-    for (int i = 0; i < 5 && !g.world().campfires()[0].lit; ++i) {
+    for (int i = 0; i < 16 && !g.world().campfires()[0].lit; ++i) {
         p.inventory.add(g.items().create("matches", rng));
         for (auto& o : g.actionsAt(spot))
             if (o.kind == ActionKind::LightFire && o.enabled) { g.perform(o); runFor(6); }

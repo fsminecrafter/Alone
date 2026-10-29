@@ -4,21 +4,23 @@
 #include "game/Game.h"
 #include <cstdio>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 namespace alone {
 
 class SaveGame {
 public:
-    // 3: dressings per body part, 4: tents, carpentry, stoves, 5: people, vehicles, 6: petrol, 7: deals and rumours
-    static constexpr int kVersion = 7;
+    // 3: dressings per body part, 4: tents, carpentry, stoves, 5: people, vehicles, 6: petrol, 7: deals and rumours,
+    // 8: who you are (name, looks, dyed clothes), friendships, people's beds, 9: kinship (the way to Family)
+    static constexpr int kVersion = 9;
     static int& readVersion() { static int v = kVersion; return v; }   // of the file being read
 
     // --- writing -------------------------------------------------------------
     static void item(std::ostream& o, const ItemInstance& it) {
         o << (it.def ? it.def->id : std::string("-")) << ' ' << it.portion << ' ' << it.ageHours << ' ' << it.condition << ' '
           << it.liquidMl << ' ' << it.liquidSafe << ' ' << it.opened << ' ' << it.usesLeft << ' ' << it.carriesPathogen << ' '
-          << it.uid << ' ' << (int)it.liquid << '\n';
+          << it.uid << ' ' << (int)it.liquid << ' ' << it.tint << '\n';
     }
     static void items(std::ostream& o, const std::vector<ItemInstance>& v) {
         o << v.size() << '\n';
@@ -112,6 +114,14 @@ public:
         for (const auto& [k, l] : g.propFuel_) o << k << ' ' << l << '\n';
         o << g.pumpFuel_.size() << '\n';
         for (const auto& [k, l] : g.pumpFuel_) o << k << ' ' << l << '\n';
+        // v8: who you are, and where you stand with people
+        o << "SELF " << std::quoted(p.look.name) << ' ' << (int)p.look.gender << ' ' << p.look.skin << ' ' << p.look.hair << ' '
+          << p.look.hairStyle << '\n';
+        o << "BONDS " << g.survivors_.size() << '\n';
+        for (const auto& sv : g.survivors_)
+            o << sv.def->id << ' ' << sv.romance << ' ' << sv.family << ' ' << sv.lover << ' ' << sv.lastChatDay << ' ' << sv.lastFlirtDay << ' '
+              << sv.lastGiftDay << ' ' << sv.lastJokeDay << ' ' << sv.lastSorryDay << ' ' << sv.storiesTold << ' ' << (int)sv.shownBond << ' '
+              << sv.companyMinutes << ' ' << sv.kinship << ' ' << sv.lastKinDay << '\n';
         o << "END\n";
     }
 
@@ -121,6 +131,7 @@ public:
         int safe = 1, opened = 0, path = 0;
         in >> id >> it.portion >> it.ageHours >> it.condition >> it.liquidMl >> safe >> opened >> it.usesLeft >> path >> it.uid;
         if (readVersion() >= 6) { int liq = 0; in >> liq; it.liquid = (uint8_t)liq; }
+        if (readVersion() >= 8) in >> it.tint;
         it.liquidSafe = safe; it.opened = opened; it.carriesPathogen = path;
         maxUid = std::max(maxUid, it.uid);
         if (id == "-") { it.def = nullptr; return true; }
@@ -318,6 +329,36 @@ public:
                 for (size_t i = 0; i < n && in; ++i) { int64_t k; float l; in >> k >> l; g.pumpFuel_[k] = l; }
             }
             if (p.vehicle >= 0 && !g.vehicle(p.vehicle)) p.vehicle = -1;
+        }
+        if (version >= 8) {
+            std::string tag;
+            int gender = 0;
+            in >> tag >> std::quoted(p.look.name) >> gender >> p.look.skin >> p.look.hair >> p.look.hairStyle;
+            p.look.gender = (Gender)std::clamp(gender, 0, 2);
+            size_t nb = 0;
+            in >> tag >> nb;
+            for (size_t i = 0; i < nb && in; ++i) {
+                std::string id;
+                Survivor t;
+                int fam = 0, lov = 0, shown = 1;
+                in >> id >> t.romance >> fam >> lov >> t.lastChatDay >> t.lastFlirtDay >> t.lastGiftDay >> t.lastJokeDay >> t.lastSorryDay >>
+                    t.storiesTold >> shown >> t.companyMinutes;
+                if (version >= 9) in >> t.kinship >> t.lastKinDay;
+                else if (fam) t.kinship = kBondNeeded;
+                for (auto& sv : g.survivors_) {
+                    if (sv.def->id != id) continue;
+                    sv.romance = t.romance; sv.family = fam; sv.lover = lov;
+                    sv.lastChatDay = t.lastChatDay; sv.lastFlirtDay = t.lastFlirtDay; sv.lastGiftDay = t.lastGiftDay;
+                    sv.lastJokeDay = t.lastJokeDay; sv.lastSorryDay = t.lastSorryDay; sv.storiesTold = t.storiesTold;
+                    sv.shownBond = (Bond)std::clamp(shown, 0, (int)Bond::Count - 1); sv.companyMinutes = t.companyMinutes;
+                    sv.kinship = t.kinship; sv.lastKinDay = t.lastKinDay;
+                }
+            }
+        }
+        // Saved before people had a bed: whatever they were doing, they're awake
+        for (auto& sv : g.survivors_) {
+            if (sv.asleep() && !sv.hasBed) sv.state = SurvivorState::Home;
+            if (version < 8) sv.shownBond = sv.bond();
         }
         std::string end;
         in >> end;
