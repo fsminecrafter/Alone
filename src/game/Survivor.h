@@ -113,6 +113,12 @@ struct Survivor {
     float alert = 0;                   // 0..1 how sure they are you're near
     float freezeCooldown = 0;          // hostile: seconds before they'll stop you again
     bool calledYou = false;            // hostile: walked up to you and asked what you want
+    // Travelling with you by car or bike
+    int ride = -1;                     // vehicle id they sit in or ride (-1: on foot)
+    int seat = 0;                      // in a car: 1 front passenger, 2.. the back
+    bool seekingBike = false;          // you got on a bike: they go and find one too
+    int bikeId = -1;                   // the moved bike they're heading for, or
+    int bikeX = 0, bikeY = 0;          // the parked one (when bikeId < 0)
     bool admitted = false;             // hostile: let you in; treats you like anyone else now
     double truceUntil = 0;             // raiders: game minute until which they leave you alone (you paid)
     bool truce = false;                // (truceUntil is in the future)

@@ -1049,3 +1049,78 @@ TEST(sling_a_weapon_and_count_rounds) {
     run(g, 4);
     CHECK(g.weapon()->usesLeft == 5 && g.ammoCarried(g.weapon()->def) == 0);
 }
+
+TEST(companions_ride_along) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    int ox, oy;
+    CHECK(openPatch(g, 30, ox, oy));
+    World& w = g.world();
+    Survivor* elin = find(g, "elin");
+    Survivor* gunnar = find(g, "gunnar");
+    if (!elin || !gunnar) return;
+    for (Survivor* s : {elin, gunnar}) {
+        s->met = s->joined = true;
+        s->trust = 70;
+        s->state = SurvivorState::Follow;
+    }
+    // a car in the open: both get in
+    int cx = ox + 8, cy = oy + 8;
+    w.setProp(cx, cy, Prop::Car);
+    g.player().pos = Vec2{cx + 0.5f, cy + 2.0f};
+    elin->pos = Vec2{cx + 2.5f, cy + 3.0f};
+    gunnar->pos = Vec2{cx - 1.5f, cy + 3.5f};
+    ActionOption smash;
+    smash.kind = ActionKind::SmashCarWindow;
+    smash.x = cx; smash.y = cy;
+    g.perform(smash);
+    Vehicle* car = g.playerVehicle();
+    CHECK(car && car->kind == VehicleKind::Car);
+    if (!car) return;
+    CHECK(elin->ride == car->id && gunnar->ride == car->id && elin->seat != gunnar->seat);
+    CHECK(Game::carSeats(*car) == 5 || Game::carSeats(*car) == 7);
+    // the car moves: they move with it
+    car->pos = car->pos + Vec2{4, 0};
+    g.player().pos = car->pos;
+    run(g, 0.5f);
+    CHECK(distance(elin->pos, car->pos) < 0.01f && distance(gunnar->pos, car->pos) < 0.01f);
+    // out you get, and so do they
+    ActionOption out;
+    out.kind = ActionKind::ExitVehicle;
+    g.perform(out);
+    run(g, 0.5f);
+    CHECK(elin->ride < 0 && gunnar->ride < 0);
+    CHECK(distance(elin->pos, g.player().pos) < 5 && distance(gunnar->pos, g.player().pos) < 5);
+    std::printf("    out of the car: Elin %.1f m, Gunnar %.1f m from you\n", distance(elin->pos, g.player().pos), distance(gunnar->pos, g.player().pos));
+
+    // bikes: you get on one, Elin fetches the one by the fence, Gunnar finds none
+    g.vehicles().clear();
+    int bx = ox + 18, by = oy + 20;
+    w.setProp(bx, by, Prop::Bike);
+    w.setProp(bx + 5, by, Prop::Bike);
+    g.player().pos = Vec2{bx + 0.5f, by + 1.3f};
+    elin->pos = Vec2{bx + 3.5f, by + 2.5f};
+    gunnar->state = SurvivorState::Wait;   // he stays behind this time
+    ActionOption mount;
+    mount.kind = ActionKind::MountBike;
+    mount.x = bx; mount.y = by;
+    g.perform(mount);
+    CHECK(g.playerVehicle() && g.playerVehicle()->kind == VehicleKind::Bike);
+    CHECK(elin->seekingBike);
+    run(g, 6);
+    CHECK(elin->ride >= 0 && elin->ride != g.player().vehicle);
+    // ride off: she follows on hers
+    PlayerInput pedal;
+    pedal.throttle = 1;
+    run(g, 6, pedal);
+    float gap = distance(elin->pos, g.player().pos);
+    std::printf("    on bikes: %.1f m behind you\n", gap);
+    CHECK(gap < 15);
+    ActionOption off;
+    off.kind = ActionKind::ExitVehicle;
+    run(g, 3);
+    g.perform(off);
+    run(g, 0.5f);
+    CHECK(elin->ride < 0);
+}

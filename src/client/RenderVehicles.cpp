@@ -305,7 +305,9 @@ void Renderer::drawVehicles(Game& game, bool shadowPass) {
         if (distance(v.pos, pp) > 100) continue;
         float y = w.standHeight(v.pos);
         // a bike nobody rides leans on its stand
-        float lean = (v.kind == VehicleKind::Bike && v.id != game.player().vehicle) ? 0.14f : 0.0f;
+        bool ridden = v.id == game.player().vehicle;
+        for (const auto& s : game.survivors()) ridden |= s.ride == v.id;
+        float lean = (v.kind == VehicleKind::Bike && !ridden) ? 0.14f : 0.0f;
         Matrix t = MatrixRotateX(lean);
         // wheels follow the ground: tilt the body with the slope it stands on
         Vec2 f = v.forward();
@@ -360,8 +362,32 @@ void Renderer::updateNpcRigs(Game& game, float time, float dt) {
         in.aiming = in.weapon == 3 && s.lastAttack < 1.5f;
         if (in.weapon == 3) in.swing = 0;
         in.hunch = s.alive() ? std::clamp(1.0f - s.hp / s.def->hp - 0.3f, 0.0f, 1.0f) : 0;
+        // in a car seat or on a bike
+        Vec2 at = s.pos;
+        float facing = s.facing;
+        const Vehicle* rv = nullptr;
+        if (s.ride >= 0)
+            for (const auto& v : game.vehicles())
+                if (v.id == s.ride) rv = &v;
+        if (rv) {
+            in.ride = rv->kind == VehicleKind::Car ? 2 : 1;
+            in.speed = 0;
+            in.weapon = 0;
+            in.swing = 0;
+            in.aiming = false;
+            Vec2 f = rv->forward(), side{-f.y, f.x};
+            facing = rv->heading;
+            if (rv->kind == VehicleKind::Bike) at = rv->pos - f * 0.16f;
+            else {
+                // 1 front passenger; 2-4 the back row; 5-6 the third row of a van
+                int k = s.seat;
+                float back = k <= 1 ? 0.3f : k <= 4 ? 1.2f : 2.0f;
+                float across = k <= 1 ? 0.36f : k == 2 || k == 5 ? -0.4f : k == 3 || k == 6 ? 0.4f : 0.0f;
+                at = rv->pos - f * back + side * across;
+            }
+        }
         g.rig.update(in, dt);
-        float stand = w.standHeight(s.pos);
+        float stand = w.standHeight(at);
         if (s.asleep()) {   // in bed, on the sofa
             Prop under = w.tile((int)std::floor(s.pos.x), (int)std::floor(s.pos.y)).prop;
             if (under == Prop::Bed || under == Prop::HospitalBed) stand += 0.42f;
@@ -369,7 +395,7 @@ void Renderer::updateNpcRigs(Game& game, float time, float dt) {
         }
         if (std::fabs(stand - g.y) > 3 || moved == 0) g.y = stand;
         else g.y += (stand - g.y) * std::min(1.0f, dt * 14.0f);
-        g.rig.place(V(s.pos.x, g.y, s.pos.y), s.facing);
+        g.rig.place(V(at.x, g.y, at.y), facing);
         CharacterLook L = lookOf(s.worn, nullptr);
         L.skin = hexColor(s.def->skin);
         L.hair = hexColor(s.def->hair);
@@ -382,7 +408,6 @@ void Renderer::drawSurvivors(Game& game) {
     Vec2 pp = game.player().pos;
     for (const auto& s : game.survivors()) {
         if (distance(s.pos, pp) > 90) continue;
-        if (s.joined && game.player().vehicle >= 0 && distance(s.pos, pp) < 1.0f) continue;   // in the car with you
         auto it = npcs_.find(s.id);
         if (it == npcs_.end() || !it->second.init) continue;
         drawCharacter(it->second.rig, *it->second.model, s.worn, nullptr, it->second.weapon);

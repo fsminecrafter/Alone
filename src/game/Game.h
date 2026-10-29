@@ -210,6 +210,7 @@ public:
     std::string romanceHint(int id);
     // In a tent with a companion: who (0 if nobody)
     int tentMate() const { return tentMate_; }
+    static int carSeats(const Vehicle& v) { return ((v.variant >> 4) % 4) == 3 ? 7 : 5; }   // a van seats seven
     // Weapons: the one on your back, swapping (key 1), reloading (R)
     const ItemInstance* stowedWeapon() const;
     void toggleStow();
@@ -356,6 +357,10 @@ private:
     Vehicle& vehicleFromProp(int x, int y, VehicleKind kind);
     std::vector<ActionOption> vehicleActionsAt(Vec2 pt);
     void performVehicle(const ActionOption& o);
+    // Companions in cars and on bikes (GameVehicles.cpp)
+    void companionsBoard(Vehicle& v);              // you got in or on: they come along
+    bool findBikeFor(Survivor& s);
+    bool updateCompanionRide(Survivor& s, float dt);   // true: moved them this frame
     std::vector<Vehicle> vehicles_;
     std::set<int64_t> lockedCars_;    // car props whose doors you've tried
     std::map<int64_t, float> propFuel_;   // parked cars (props) someone siphoned: litres left

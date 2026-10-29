@@ -231,6 +231,7 @@ void Game::performVehicle(const ActionOption& o) {
                 v.keyInIgnition ? MessageKind::Good : MessageKind::Info);
         else
             log("You get on the bike.");
+        companionsBoard(v);
     };
     switch (o.kind) {
         case ActionKind::TryCarDoor: {
@@ -531,6 +532,178 @@ void Game::updateVehicle(float dt, const PlayerInput& in) {
     p.running = false;
     p.noise = car ? (v->running ? 40.0f + spd * 3.0f : 4.0f) : 5.0f + spd;
     stepDistance_ = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Companions along for the ride
+// ---------------------------------------------------------------------------
+
+void Game::companionsBoard(Vehicle& v) {
+    int vid = v.id;
+    bool car = v.kind == VehicleKind::Car;
+    std::vector<Survivor*> near;
+    for (auto& s : survivors_)
+        if (s.joined && s.alive() && s.state != SurvivorState::Wait && distance(s.pos, player_.pos) < 25) near.push_back(&s);
+    std::sort(near.begin(), near.end(), [&](Survivor* a, Survivor* b) { return distance(a->pos, player_.pos) < distance(b->pos, player_.pos); });
+    if (car) {
+        int free = carSeats(v) - 1, seat = 0;
+        std::string in, out;
+        for (Survivor* s : near) {
+            if (s->ride >= 0) if (Vehicle* old = vehicle(s->ride); old && old->kind == VehicleKind::Bike) old->speed = 0;
+            s->seekingBike = false;
+            if (free > 0) {
+                s->ride = vid;
+                s->seat = ++seat;
+                --free;
+                s->path.clear();
+                s->nav.clear();
+                in += (in.empty() ? "" : ", ") + s->def->name;
+            } else {
+                s->ride = -1;
+                s->state = SurvivorState::Wait;
+                s->target = s->pos;
+                out += (out.empty() ? "" : ", ") + s->def->name;
+                survivorSay(*s, "No room for me. I'll wait here for you.", false);
+            }
+        }
+        if (!in.empty()) log(in + (in.find(',') == std::string::npos ? " gets in." : " get in."));
+        if (!out.empty()) log("No room for " + out + ". They wait here.");
+        return;
+    }
+    // a bike each: they go and find one
+    for (Survivor* s : near) {
+        if (s->ride >= 0) {
+            Vehicle* r = vehicle(s->ride);
+            if (r && r->kind == VehicleKind::Bike) continue;   // already riding
+            s->ride = -1;
+        }
+        if (findBikeFor(*s)) {
+            s->seekingBike = true;
+            survivorSay(*s, "Hang on - I'll grab a bike.", false);
+        } else {
+            survivorSay(*s, "There's no bike for me. I'll keep up on foot.", false);
+        }
+    }
+}
+
+bool Game::findBikeFor(Survivor& s) {
+    auto taken = [&](int id) {
+        if (id == player_.vehicle) return true;
+        for (const auto& o : survivors_)
+            if (&o != &s && (o.ride == id || (o.seekingBike && o.bikeId == id))) return true;
+        return false;
+    };
+    float best = 40;
+    s.bikeId = -1;
+    bool found = false;
+    for (const auto& v : vehicles_)
+        if (v.kind == VehicleKind::Bike && !taken(v.id) && distance(v.pos, s.pos) < best) { best = distance(v.pos, s.pos); s.bikeId = v.id; found = true; }
+    // parked bikes on the map
+    int tx = (int)std::floor(s.pos.x), ty = (int)std::floor(s.pos.y);
+    for (int dy = -35; dy <= 35; ++dy)
+        for (int dx = -35; dx <= 35; ++dx) {
+            int x = tx + dx, y = ty + dy;
+            if (world_->tile(x, y).prop != Prop::Bike) continue;
+            bool claimed = false;
+            for (const auto& o : survivors_)
+                if (&o != &s && o.seekingBike && o.bikeId < 0 && o.bikeX == x && o.bikeY == y) claimed = true;
+            float d = distance(Vec2{x + 0.5f, y + 0.5f}, s.pos);
+            if (claimed || d >= best) continue;
+            best = d;
+            s.bikeId = -1;
+            s.bikeX = x;
+            s.bikeY = y;
+            found = true;
+        }
+    return found;
+}
+
+bool Game::updateCompanionRide(Survivor& s, float dt) {
+    Player& p = player_;
+    if (s.ride >= 0) {
+        Vehicle* v = vehicle(s.ride);
+        if (!v || !s.joined) { s.ride = -1; return false; }
+        Vec2 f = v->forward(), side{-f.y, f.x};
+        if (v->kind == VehicleKind::Car) {
+            if (p.vehicle == v->id) {
+                s.pos = v->pos;
+                s.vel = {};
+                s.facing = v->heading;
+                return true;
+            }
+            // you got out: so do they, each by their own door
+            s.ride = -1;
+            float sideOff = (s.seat % 2 == 1 ? 1.0f : -1.0f) * (v->halfWidth() + 0.6f);
+            float back = s.seat >= 2 ? -1.0f - 0.4f * (s.seat / 2) : 0.0f;
+            for (Vec2 c : {v->pos + side * sideOff + f * back, v->pos - side * sideOff + f * back, v->pos - f * (v->length() * 0.5f + 0.7f)})
+                if (!world_->tileBlocked((int)std::floor(c.x), (int)std::floor(c.y))) { s.pos = c; break; }
+            return false;
+        }
+        // on a bike: ride after you while you ride
+        const Vehicle* pv = playerVehicle();
+        if (!pv || pv->kind != VehicleKind::Bike) {
+            s.ride = -1;
+            v->speed = 0;
+            Vec2 off = v->pos + side * 0.6f;
+            if (!world_->tileBlocked((int)std::floor(off.x), (int)std::floor(off.y))) s.pos = off;
+            return false;
+        }
+        float d = distance(s.pos, p.pos);
+        if (d > 60) {   // fell far behind: catch up out of sight
+            s.pos = p.pos - pv->forward() * 3.0f;
+            d = 3.0f;
+        }
+        float want = d > 3.0f ? std::clamp(std::fabs(pv->speed) + (d - 3.0f) * 0.8f, 1.5f, 8.0f) : 0.0f;
+        Vec2 dir{};
+        if (want > 0) {
+            Vec2 step = navigate(s, p.pos, dt) - s.pos;
+            float l = step.length();
+            if (l > 1e-3f) dir = step * (1.0f / l);
+        }
+        s.vel = s.vel + (dir * want - s.vel) * std::min(1.0f, dt * 3.0f);
+        if (s.vel.lengthSq() > 0.01f) {
+            s.pos = world_->moveCircle(s.pos, s.vel * dt, 0.3f);
+            s.facing = std::atan2(s.vel.y, s.vel.x);
+        }
+        v->pos = s.pos;
+        v->heading = s.facing;
+        v->speed = s.vel.length();
+        return true;
+    }
+    if (s.seekingBike) {
+        const Vehicle* pv = playerVehicle();
+        if (!pv || pv->kind != VehicleKind::Bike) { s.seekingBike = false; return false; }
+        Vec2 at;
+        bool ok = false;
+        if (s.bikeId >= 0) {
+            if (Vehicle* b = vehicle(s.bikeId)) { at = b->pos; ok = true; }
+        } else if (world_->tile(s.bikeX, s.bikeY).prop == Prop::Bike) {
+            at = Vec2{s.bikeX + 0.5f, s.bikeY + 0.5f};
+            ok = true;
+        }
+        if (!ok && !findBikeFor(s)) { s.seekingBike = false; return false; }
+        if (!ok) return false;   // try the new one next frame
+        if (distance(s.pos, at) < 1.1f) {
+            int id = s.bikeId >= 0 ? s.bikeId : vehicleFromProp(s.bikeX, s.bikeY, VehicleKind::Bike).id;
+            Vehicle* b = vehicle(id);
+            s.ride = id;
+            s.seekingBike = false;
+            if (b) { s.pos = b->pos; s.facing = b->heading; }
+            survivorSay(s, "Got one. Lead the way!", false);
+            return true;
+        }
+        Vec2 step = navigate(s, at, dt) - s.pos;
+        float l = step.length();
+        if (l > 1e-3f) {
+            Vec2 want = step * (3.6f / l);
+            s.vel = s.vel + (want - s.vel) * std::min(1.0f, dt * 6.0f);
+            s.pos = world_->moveCircle(s.pos, s.vel * dt, 0.28f);
+            s.facing = std::atan2(s.vel.y, s.vel.x);
+            openDoorAhead(s, step * (1.0f / l));
+        }
+        return true;
+    }
+    return false;
 }
 
 } // namespace alone

@@ -1217,6 +1217,7 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
         float speed = 0;
         bool face = false;
         Vec2 faceAt;
+        if (s.joined && updateCompanionRide(s, dt)) continue;   // in the car, on a bike, or off to find one
         if (s.joined) {
             // Time together brings you closer
             if (dist < 30) {
@@ -1258,8 +1259,6 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
             } else if (p.asleep && dist < 6) {
                 s.dozing = true;    // you're sleeping: they doze off beside you
             } else {
-                // in the car with you
-                if (p.vehicle >= 0 && dist < 12) { s.pos = p.pos; continue; }
                 if (dist > 2.6f) { goal = p.pos; speed = dist > 7 ? 4.2f : 1.9f; }
                 else if (p.running) { goal = p.pos; speed = 3; }
             }
