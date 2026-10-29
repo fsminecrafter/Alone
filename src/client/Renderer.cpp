@@ -656,6 +656,9 @@ void Renderer::drawScene(Game& game, float time) {
     drawEntities(game, time, false);
     // The ground last: whatever stands on it has already covered part of it
     Matrix identity = MatrixIdentity();
+    // Entities leave their own tint on the material (a dark jacket would
+    // otherwise darken the whole ground)
+    mat_.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     for (const auto& d : viewChunks_)
         if (d.chunk->hasGround) {
             DrawMesh(d.chunk->ground, mat_, identity);
