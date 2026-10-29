@@ -125,6 +125,7 @@ public:
         // v10: broken windows
         o << "WINDOWS " << w.brokenWindows_.size() << '\n';
         for (int64_t k : w.brokenWindows_) o << k << '\n';
+        o << "STOWED " << p.stowedUid << '\n';
         o << "END\n";
     }
 
@@ -363,6 +364,7 @@ public:
                 in >> tag >> nw;
                 w.brokenWindows_.clear();
                 for (size_t i = 0; i < nw && in; ++i) { int64_t k; in >> k; w.brokenWindows_.insert(k); }
+                in >> tag >> p.stowedUid;
             }
         }
         // Saved before people had a bed: whatever they were doing, they're awake

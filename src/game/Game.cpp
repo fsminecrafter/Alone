@@ -333,6 +333,50 @@ SleepComfort Game::sleepComfortIn(const Environment& env) {
     return c;
 }
 
+const ItemInstance* Game::stowedWeapon() const {
+    int i = player_.inventory.indexOfUid(player_.stowedUid);
+    return i >= 0 ? &player_.inventory.items()[(size_t)i] : nullptr;
+}
+
+void Game::toggleStow() {
+    Player& p = player_;
+    if (p.asleep || dead()) return;
+    const ItemInstance* back = stowedWeapon();
+    const ItemInstance* hand = weapon();
+    if (!back && !hand) return;
+    if (action_.active && action_.option.kind == ActionKind::Reload) cancelAction();
+    uint32_t h = hand ? hand->uid : 0, b = back ? back->uid : 0;
+    std::string handName = hand ? lower(hand->def->name) : "", backName = back ? lower(back->def->name) : "";
+    p.weaponUid = b;
+    p.stowedUid = h;
+    p.attackTimer = std::max(p.attackTimer, 0.6f);
+    sound(Sfx::Click, p.pos);
+    if (b && h) log("You sling the " + handName + " and take the " + backName + " off your back.");
+    else if (b) log("You take the " + backName + " off your back.");
+    else log("You sling the " + handName + " on your back.");
+}
+
+int Game::ammoCarried(const ItemDef* gun) const {
+    if (!gun || gun->ammo.empty()) return 0;
+    int n = 0;
+    for (const auto& it : player_.inventory.items())
+        if (it.def->id == gun->ammo) n += std::max(0, it.usesLeft);
+    return n;
+}
+
+bool Game::canReload() const {
+    const ItemInstance* w = weapon();
+    return w && w->def->magazine > 0 && w->usesLeft < w->def->magazine && ammoCarried(w->def) > 0;
+}
+
+void Game::reload() {
+    if (!canReload()) return;
+    ActionOption o;
+    o.kind = ActionKind::Reload;
+    o.label = "Reloading";
+    perform(o);
+}
+
 bool Game::inTentWith(int survivorId) {
     if (!tentMate_ || tentMate_ != survivorId) return false;
     Survivor* m = survivor(survivorId);
@@ -430,6 +474,7 @@ void Game::update(float dt, const PlayerInput& input) {
 
 void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     Player& p = player_;
+    if (p.stowedUid && (p.stowedUid == p.weaponUid || p.inventory.indexOfUid(p.stowedUid) < 0)) p.stowedUid = 0;
     Capacity cap = p.body.capacity();
 
     if (p.vehicle >= 0) {
@@ -445,7 +490,7 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
         p.fallen = std::max(0.0f, p.fallen - dt);
         wantsMove = false;
     }
-    if (wantsMove && action_.active) {
+    if (wantsMove && action_.active && action_.option.kind != ActionKind::Reload) {   // you can reload on the move
         if (action_.option.kind == ActionKind::Sleep) log("You get up.");
         cancelAction();
     }
@@ -625,6 +670,7 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     Player& p = player_;
     p.attackTimer -= dt;
     if (!in.attack || p.attackTimer > 0 || dead() || p.asleep || p.vehicle >= 0) return;
+    if (action_.active && action_.option.kind == ActionKind::Reload) return;   // still reloading
     if (action_.active) cancelAction();
     Capacity cap = p.body.capacity();
     const ItemInstance* w = weapon();
@@ -635,12 +681,32 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     p.swing = 1.0f;
 
     if (w && w->def->firearm) {
-        int ammo = p.inventory.find([&](const ItemInstance& it) { return it.def->id == w->def->ammo && it.usesLeft > 0; });
         p.attackTimer = w->def->cooldown;
-        if (ammo < 0) { log(w->def->noise > 100 ? "Click. No cartridges." : "Nothing to shoot."); return; }
-        ItemInstance& a = p.inventory.items()[ammo];
-        const ItemDef* ammoDef = a.def;
-        if (--a.usesLeft <= 0) p.inventory.take(ammo);
+        const ItemDef* ammoDef = nullptr;
+        if (w->def->magazine > 0) {
+            // rounds in the gun; empty, it reloads from your bags
+            ItemInstance& gun = p.inventory.items()[p.inventory.indexOfUid(w->uid)];
+            if (gun.usesLeft <= 0) {
+                if (canReload()) {
+                    log("Empty. You reload.");
+                    ActionOption o;
+                    o.kind = ActionKind::Reload;
+                    o.label = "Reloading";
+                    perform(o);
+                } else {
+                    log("Click. Empty, and no rounds left.");
+                }
+                return;
+            }
+            --gun.usesLeft;
+            ammoDef = items_.find(w->def->ammo);
+        } else {
+            int ammo = p.inventory.find([&](const ItemInstance& it) { return it.def->id == w->def->ammo && it.usesLeft > 0; });
+            if (ammo < 0) { log(w->def->noise > 100 ? "Click. No cartridges." : "Nothing to shoot."); return; }
+            ItemInstance& a = p.inventory.items()[ammo];
+            ammoDef = a.def;
+            if (--a.usesLeft <= 0) p.inventory.take(ammo);
+        }
         bool loud = w->def->noise > 100;
         p.noise = w->def->noise;
         // aim sway from dizziness, cold hands, exhaustion
@@ -785,6 +851,7 @@ ItemInstance Game::takeItem(const ItemRef& ref) {
             ItemInstance it = (*list)[i];
             list->erase(list->begin() + i);
             if (ref.loc == ItemLoc::Player && it.uid == player_.weaponUid) player_.weaponUid = 0;
+            if (ref.loc == ItemLoc::Player && it.uid == player_.stowedUid) player_.stowedUid = 0;
             return it;
         }
     return {};
@@ -1407,6 +1474,9 @@ std::vector<ActionOption> Game::actionsForItem(const ItemRef& ref) {
     if (mine && (d.category == ItemCategory::Weapon || d.hasTag("knife") || d.hasTag("axe"))) {
         if (player_.weaponUid == it->uid) add(ActionKind::Unequip, "Put away");
         else add(ActionKind::Equip, "Hold as weapon");
+        if (player_.stowedUid != it->uid) add(ActionKind::Stow, "Sling on your back (1 swaps)");
+        if (d.magazine > 0 && player_.weaponUid == it->uid)
+            add(ActionKind::Reload, "Reload", canReload(), it->usesLeft >= d.magazine ? "It's full" : "No rounds for it");
     }
     if (d.category == ItemCategory::Clothing) {
         if (ref.loc == ItemLoc::Worn) add(ActionKind::TakeOff, "Take off");
@@ -1503,10 +1573,24 @@ void Game::perform(const ActionOption& o) {
                 player_.flashlightOn = !player_.flashlightOn;
                 return;
             }
-            if (it) { player_.weaponUid = it->uid; log("You hold the " + lower(it->def->name) + " ready."); }
+            if (it) {
+                if (player_.stowedUid == it->uid) player_.stowedUid = 0;
+                player_.weaponUid = it->uid;
+                log("You hold the " + lower(it->def->name) + " ready.");
+            }
             return;
         case ActionKind::Unequip:
             player_.weaponUid = 0;
+            return;
+        case ActionKind::Stow:
+            if (it) {
+                if (player_.weaponUid == it->uid) player_.weaponUid = 0;
+                player_.stowedUid = it->uid;
+                log("You sling the " + lower(it->def->name) + " on your back. (1 to swap)");
+            }
+            return;
+        case ActionKind::Reload:
+            if (canReload()) startTimed(o, weapon()->def->reloadSeconds);
             return;
         case ActionKind::Wear: {
             if (!it) return;
@@ -1789,6 +1873,27 @@ void Game::finishAction() {
             log("You wake up.");
             sleepReport();
             break;
+        case ActionKind::Reload: {
+            int gi = player_.inventory.indexOfUid(player_.weaponUid);
+            if (gi < 0) break;
+            const ItemDef* gd = player_.inventory.items()[(size_t)gi].def;
+            int want = gd->magazine - player_.inventory.items()[(size_t)gi].usesLeft;
+            int got = 0;
+            while (want > 0) {
+                int a = player_.inventory.find([&](const ItemInstance& it) { return it.def->id == gd->ammo && it.usesLeft > 0; });
+                if (a < 0) break;
+                ItemInstance& box = player_.inventory.items()[(size_t)a];
+                int take = std::min(want, box.usesLeft);
+                box.usesLeft -= take;
+                want -= take;
+                got += take;
+                if (box.usesLeft <= 0) player_.inventory.take(a);
+            }
+            gi = player_.inventory.indexOfUid(player_.weaponUid);   // taking boxes out moves things
+            if (gi >= 0) player_.inventory.items()[(size_t)gi].usesLeft += got;
+            sound(Sfx::Click, player_.pos);
+            break;
+        }
         case ActionKind::BreakWindow: {
             if (!world_->windowAt(o.x, o.y, o.dir) || world_->windowBroken(o.x, o.y, o.dir)) break;
             world_->breakWindow(o.x, o.y, o.dir);

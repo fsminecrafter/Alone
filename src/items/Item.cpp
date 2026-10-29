@@ -52,6 +52,11 @@ std::string ItemInstance::displayName(bool knowsMushrooms) const {
             n += buf;
         }
     }
+    if (def->magazine > 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, " [%d/%d]", usesLeft, def->magazine);
+        n += buf;
+    }
     if (def->uses > 0 && def->category != ItemCategory::Food) {
         char buf[32];
         std::snprintf(buf, sizeof buf, " [%d]", usesLeft);

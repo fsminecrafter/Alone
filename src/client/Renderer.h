@@ -157,7 +157,7 @@ private:
     // entities (RenderEntities.cpp)
     void drawEntities(Game& game, float time, bool shadowPass);
     void drawCharacter(const CharacterRig& rig, const CharacterModel& model, const std::array<ItemInstance, 9>& worn, const Body* body,
-                       const ItemDef* weapon);
+                       const ItemDef* weapon, const ItemDef* slung = nullptr);
     // vehicles and other people (RenderVehicles.cpp)
     const Mesh& vehicleMesh(const Vehicle& v);
     void drawVehicles(Game& game, bool shadowPass);

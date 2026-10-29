@@ -992,3 +992,60 @@ TEST(share_a_tent_with_your_lover) {
         if (o.kind == ActionKind::Sleep && o.enabled) { h.perform(o); break; }
     CHECK(h.player().asleep && h.takeTalkRequest() == 0);
 }
+
+TEST(sling_a_weapon_and_count_rounds) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    give(g, "hunting_rifle");
+    give(g, "kitchen_knife");
+    give(g, "rifle_ammo");
+    Player& p = g.player();
+    uint32_t rifle = p.inventory.items()[p.inventory.findId("hunting_rifle")].uid;
+    uint32_t knife = p.inventory.items()[p.inventory.findId("kitchen_knife")].uid;
+    p.weaponUid = rifle;
+    // R: five in the gun, five left in the box
+    CHECK(g.canReload());
+    g.reload();
+    run(g, 4);
+    CHECK(g.weapon()->usesLeft == 5 && g.ammoCarried(g.weapon()->def) == 5);
+    CHECK(g.weapon()->displayName(false).find("[5/5]") != std::string::npos);
+    // sling it, take the knife; 1 swaps them
+    ActionOption sling;
+    for (auto& o : g.actionsForItem(ItemRef{ItemLoc::Player, 0, 0, 0, rifle}))
+        if (o.kind == ActionKind::Stow) sling = o;
+    CHECK(sling.kind == ActionKind::Stow);
+    g.perform(sling);
+    CHECK(p.stowedUid == rifle && p.weaponUid == 0);
+    p.weaponUid = knife;
+    g.toggleStow();
+    CHECK(p.weaponUid == rifle && p.stowedUid == knife);
+    g.toggleStow();
+    CHECK(p.weaponUid == knife && p.stowedUid == rifle);
+    // kept through a save
+    std::string path = "test_sling_save.txt";
+    CHECK(g.save(path));
+    Game h;
+    CHECK(h.loadData());
+    CHECK(h.load(path));
+    CHECK(h.player().stowedUid == rifle && h.stowedWeapon() && h.stowedWeapon()->usesLeft == 5);
+    std::remove(path.c_str());
+    // empty the gun: the next pull of the trigger reloads from the box
+    g.toggleStow();
+    run(g, 1);   // swapping takes a moment
+    for (int i = 0; i < 5; ++i) {
+        PlayerInput in;
+        in.aim = p.pos + Vec2{5, 0};
+        in.attack = true;
+        g.update(0.05f, in);
+        run(g, 2.5f);
+    }
+    CHECK(g.weapon()->usesLeft == 0);
+    PlayerInput in;
+    in.aim = p.pos + Vec2{5, 0};
+    in.attack = true;
+    g.update(0.05f, in);
+    CHECK(g.currentAction().active && g.currentAction().option.kind == ActionKind::Reload);
+    run(g, 4);
+    CHECK(g.weapon()->usesLeft == 5 && g.ammoCarried(g.weapon()->def) == 0);
+}

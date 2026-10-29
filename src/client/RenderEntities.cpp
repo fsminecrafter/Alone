@@ -188,7 +188,7 @@ void Renderer::updatePlayerRig(Game& game, float time, float dt) {
 }
 
 void Renderer::drawCharacter(const CharacterRig& rig, const CharacterModel& model, const std::array<ItemInstance, 9>& wornItems,
-                             const Body* body, const ItemDef* weapon) {
+                             const Body* body, const ItemDef* weapon, const ItemDef* slung) {
     // The body: one skinned mesh, already posed in world space
     if (model.ready()) {
         active_->maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
@@ -211,6 +211,32 @@ void Renderer::drawCharacter(const CharacterRig& rig, const CharacterModel& mode
             Vector3 c = Vector3Transform(V(0.12f, -0.12f, z * 1.15f), rig.bone(BChest));
             drawTube(a, b, 0.018f, shade(bp, 0.7f));
             drawTube(b, c, 0.018f, shade(bp, 0.7f));
+        }
+    }
+    // A weapon slung on the back (key 1 swaps it into the hands)
+    if (slung) {
+        const Matrix& ch = rig.bone(BChest);
+        bool bag = worn(ClothingSlot::Back) != nullptr;
+        float back = bag ? -0.33f : -0.17f;
+        Color wc = hexColor(slung->colour), dark = hexColor(0x2c2c2e);
+        if (slung->firearm && slung->magazine >= 8) {
+            // a pistol: in its holster on the hip
+            drawOnBone(cube_, ch, V(0.0f, -0.42f, 0.2f), V(0.07f, 0.13f, 0.045f), dark);
+        } else {
+            float len = slung->firearm ? 1.0f : std::clamp(slung->reach * 0.85f, 0.4f, 1.0f);
+            Vector3 top = Vector3Transform(V(back, 0.3f, 0.16f), ch);
+            Vector3 bot = Vector3Transform(V(back, 0.3f - len * 0.82f, 0.16f - len * 0.55f), ch);
+            if (slung->firearm) {
+                Vector3 mid = Vector3Lerp(top, bot, 0.55f);
+                drawTube(top, mid, 0.022f, dark);                 // barrel
+                drawTube(mid, bot, 0.038f, wc);                   // stock
+                // the strap over the chest
+                drawTube(Vector3Transform(V(0.11f, 0.2f, -0.12f), ch), Vector3Transform(V(0.12f, -0.2f, 0.14f), ch), 0.012f, shade(wc, 0.5f));
+            } else {
+                drawTube(top, bot, 0.024f, wc);
+                if (heavyTool(slung))
+                    drawOnBone(cube_, ch, V(back, 0.33f, 0.18f), V(0.04f, 0.1f, 0.14f), hexColor(0x9a9ea4));   // the head
+            }
         }
     }
     // Dressings: bands round the hurt part, white going brown and red
@@ -525,7 +551,7 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
     drawSurvivors(game);
     const Vehicle* ride = game.playerVehicle();
     drawCharacter(playerRig_, playerModel_, game.player().worn, &game.player().body,
-                  game.weapon() && !ride ? game.weapon()->def : nullptr);
+                  game.weapon() && !ride ? game.weapon()->def : nullptr, game.stowedWeapon() && !ride ? game.stowedWeapon()->def : nullptr);
 }
 
 void Renderer::drawWeather(Game& game, float time) {

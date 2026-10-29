@@ -668,10 +668,16 @@ void App::frame() {
             if (file == "screenshot_aim.png") {
                 if (sub == 0) {
                     Rng rng(2);
+                    // a loaded rifle in the hands, the bow slung on the back
                     ItemInstance bow = game_.items().create("hunting_bow", rng);
                     game_.player().inventory.add(bow);
                     game_.player().inventory.add(game_.items().create("arrows", rng));
-                    game_.player().weaponUid = bow.uid;
+                    ItemInstance rifle = game_.items().create("hunting_rifle", rng);
+                    rifle.usesLeft = 4;
+                    game_.player().inventory.add(rifle);
+                    game_.player().inventory.add(game_.items().create("rifle_ammo", rng));
+                    game_.player().weaponUid = rifle.uid;
+                    game_.player().stowedUid = bow.uid;
                 }
                 Vector2 m = renderer_.toScreen(game_.player().pos + Vec2{5, -3}, 0);
                 SetMousePosition((int)m.x, (int)m.y);
@@ -809,7 +815,12 @@ void App::update(float dt) {
 void App::updatePlaying(float dt) {
     // When a search finishes, open what was searched so you can look through it
     if (lootPending_) {
-        if (game_.hasOpenContainer()) { overlay_ = Overlay::Inventory; lootPending_ = false; }
+        if (game_.hasOpenContainer()) {
+            // only worth opening if there's something in it
+            if (!game_.world().container(game_.openContainerX(), game_.openContainerY()).items.empty()) overlay_ = Overlay::Inventory;
+            else game_.closeContainer();
+            lootPending_ = false;
+        }
         else if (!game_.currentAction().active) lootPending_ = false;   // cancelled
     }
     // Keyboard shortcuts
@@ -853,9 +864,9 @@ void App::updatePlaying(float dt) {
         in.aimHold = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         if (IsKeyPressed(KEY_Q)) renderer_.rotate(-1);
         if (IsKeyPressed(KEY_E)) renderer_.rotate(1);
-        if (IsKeyPressed(KEY_ONE)) game_.setTimeSpeed(1);
-        if (IsKeyPressed(KEY_TWO)) game_.setTimeSpeed(5);
-        if (IsKeyPressed(KEY_THREE)) game_.setTimeSpeed(20);
+        if (IsKeyPressed(KEY_ONE)) game_.toggleStow();   // the weapon on your back <-> the one in your hands
+        if (IsKeyPressed(KEY_TWO)) game_.setTimeSpeed(game_.timeSpeed() == 5 ? 1 : 5);
+        if (IsKeyPressed(KEY_THREE)) game_.setTimeSpeed(game_.timeSpeed() == 20 ? 1 : 20);
         if (in.move.lengthSq() > 0 || in.run) { if (game_.timeSpeed() > 1) game_.setTimeSpeed(1); }
         if (IsKeyPressed(KEY_L) && game_.player().inventory.findTag("light") >= 0)
             game_.player().flashlightOn = !game_.player().flashlightOn;
@@ -865,7 +876,9 @@ void App::updatePlaying(float dt) {
             o.label = "Sleeping";
             game_.perform(o);
         }
-        if (IsKeyPressed(KEY_R)) {
+        if (IsKeyPressed(KEY_R) && game_.weapon() && game_.weapon()->def->magazine > 0) {
+            if (game_.canReload()) game_.reload();   // holding a gun: R reloads
+        } else if (IsKeyPressed(KEY_R)) {
             ActionOption o;
             o.kind = ActionKind::Rest;
             o.label = "Resting";
@@ -1110,7 +1123,7 @@ void App::drawSettings() {
         settings_.minutesPerSecond = opts[idx].mps;
         game_.setBaseTimeScale(settings_.minutesPerSecond);
         y += 6 * s;
-        ui::paragraph("A day in Alingsås lasts this long in real time. Sleeping and the speed keys (1/2/3) still "
+        ui::paragraph("A day in Alingsås lasts this long in real time. Sleeping and the speed keys (2/3) still "
                       "fast-forward. The game saves automatically every few minutes.",
                       x, y, w, 14 * s, ui::theme().dim);
         y += 50 * s;
@@ -1142,10 +1155,11 @@ void App::drawHelp() {
         {"H", "Health: look yourself over, treat wounds"},
         {"B", "Build (carpentry): walls, doors, floors, roofs, crates"},
         {"M", "Map of Alingsås"},
-        {"Z / R", "Sleep / rest for an hour"},
+        {"Z / R", "Sleep / rest for an hour (R with a gun: reload)"},
+        {"1", "Swap the weapon in your hands with the one on your back"},
         {"L", "Flashlight on/off"},
         {"Q / E", "Rotate camera, mouse wheel zooms"},
-        {"1 / 2 / 3", "Time speed x1 / x5 / x20"},
+        {"2 / 3", "Time speed x5 / x20 (again: normal)"},
         {"Esc", "Pause"},
     };
     float y = p.y + 70 * s;
@@ -1644,8 +1658,33 @@ void App::drawHud() {
     Rectangle hb{W - 250 * s, H - 70 * s, 238 * s, 58 * s};
     ui::panel(hb, Color{10, 12, 14, 170});
     drawItemIcon(wpn ? wpn->def : nullptr, {hb.x + 8 * s, hb.y + 9 * s, 40 * s, 40 * s});
-    ui::text(wpn ? game_.itemName(*wpn) : "Bare hands", hb.x + 56 * s, hb.y + 10 * s, 15 * s, ui::theme().text);
-    ui::text("Tab  J  M  N  H  B  F1", hb.x + 56 * s, hb.y + 32 * s, 13 * s, ui::theme().dim);
+    ui::text(wpn ? wpn->def->name : "Bare hands", hb.x + 56 * s, hb.y + 8 * s, 15 * s, ui::theme().text);
+    if (wpn && wpn->def->firearm) {
+        // rounds in the gun / rounds in your bags
+        int carried = game_.ammoCarried(wpn->def);
+        bool mag = wpn->def->magazine > 0;
+        int loaded = mag ? wpn->usesLeft : (carried > 0 ? 1 : 0);
+        bool reloading = game_.currentAction().active && game_.currentAction().option.kind == ActionKind::Reload;
+        std::string ammo = mag ? fmt("%d/%d", loaded, carried) : fmt("%d", carried);
+        Color ac = loaded > 0 ? ui::theme().text : ui::theme().bad;
+        ui::text(ammo, hb.x + 56 * s, hb.y + 27 * s, 22 * s, ac, true);
+        float ax = hb.x + 62 * s + ui::measure(ammo, 22 * s, true).x;
+        std::string note = reloading ? "Reloading..." : !mag ? (carried ? "left" : "nothing to shoot")
+                         : loaded == 0 ? (carried ? "Empty - R to reload" : "Empty") : loaded < wpn->def->magazine && carried ? "R reloads" : "";
+        ui::text(note, ax, hb.y + 34 * s, 12 * s, loaded == 0 ? ui::theme().bad : ui::theme().dim);
+    } else {
+        ui::text("Tab  J  M  N  H  B  F1", hb.x + 56 * s, hb.y + 32 * s, 13 * s, ui::theme().dim);
+    }
+    // Your back: what 1 swaps into your hands
+    if (const ItemInstance* back = game_.stowedWeapon()) {
+        Rectangle bb{hb.x - 196 * s, hb.y, 190 * s, hb.height};
+        ui::panel(bb, Color{10, 12, 14, 150});
+        DrawRectangleRounded({bb.x + 6 * s, bb.y + 6 * s, 20 * s, 20 * s}, 0.25f, 4, Color{60, 62, 66, 255});
+        ui::textCentered("1", bb.x + 16 * s, bb.y + 8 * s, 14 * s, ui::theme().text, true);
+        drawItemIcon(back->def, {bb.x + 30 * s, bb.y + 11 * s, 36 * s, 36 * s});
+        ui::text("On your back", bb.x + 72 * s, bb.y + 8 * s, 12 * s, ui::theme().dim);
+        ui::paragraph(back->def->name, bb.x + 72 * s, bb.y + 24 * s, bb.width - 78 * s, 14 * s, ui::theme().text);
+    }
     if (settings_.minimap && overlay_ == Overlay::None) drawMinimap();
     // Breath
     float st = game_.player().stamina;

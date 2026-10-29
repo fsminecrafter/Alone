@@ -51,6 +51,8 @@ struct ItemDef {
     float noise = 5.0f;          // metres animals can hear it
     bool firearm = false;
     std::string ammo;
+    int magazine = 0;            // firearm: rounds it holds (0: shoots straight from the quiver, like a bow)
+    float reloadSeconds = 2.5f;
 
     // --- clothing -----------------------------------------------------------
     ClothingSlot slot = ClothingSlot::None;

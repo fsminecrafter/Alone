@@ -122,12 +122,21 @@ TEST(fire_cooking_and_hunting_flow) {
     a.stateTimer = 100;
     int rifle = p.inventory.findId("hunting_rifle");
     p.weaponUid = p.inventory.items()[rifle].uid;
+    // load it first: a gun holds its rounds, the rest stay in the box
+    CHECK(g.canReload());
+    g.reload();
+    runFor(4);
+    const ItemInstance* gun = g.weapon();
+    CHECK(gun && gun->usesLeft == gun->def->magazine);
+    CHECK(g.ammoCarried(gun->def) == 10 - gun->def->magazine);
     int targetId = a.id;
-    for (int shot = 0; shot < 6; ++shot) {
+    for (int shot = 0; shot < 5; ++shot) {
         Animal* t = g.animals().find(targetId);
         if (!t || !t->alive()) break;
         PlayerInput in;
         in.aim = t->pos;
+        in.aimHold = true;   // take aim first (Ctrl)
+        g.update(0.05f, in);
         in.attack = true;
         g.update(0.05f, in);
         runFor(2);

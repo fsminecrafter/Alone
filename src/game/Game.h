@@ -45,6 +45,8 @@ enum class ActionKind {
     // vehicles
     TryCarDoor, SmashCarWindow, EnterVehicle, ExitVehicle, StartEngine, StopEngine, Hotwire, Refuel, SearchGlovebox, MountBike,
     Siphon, FillFromPump,
+    // weapons
+    Reload, Stow,
     // windows
     BreakWindow, ClimbWindow,
 };
@@ -133,6 +135,7 @@ struct Player {
     Inventory inventory;
     std::array<ItemInstance, (size_t)ClothingSlot::Count> worn{};
     uint32_t weaponUid = 0;      // equipped weapon (in inventory)
+    uint32_t stowedUid = 0;      // weapon slung on your back (in inventory); 1 swaps it into your hands
     float noise = 8;             // metres others can hear you this tick
     float vomitTimer = 0;
     bool flashlightOn = false;
@@ -207,6 +210,12 @@ public:
     std::string romanceHint(int id);
     // In a tent with a companion: who (0 if nobody)
     int tentMate() const { return tentMate_; }
+    // Weapons: the one on your back, swapping (key 1), reloading (R)
+    const ItemInstance* stowedWeapon() const;
+    void toggleStow();
+    int ammoCarried(const ItemDef* gun) const;    // rounds for this gun in your bags
+    bool canReload() const;                        // holding a gun that isn't full, with rounds for it
+    void reload();
     bool inTentWith(int survivorId);
     // Someone walked up to you and wants to talk (0 if nobody); taking it clears it
     int takeTalkRequest() { int id = talkRequest_; talkRequest_ = 0; return id; }
