@@ -12,7 +12,7 @@ bool isTree(Prop p) {
 }
 
 bool isFurniture(Prop p) {
-    return p >= Prop::Fridge;
+    return p >= Prop::Fridge && p < Prop::Bike;   // (bikes and pumps stand outside)
 }
 
 bool propBlocks(Prop p) {
@@ -46,6 +46,7 @@ float propHeight(Prop p) {
         case Prop::Desk: return 0.75f; case Prop::Locker: return 1.9f; case Prop::Pew: return 0.9f;
         case Prop::MedicalCabinet: return 1.8f; case Prop::GunCabinet: return 1.7f;
         case Prop::Workbench: return 0.9f; case Prop::Altar: return 1.0f; case Prop::HospitalBed: return 0.7f;
+        case Prop::Bike: return 1.0f; case Prop::FuelPump: return 1.8f;
         default: return 0;
     }
 }
@@ -58,6 +59,7 @@ const char* propName(Prop p) {
         "Fridge", "Freezer", "Kitchen cupboard", "Stove", "Sink", "Table", "Chair", "Sofa", "Bed", "Wardrobe", "Chest of drawers",
         "Bookshelf", "Toilet", "Bathtub", "Bathroom cabinet", "Shelf", "Cooler", "Checkout", "Desk", "Locker",
         "Pew", "Medical cabinet", "Gun cabinet", "Workbench", "Altar", "Hospital bed",
+        "Bicycle", "Fuel pump",
     };
     static_assert(sizeof(names) / sizeof(names[0]) == (std::size_t)Prop::Count, "prop names out of sync");
     return names[(int)p];
@@ -78,7 +80,6 @@ const char* propContainer(Prop p) {
         case Prop::GunCabinet: return "gun_cabinet";
         case Prop::Workbench: return "garage_shelf";
         case Prop::Woodpile: return "woodpile";
-        case Prop::Car: return "desk";
         case Prop::Bin: return "rubbish_bin";
         case Prop::Crate: return "crate";
         default: return nullptr;

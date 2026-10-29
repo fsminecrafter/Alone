@@ -57,9 +57,9 @@ void Renderer::drawOnBone(const Mesh& m, const Matrix& bone, Vector3 lc, Vector3
 // The player
 // ---------------------------------------------------------------------------
 
-CharacterLook Renderer::lookOf(const Player& p) {
+CharacterLook Renderer::lookOf(const std::array<ItemInstance, 9>& wornItems, const Body* body) {
     CharacterLook L;
-    auto worn = [&](ClothingSlot sl) -> const ItemInstance& { return p.worn[(size_t)sl]; };
+    auto worn = [&](ClothingSlot sl) -> const ItemInstance& { return wornItems[(size_t)sl]; };
     auto col = [&](ClothingSlot sl) { return hexColor(worn(sl).def->colour); };
     // Underclothes when nothing is worn in a slot
     L.top = worn(ClothingSlot::Torso).def ? col(ClothingSlot::Torso) : hexColor(0xd8ccb8);
@@ -73,7 +73,8 @@ CharacterLook Renderer::lookOf(const Player& p) {
     if (worn(ClothingSlot::Hands).def) L.gloves = col(ClothingSlot::Hands);
     if (worn(ClothingSlot::Head).def) L.hat = col(ClothingSlot::Head);
     // Blood soaks into the clothes around a wound
-    for (const auto& w : p.body.state().wounds) {
+    if (body)
+    for (const auto& w : body->state().wounds) {
         float v = std::min(1.0f, w.bleeding * 0.06f + w.severity * 0.6f * (1.0f - w.healed));
         L.blood[(int)w.part] = std::max(L.blood[(int)w.part], v);
     }
@@ -107,7 +108,7 @@ void Renderer::updatePlayerRig(Game& game, float time, float dt) {
     in.swing = p.swing;
     const ItemInstance* w = game.weapon();
     in.weapon = weaponKind(w ? w->def : nullptr);
-    in.aiming = w && w->def->firearm && p.lastAttack < 1.5f;
+    in.aiming = w && w->def->firearm && (p.lastAttack < 1.5f || p.aiming);
     const CurrentAction& a = game.currentAction();
     ActionKind k = a.active ? a.option.kind : ActionKind::None;
     in.eating = k == ActionKind::Eat || k == ActionKind::Drink || k == ActionKind::TakePill || k == ActionKind::DrinkSource;
@@ -125,12 +126,26 @@ void Renderer::updatePlayerRig(Game& game, float time, float dt) {
     in.shiver = b.state().shivering;
     in.nausea = std::clamp(std::max(g.nausea, g.cramps) * 1.6f - 0.5f, 0.0f, 1.0f);
     in.winded = p.stamina < 0.35f ? (0.35f - p.stamina) / 0.35f : 0.0f;
+    // On a bike or in a car: pedal or sit, in the seat
+    const Vehicle* ride = game.playerVehicle();
+    Vec2 seat = p.pos;
+    if (ride) {
+        in.ride = ride->kind == VehicleKind::Car ? 2 : 1;
+        in.speed = 0;
+        in.weapon = 0;
+        in.swing = 0;
+        in.aiming = false;
+        in.working = false;
+        in.winded = 0;
+        Vec2 f = ride->forward(), side{-f.y, f.x};
+        seat = ride->kind == VehicleKind::Car ? ride->pos - f * 0.3f - side * 0.36f : ride->pos - f * 0.16f;
+    }
     playerRig_.update(in, dt);
-    float stand = game.world().standHeight(p.pos);
+    float stand = game.world().standHeight(seat);
     if (std::fabs(stand - playerY_) > 3.0f || moved == 0) playerY_ = stand;   // teleported: no slow rise
     else playerY_ += (stand - playerY_) * std::min(1.0f, dt * 14.0f);
-    playerRig_.place(V(p.pos.x, playerY_, p.pos.y), p.facing);
-    playerModel_.skin(playerRig_, lookOf(p));
+    playerRig_.place(V(seat.x, playerY_, seat.y), p.facing);
+    playerModel_.skin(playerRig_, lookOf(p.worn, &p.body));
 
     // Blood drips from wounds that nothing covers; rain washes it off outdoors
     float bleed = 0;
@@ -163,13 +178,14 @@ void Renderer::updatePlayerRig(Game& game, float time, float dt) {
     for (auto& d : bloodDrops_) d.age += dt;
 }
 
-void Renderer::drawCharacter(const CharacterRig& rig, const Player& p, const ItemDef* weapon) {
+void Renderer::drawCharacter(const CharacterRig& rig, const CharacterModel& model, const std::array<ItemInstance, 9>& wornItems,
+                             const Body* body, const ItemDef* weapon) {
     // The body: one skinned mesh, already posed in world space
-    if (playerModel_.ready()) {
+    if (model.ready()) {
         active_->maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-        DrawMesh(playerModel_.mesh(), *active_, MatrixIdentity());
+        DrawMesh(model.mesh(), *active_, MatrixIdentity());
     }
-    auto worn = [&](ClothingSlot sl) { return p.worn[(size_t)sl].def; };
+    auto worn = [&](ClothingSlot sl) { return wornItems[(size_t)sl].def; };
     // A beanie's folded brim, a jacket collar
     if (const ItemDef* hat = worn(ClothingSlot::Head))
         drawOnBone(cylinder_, rig.bone(BHead), V(0.004f, 0.112f, 0), V(0.113f, 0.04f, 0.101f), shade(hexColor(hat->colour), 0.88f));
@@ -190,8 +206,8 @@ void Renderer::drawCharacter(const CharacterRig& rig, const Player& p, const Ite
     }
     // Dressings: bands round the hurt part, white going brown and red
     static const int partBone[] = {BHead, BChest, BForearmL, BForearmR, BHandL, BHandR, BShinL, BShinR, BFootL, BFootR};
-    for (int part = 0; part < (int)BodyPart::Count; ++part) {
-        const Dressing& d = p.body.dressing((BodyPart)part);
+    for (int part = 0; part < (int)BodyPart::Count && body; ++part) {
+        const Dressing& d = body->dressing((BodyPart)part);
         if (!d.on()) continue;
         Color base = d.kind == DressingKind::Bandage ? Color{238, 236, 228, 255}
                    : d.kind == DressingKind::Rag ? Color{206, 196, 176, 255} : Color{222, 186, 152, 255};
@@ -495,7 +511,11 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
     }
     liftY_ = 0;
     if (!shadowPass) drawBlood(time);
-    drawCharacter(playerRig_, game.player(), game.weapon() ? game.weapon()->def : nullptr);
+    drawVehicles(game, shadowPass);
+    drawSurvivors(game);
+    const Vehicle* ride = game.playerVehicle();
+    drawCharacter(playerRig_, playerModel_, game.player().worn, &game.player().body,
+                  game.weapon() && !ride ? game.weapon()->def : nullptr);
 }
 
 void Renderer::drawWeather(Game& game, float time) {
@@ -684,6 +704,36 @@ void Renderer::drawBuildGhost(const HoverInfo& h, float time) {
 
 void Renderer::drawCursor(Game& game, const HoverInfo& hover, float time) {
     if (hover.buildKind >= 0) { drawBuildGhost(hover, time); return; }
+    if (hover.aiming) {
+        // An isometric reticle on the ground where you aim, and a dashed line to it
+        World& world = game.world();
+        Vec2 to = hover.point - hover.from;
+        float d = to.length();
+        bool inRange = d <= hover.range;
+        Color c = inRange ? Color{235, 80, 60, 255} : Color{230, 225, 210, 200};
+        auto g = [&](Vec2 p) { return V(p.x, world.standHeight(p) + 0.05f, p.y); };
+        rlDisableDepthTest();
+        float pulse = 0.08f * std::sin(time * 6.0f);
+        for (float r : {0.55f + pulse, 0.22f}) {
+            Vec2 q[4] = {hover.point + Vec2{r, 0}, hover.point + Vec2{0, r}, hover.point + Vec2{-r, 0}, hover.point + Vec2{0, -r}};
+            for (int i = 0; i < 4; ++i) DrawLine3D(g(q[i]), g(q[(i + 1) % 4]), c);
+        }
+        // ticks out from the diamond
+        for (Vec2 dir : {Vec2{1, 0}, Vec2{0, 1}, Vec2{-1, 0}, Vec2{0, -1}})
+            DrawLine3D(g(hover.point + dir * 0.7f), g(hover.point + dir * 0.95f), c);
+        Color fill = Fade(c, 0.18f);
+        Vec2 p0 = hover.point + Vec2{0.22f, 0}, p1 = hover.point + Vec2{0, 0.22f}, p2 = hover.point + Vec2{-0.22f, 0}, p3 = hover.point + Vec2{0, -0.22f};
+        DrawTriangle3D(g(p0), g(p3), g(p2), fill);
+        DrawTriangle3D(g(p0), g(p2), g(p1), fill);
+        if (d > 0.5f) {
+            Vec2 dir = to * (1.0f / d);
+            float end = std::min(d - 0.6f, hover.ranged ? d : hover.range);
+            for (float t = 0.5f; t < end; t += 0.6f)
+                DrawLine3D(g(hover.from + dir * t), g(hover.from + dir * std::min(t + 0.3f, end)), Fade(c, 0.7f));
+        }
+        rlEnableDepthTest();
+        return;
+    }
     if (!hover.show) return;
     int hx = (int)std::floor(hover.point.x), hy = (int)std::floor(hover.point.y);
     World& world = game.world();

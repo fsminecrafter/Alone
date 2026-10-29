@@ -4,6 +4,9 @@
 #include "client/MeshBuilder.h"
 #include "game/Game.h"
 #include "raylib.h"
+#include <array>
+#include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,6 +14,11 @@
 namespace alone {
 
 // What the mouse is over, drawn as an isometric tile cursor.
+// Vehicle builders (RenderVehicles.cpp): local frame x forward, y up, z to the side.
+using VehicleTransform = std::function<Vector3(Vector3)>;
+void addCarModel(MeshBuilder& mb, const VehicleTransform& P, uint32_t look, bool smashed, float dust);
+void addBikeModel(MeshBuilder& mb, const VehicleTransform& P, uint32_t look, float lean);
+
 struct HoverInfo {
     Vec2 point;
     bool show = false;
@@ -19,6 +27,11 @@ struct HoverInfo {
     int buildKind = -1;          // BuildKind, -1 = not building
     int bx = 0, by = 0, bdir = 0;
     bool buildOk = false;
+    // Holding Ctrl: an aiming reticle on the ground and a line from you to it
+    bool aiming = false;
+    Vec2 from;
+    float range = 1.4f;
+    bool ranged = false;
 };
 
 // Graphics settings the renderer understands (chosen in Settings > Graphics).
@@ -142,14 +155,30 @@ private:
 
     // entities (RenderEntities.cpp)
     void drawEntities(Game& game, float time, bool shadowPass);
-    void drawCharacter(const CharacterRig& rig, const Player& look, const ItemDef* weapon);
+    void drawCharacter(const CharacterRig& rig, const CharacterModel& model, const std::array<ItemInstance, 9>& worn, const Body* body,
+                       const ItemDef* weapon);
+    // vehicles and other people (RenderVehicles.cpp)
+    const Mesh& vehicleMesh(const Vehicle& v);
+    void drawVehicles(Game& game, bool shadowPass);
+    void updateNpcRigs(Game& game, float time, float dt);
+    void drawSurvivors(Game& game);
+    std::unordered_map<int, Mesh> vehicleMeshes_;
+    struct NpcGfx {
+        CharacterRig rig;
+        std::unique_ptr<CharacterModel> model;
+        Vec2 lastPos;
+        float dist = 0, speed = 0, y = 0;
+        bool init = false;
+        const ItemDef* weapon = nullptr;
+    };
+    std::unordered_map<int, NpcGfx> npcs_;
     void drawAnimal(const Animal& a, float time);
     void drawDoors(World& world, const std::vector<int>& buildings, bool mainPass);
     void drawWeather(Game& game, float time);
     void drawCursor(Game& game, const HoverInfo& hover, float time);
     void updatePlayerRig(Game& game, float time, float dt);
     void drawBlood(float time);
-    static CharacterLook lookOf(const Player& p);
+    static CharacterLook lookOf(const std::array<ItemInstance, 9>& worn, const Body* body);
 
     // primitives
     void drawPrim(const Mesh& m, Vector3 pos, Vector3 scale, float yaw, Color c, float pitch = 0, float roll = 0);

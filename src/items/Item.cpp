@@ -36,7 +36,9 @@ std::string ItemInstance::displayName(bool knowsMushrooms) const {
     if (def->capacityMl > 0) {
         if (liquidMl <= 0) return "Empty " + n;
         char buf[64];
-        std::snprintf(buf, sizeof buf, " (%.0f ml%s)", liquidMl, liquidSafe ? "" : ", untreated");
+        if (liquid == 1) std::snprintf(buf, sizeof buf, " (%.1f l petrol)", liquidMl / 1000.0f);
+        else if (liquidMl >= 2000) std::snprintf(buf, sizeof buf, " (%.1f l water%s)", liquidMl / 1000.0f, liquidSafe ? "" : ", untreated");
+        else std::snprintf(buf, sizeof buf, " (%.0f ml%s)", liquidMl, liquidSafe ? "" : ", untreated");
         return n + buf;
     }
     if (def->isEdible()) {

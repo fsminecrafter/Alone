@@ -10,13 +10,15 @@ namespace alone {
 
 class SaveGame {
 public:
-    static constexpr int kVersion = 4;   // 3: dressings per body part, 4: tents, carpentry, stoves
+    // 3: dressings per body part, 4: tents, carpentry, stoves, 5: people, vehicles, 6: petrol, 7: deals and rumours
+    static constexpr int kVersion = 7;
+    static int& readVersion() { static int v = kVersion; return v; }   // of the file being read
 
     // --- writing -------------------------------------------------------------
     static void item(std::ostream& o, const ItemInstance& it) {
         o << (it.def ? it.def->id : std::string("-")) << ' ' << it.portion << ' ' << it.ageHours << ' ' << it.condition << ' '
           << it.liquidMl << ' ' << it.liquidSafe << ' ' << it.opened << ' ' << it.usesLeft << ' ' << it.carriesPathogen << ' '
-          << it.uid << '\n';
+          << it.uid << ' ' << (int)it.liquid << '\n';
     }
     static void items(std::ostream& o, const std::vector<ItemInstance>& v) {
         o << v.size() << '\n';
@@ -88,6 +90,28 @@ public:
         o << w.builds_.size() << '\n';
         for (const auto& b : w.builds_) o << (int)b.kind << ' ' << b.x << ' ' << b.y << ' ' << b.dir << '\n';
         o << w.nextId_ << '\n';
+        // v5: other people, vehicles, what you've learned
+        o << "PEOPLE " << g.survivors_.size() << '\n';
+        for (const auto& sv : g.survivors_) {
+            o << sv.def->id << ' ' << sv.pos.x << ' ' << sv.pos.y << ' ' << sv.hp << ' ' << (int)sv.state << ' ' << sv.trust << ' '
+              << sv.met << ' ' << sv.known << ' ' << sv.joined << ' ' << sv.angry << ' ' << sv.requestKnown << ' ' << sv.requestDone << ' '
+              << sv.routeIndex << ' ' << sv.weaponUid << ' ' << sv.target.x << ' ' << sv.target.y << ' ' << sv.admitted << ' '
+              << sv.truceUntil << ' ' << sv.rumoured << ' ' << sv.rumourPos.x << ' ' << sv.rumourPos.y << '\n';
+            items(o, sv.inventory.items());
+            for (const auto& wi : sv.worn) item(o, wi);
+        }
+        o << "VEHICLES " << g.vehicles_.size() << ' ' << g.nextVehicleId_ << '\n';
+        for (const auto& v : g.vehicles_)
+            o << v.id << ' ' << (int)v.kind << ' ' << v.pos.x << ' ' << v.pos.y << ' ' << v.heading << ' ' << v.variant << ' '
+              << v.keyInIgnition << ' ' << v.hotwired << ' ' << v.windowSmashed << ' ' << v.fuelL << ' ' << v.damage << ' ' << v.searched << ' '
+              << v.tankL << '\n';
+        o << g.lockedCars_.size() << '\n';
+        for (int64_t k : g.lockedCars_) o << k << '\n';
+        o << p.knowsHotwire << ' ' << p.knowsMushroomsTaught << ' ' << p.vehicle << '\n';
+        o << g.propFuel_.size() << '\n';
+        for (const auto& [k, l] : g.propFuel_) o << k << ' ' << l << '\n';
+        o << g.pumpFuel_.size() << '\n';
+        for (const auto& [k, l] : g.pumpFuel_) o << k << ' ' << l << '\n';
         o << "END\n";
     }
 
@@ -96,6 +120,7 @@ public:
         std::string id;
         int safe = 1, opened = 0, path = 0;
         in >> id >> it.portion >> it.ageHours >> it.condition >> it.liquidMl >> safe >> opened >> it.usesLeft >> path >> it.uid;
+        if (readVersion() >= 6) { int liq = 0; in >> liq; it.liquid = (uint8_t)liq; }
         it.liquidSafe = safe; it.opened = opened; it.carriesPathogen = path;
         maxUid = std::max(maxUid, it.uid);
         if (id == "-") { it.def = nullptr; return true; }
@@ -122,7 +147,8 @@ public:
         std::string magic;
         int version = 0;
         in >> magic >> version;
-        if (magic != "ALONE_SAVE" || version != kVersion) { Log::warn("Not a compatible save file"); return false; }
+        if (magic != "ALONE_SAVE" || version < 4 || version > kVersion) { Log::warn("Not a compatible save file"); return false; }
+        readVersion() = version;
         uint32_t seed = 0;
         double minutes = 0;
         float snow = 0, wet = 0;
@@ -245,6 +271,54 @@ public:
             w.builds_.push_back(b);
         }
         in >> w.nextId_;
+        if (version >= 5) {
+            std::string tag;
+            in >> tag >> n;
+            for (size_t i = 0; i < n && in; ++i) {
+                std::string id;
+                Survivor tmp;
+                int state = 0, met, known, joined, angry, rk, rd;
+                in >> id >> tmp.pos.x >> tmp.pos.y >> tmp.hp >> state >> tmp.trust >> met >> known >> joined >> angry >> rk >> rd >>
+                    tmp.routeIndex >> tmp.weaponUid >> tmp.target.x >> tmp.target.y;
+                int admitted = 0, rumoured = 0;
+                if (version >= 7) in >> admitted >> tmp.truceUntil >> rumoured >> tmp.rumourPos.x >> tmp.rumourPos.y;
+                items(g, in, tmp.inventory.items(), maxUid);
+                for (auto& wi : tmp.worn) item(g, in, wi, maxUid);
+                for (auto& sv : g.survivors_) {
+                    if (sv.def->id != id) continue;
+                    sv.pos = tmp.pos; sv.hp = tmp.hp; sv.state = (SurvivorState)state; sv.trust = tmp.trust;
+                    sv.met = met; sv.known = known; sv.joined = joined; sv.angry = angry; sv.requestKnown = rk; sv.requestDone = rd;
+                    sv.routeIndex = tmp.routeIndex; sv.weaponUid = tmp.weaponUid; sv.target = tmp.target;
+                    sv.inventory = tmp.inventory; sv.worn = tmp.worn;
+                    sv.admitted = admitted; sv.truceUntil = tmp.truceUntil; sv.rumoured = rumoured; sv.rumourPos = tmp.rumourPos;
+                }
+            }
+            size_t nv = 0;
+            in >> tag >> nv >> g.nextVehicleId_;
+            g.vehicles_.clear();
+            for (size_t i = 0; i < nv && in; ++i) {
+                Vehicle v; int kind, key, hot, smashed, searched;
+                in >> v.id >> kind >> v.pos.x >> v.pos.y >> v.heading >> v.variant >> key >> hot >> smashed >> v.fuelL >> v.damage >> searched;
+                if (version >= 6) in >> v.tankL;
+                v.kind = (VehicleKind)kind; v.keyInIgnition = key; v.hotwired = hot; v.windowSmashed = smashed; v.searched = searched;
+                g.vehicles_.push_back(v);
+            }
+            in >> n;
+            g.lockedCars_.clear();
+            for (size_t i = 0; i < n && in; ++i) { int64_t k; in >> k; g.lockedCars_.insert(k); }
+            int hw, mush;
+            in >> hw >> mush >> p.vehicle;
+            p.knowsHotwire = hw; p.knowsMushroomsTaught = mush;
+            if (version >= 6) {
+                g.propFuel_.clear();
+                g.pumpFuel_.clear();
+                in >> n;
+                for (size_t i = 0; i < n && in; ++i) { int64_t k; float l; in >> k >> l; g.propFuel_[k] = l; }
+                in >> n;
+                for (size_t i = 0; i < n && in; ++i) { int64_t k; float l; in >> k >> l; g.pumpFuel_[k] = l; }
+            }
+            if (p.vehicle >= 0 && !g.vehicle(p.vehicle)) p.vehicle = -1;
+        }
         std::string end;
         in >> end;
         if (end != "END") { Log::warn("Save file is truncated or corrupt"); return false; }

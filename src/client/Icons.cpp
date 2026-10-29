@@ -70,6 +70,39 @@ void drawItemIcon(const ItemDef* def, Rectangle r) {
     } else if (i == "rifle") {
         DrawLineEx({cx - s * 0.9f, cy + s * 0.2f}, {cx + s * 0.9f, cy - s * 0.2f}, s * 0.12f, DARKGRAY);
         DrawLineEx({cx - s * 0.9f, cy + s * 0.25f}, {cx - s * 0.1f, cy + s * 0.1f}, s * 0.25f, c);
+    } else if (i == "bow") {
+        DrawRing({cx + s * 0.55f, cy}, s * 0.85f, s * 0.97f, 115, 245, 16, c);
+        DrawLineEx({cx - s * 0.05f, cy - s * 0.8f}, {cx - s * 0.05f, cy + s * 0.8f}, 1.5f, LIGHTGRAY);
+        DrawLineEx({cx - s * 0.8f, cy}, {cx + s * 0.6f, cy}, s * 0.07f, DARKGRAY);
+        DrawTriangle({cx - s * 0.95f, cy}, {cx - s * 0.75f, cy + s * 0.12f}, {cx - s * 0.75f, cy - s * 0.12f}, GRAY);
+    } else if (i == "arrows") {
+        for (int k = -1; k <= 1; ++k) {
+            float o = k * 0.25f;
+            DrawLineEx({cx - s * 0.7f, cy + s * (0.6f + o)}, {cx + s * 0.6f, cy - s * (0.6f - o)}, s * 0.07f, c);
+            DrawCircle((int)(cx + s * 0.62f), (int)(cy - s * (0.62f - o)), s * 0.09f, LIGHTGRAY);
+            DrawLineEx({cx - s * 0.7f, cy + s * (0.6f + o)}, {cx - s * 0.5f, cy + s * (0.6f + o)}, s * 0.12f, Color{200, 60, 40, 255});
+        }
+    } else if (i == "crossbow") {
+        DrawLineEx({cx - s * 0.8f, cy + s * 0.15f}, {cx + s * 0.6f, cy + s * 0.15f}, s * 0.2f, c);
+        DrawRing({cx + s * 0.95f, cy + s * 0.15f}, s * 0.65f, s * 0.75f, 135, 225, 12, DARKGRAY);
+        DrawLineEx({cx + s * 0.45f, cy - s * 0.3f}, {cx + s * 0.45f, cy + s * 0.6f}, 1.5f, LIGHTGRAY);
+    } else if (i == "pistol") {
+        rect(-0.7f, -0.35f, 1.3f, 0.35f, c);
+        rect(-0.6f, -0.05f, 0.35f, 0.65f, c);
+        rect(-0.7f, -0.35f, 1.3f, 0.08f, light);
+    } else if (i == "bat") {
+        DrawLineEx({cx - s * 0.8f, cy + s * 0.75f}, {cx + s * 0.7f, cy - s * 0.65f}, s * 0.28f, c);
+        DrawLineEx({cx - s * 0.85f, cy + s * 0.8f}, {cx - s * 0.5f, cy + s * 0.45f}, s * 0.14f, DARKGRAY);
+    } else if (i == "spear") {
+        DrawLineEx({cx - s * 0.85f, cy + s * 0.85f}, {cx + s * 0.5f, cy - s * 0.5f}, s * 0.1f, c);
+        DrawTriangle({cx + s * 0.9f, cy - s * 0.9f}, {cx + s * 0.38f, cy - s * 0.52f}, {cx + s * 0.52f, cy - s * 0.38f}, LIGHTGRAY);
+        DrawLineEx({cx + s * 0.35f, cy - s * 0.35f}, {cx + s * 0.55f, cy - s * 0.55f}, s * 0.16f, GRAY);
+    } else if (i == "jerrycan") {
+        rect(-0.55f, -0.5f, 1.1f, 1.15f, c);
+        rect(-0.4f, -0.75f, 0.5f, 0.25f, dark);
+        rect(0.2f, -0.72f, 0.18f, 0.22f, Color{40, 40, 40, 255});
+        DrawLineEx({cx - s * 0.45f, cy - s * 0.3f}, {cx + s * 0.45f, cy + s * 0.5f}, s * 0.08f, dark);
+        DrawLineEx({cx + s * 0.45f, cy - s * 0.3f}, {cx - s * 0.45f, cy + s * 0.5f}, s * 0.08f, dark);
     } else if (i == "ammo") {
         for (int k = -1; k <= 1; ++k) rect(k * 0.35f - 0.1f, -0.5f, 0.2f, 1.0f, c);
     } else if (i == "shirt" || i == "sweater" || i == "jacket") {

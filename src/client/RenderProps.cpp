@@ -556,41 +556,51 @@ void Renderer::addProp(MeshBuilder& mb, World& world, const Tile& t, int x, int 
             mb.blob(V(cx, 1.15f, cz), V(0.22f, 0.07f, 0.14f), 6, 2, hexColor(0x2a5a7a));
             break;
         case Prop::Car: {
-            static const uint32_t cols[] = {0x8a2020, 0x203a5a, 0xc8c8c4, 0x2a2a2c, 0x5a6a70, 0x2a4a34, 0xd8d6d0, 0x6a4a2a};
-            Color body = hexColor(cols[t.variant % 8]);
-            Color dark = hexColor(0x1a1c1e), glass = hexColor(0x2a3640);
-            float yaw = (t.variant & 1) ? PI * 0.5f : 0.0f;
-            yaw += (r2 - 0.5f) * 0.25f;
+            // look and body style from the tile (GameVehicles.cpp uses the same numbers)
+            uint32_t look = hash2(x, y, 0xC0102u) & 0xFFFF;
+            float yaw = ((t.variant & 1) ? PI * 0.5f : 0.0f) + (r2 - 0.5f) * 0.25f;
             float cs = std::cos(yaw), sn = std::sin(yaw);
-            auto P = [&](float lx, float ly, float lz) { return V(cx + lx * cs - lz * sn, ly, cz + lx * sn + lz * cs); };
-            // lower body
+            VehicleTransform P = [&](Vector3 l) { return V(cx + l.x * cs - l.z * sn, l.y, cz + l.x * sn + l.z * cs); };
+            addCarModel(mb, P, look, false, 0.15f + 0.25f * hashFloat(hash32(look)));
+            break;
+        }
+        case Prop::FuelPump: {
+            // A pump on a raised island, under a flat canopy on two posts
+            bool alongX = (t.variant & 1) == 0;
+            auto Q = [&](float a, float h2, float b) { return alongX ? V(cx + a, h2, cz + b) : V(cx + b, h2, cz + a); };
+            auto qbox = [&](float a0, float a1, float y0, float y1, float b0, float b1, Color c) {
+                Vector3 p0 = Q(a0, y0, b0), p1 = Q(a1, y1, b1);
+                mb.box(V(std::min(p0.x, p1.x), y0, std::min(p0.z, p1.z)), V(std::max(p0.x, p1.x), y1, std::max(p0.z, p1.z)), c);
+            };
+            uint32_t brand[] = {0xd8202a, 0x1a8a3a, 0x2a5ab0, 0xe8a020};
+            Color bc = hexColor(brand[(x * 7 + y * 13) & 3]);
+            mb.material(MConcrete);
+            qbox(-1.2f, 1.2f, 0, 0.15f, -0.45f, 0.45f, hexColor(0xb8b8b2));          // island
             mb.material(MMetal);
-            mb.orientedBox(V(cx, 0.6f, cz), V(2.15f, 0.32f, 0.86f), yaw, body);
-            // cabin: tapered with sloped screens
-            float hx0 = -1.15f, hx1 = 0.85f, top = 1.45f, inset = 0.12f;
-            Vector3 b0 = P(hx0 - 0.25f, 0.92f, -0.82f), b1 = P(hx1 + 0.35f, 0.92f, -0.82f), b2 = P(hx1 + 0.35f, 0.92f, 0.82f), b3 = P(hx0 - 0.25f, 0.92f, 0.82f);
-            Vector3 t0 = P(hx0, top, -0.82f + inset), t1 = P(hx1 - 0.2f, top, -0.82f + inset), t2 = P(hx1 - 0.2f, top, 0.82f - inset), t3 = P(hx0, top, 0.82f - inset);
+            qbox(-0.3f, 0.3f, 0.15f, 1.75f, -0.2f, 0.2f, hexColor(0xe8e8e4));        // pump body
+            qbox(-0.32f, 0.32f, 1.45f, 1.8f, -0.22f, 0.22f, bc);                    // brand band
             mb.material(MGlass);
-            mb.quad(b1, b2, t2, t1, glass);   // windscreen
-            mb.quad(b3, b0, t0, t3, glass);   // rear window
-            mb.quad(b0, b1, t1, t0, glass);   // side
-            mb.quad(b2, b3, t3, t2, glass);   // side
-            mb.material(MMetal);
-            mb.quad(t0, t1, t2, t3, body);    // roof
-            // wheels
-            for (int i = 0; i < 4; ++i) {
-                float lx = i < 2 ? 1.35f : -1.35f, lz = i % 2 ? 0.8f : -0.8f;
-                Vector3 a = P(lx, 0.33f, lz - 0.12f), b = P(lx, 0.33f, lz + 0.12f);
-                mb.tube(a, b, 0.33f, 0.33f, 10, dark);
-                Vector3 hub = P(lx, 0.33f, lz + (lz > 0 ? 0.125f : -0.125f));
-                mb.blob(hub, V(0.12f, 0.12f, 0.12f), 6, 2, hexColor(0x8a8a8c));
-            }
-            // lights
+            qbox(-0.18f, 0.18f, 1.05f, 1.32f, -0.21f, 0.21f, hexColor(0x203038));   // display
             mb.material(MPlain);
-            for (float lz : {-0.6f, 0.6f}) {
-                mb.blob(P(2.15f, 0.72f, lz), V(0.05f, 0.08f, 0.14f), 5, 2, hexColor(0xe8e4d0));
-                mb.blob(P(-2.15f, 0.75f, lz), V(0.05f, 0.08f, 0.14f), 5, 2, hexColor(0xa01810));
+            for (float a : {-0.22f, 0.22f}) {
+                qbox(a - 0.04f, a + 0.04f, 0.6f, 0.95f, -0.25f, 0.25f, hexColor(0x1a1a1a));   // nozzles
             }
+            qbox(-1.15f, -1.0f, 0.15f, 0.75f, -0.08f, 0.08f, hexColor(0xd0d0c8));   // bollards
+            qbox(1.0f, 1.15f, 0.15f, 0.75f, -0.08f, 0.08f, hexColor(0xd0d0c8));
+            // canopy
+            mb.material(MMetal);
+            qbox(-0.1f, 0.1f, 0.15f, 4.4f, 0.36f, 0.5f, hexColor(0xd8d8d4));
+            qbox(-3.2f, 3.2f, 4.4f, 4.75f, -2.6f, 2.6f, hexColor(0xe8e8e4));
+            qbox(-3.25f, 3.25f, 4.45f, 4.7f, -2.65f, 2.65f, bc);
+            mb.material(MLamp);
+            qbox(-0.5f, 0.5f, 4.36f, 4.4f, -0.5f, 0.5f, hexColor(0xf0f0e8));
+            break;
+        }
+        case Prop::Bike: {
+            float yaw = t.variant / 256.0f * 2.0f * PI;
+            float cs = std::cos(yaw), sn = std::sin(yaw);
+            VehicleTransform P = [&](Vector3 l) { return V(cx + l.x * cs - l.z * sn, l.y, cz + l.x * sn + l.z * cs); };
+            addBikeModel(mb, P, t.variant, 0.14f);
             break;
         }
         case Prop::Bin:

@@ -47,6 +47,7 @@ struct AnimInput {
     float shiver = 0;                 // cold
     float nausea = 0;                 // a hand on the stomach
     float winded = 0;                 // out of breath: hands on the knees when stopped
+    int ride = 0;                     // 1 on a bike (pedalling with distance), 2 sitting in a car
 };
 
 class CharacterRig {
@@ -81,6 +82,7 @@ private:
     float wMove_ = 0, wRun_ = 0, wSneak_ = 0, wAim_ = 0, wWork_ = 0, wEat_ = 0, wLie_ = 0;
     float wLimpL_ = 0, wLimpR_ = 0, wArmL_ = 0, wArmR_ = 0, wHunch_ = 0, wShiver_ = 0, wNausea_ = 0, wWinded_ = 0;
     float wHold_ = 0;   // holding a weapon at the ready
+    float wRide_ = 0;   // on a bike or in a car seat
 };
 
 } // namespace alone

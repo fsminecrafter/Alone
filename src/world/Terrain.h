@@ -33,6 +33,7 @@ enum class Prop : uint8_t {
     Fridge, Freezer, Counter, Stove, Sink, Table, Chair, Sofa, Bed, Wardrobe, Dresser,
     Bookshelf, Toilet, Bathtub, BathroomCabinet, Shelf, Cooler, Checkout, Desk, Locker,
     Pew, MedicalCabinet, GunCabinet, Workbench, Altar, HospitalBed,
+    Bike, FuelPump,
     Count
 };
 

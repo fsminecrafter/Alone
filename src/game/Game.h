@@ -1,5 +1,7 @@
 #pragma once
 #include "game/Animal.h"
+#include "game/Survivor.h"
+#include "game/Vehicle.h"
 #include "items/Inventory.h"
 #include "items/ItemRegistry.h"
 #include "survival/Body.h"
@@ -9,6 +11,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 namespace alone {
@@ -37,6 +40,11 @@ enum class ActionKind {
     // camping, fishing, carpentry
     PlaceStove, FillStove, LightStove, StoveOff, PackStove, PitchTent, PackTent,
     SawPlanks, SplitLog, ReplaceBatteries, Fish, Build, Dismantle,
+    // people
+    Talk,
+    // vehicles
+    TryCarDoor, SmashCarWindow, EnterVehicle, ExitVehicle, StartEngine, StopEngine, Hotwire, Refuel, SearchGlovebox, MountBike,
+    Siphon, FillFromPump,
 };
 
 struct ActionOption {
@@ -63,7 +71,7 @@ struct CurrentAction {
 enum class MessageKind { Info, Good, Bad, Body };
 
 // Things the client may want to play a sound for.
-enum class Sfx { Footstep, Gunshot, Swing, Hit, Door, Click, Chop, Eat, Drink, Hurt };
+enum class Sfx { Footstep, Gunshot, Swing, Hit, Door, Click, Chop, Eat, Drink, Hurt, Glass, Engine, Bowshot };
 struct SoundEvent { Sfx type; Vec2 pos; };
 struct Message {
     std::string text;
@@ -74,7 +82,8 @@ struct Message {
 struct PlayerInput {
     Vec2 move;                   // desired direction in world space (length 0..1)
     bool run = false;
-    bool sneak = false;
+    bool sneak = false;          // crouch (C)
+    bool aimHold = false;        // Ctrl held: face the cursor and aim
     Vec2 aim;                    // world point under the cursor
     bool attack = false;         // pressed this frame
 };
@@ -84,7 +93,11 @@ struct Player {
     float facing = 0;            // radians
     float stamina = 1;           // 0..1 short-term breath
     bool moving = false, running = false, sneaking = false, asleep = false;
+    bool aiming = false;          // holding Ctrl: facing and aiming at the cursor
     bool knowsCarpentry = false;  // read a carpentry book: doors, windows, roofs
+    bool knowsHotwire = false;    // someone showed you how to start a car without the key
+    bool knowsMushroomsTaught = false;
+    int vehicle = -1;             // id of the bike or car you're on/in, -1 on foot
     float grade = 0;             // slope of the ground you're walking along: rise per metre, + uphill
     float fallen = 0;            // seconds left lying on the ground after tripping
     float attackTimer = 0;
@@ -142,6 +155,36 @@ public:
     float carriedKg() const;
     Environment environment();
     const ItemInstance* weapon() const;
+
+    // --- other people ---------------------------------------------------------
+    std::vector<Survivor>& survivors() { return survivors_; }
+    const std::vector<Survivor>& survivors() const { return survivors_; }
+    Survivor* survivor(int id);
+    const std::vector<SurvivorDef>& survivorDefs() const { return survivorDefs_; }
+    // What you can say to them right now, with labels
+    std::vector<std::pair<Topic, std::string>> talkTopics(int id);
+    // Say it; returns their answer
+    std::string talk(int id, Topic t);
+    std::string greeting(int id);      // what they say when you walk up (meets them the first time)
+    // Can you talk to them from where you are? (hostile people: shout from a distance)
+    bool canTalk(int id, std::string* why = nullptr) const;
+    float talkRange(int id) const;
+    // Trading: what an item is worth to people now (food, medicine, ammo...)
+    int itemValue(const ItemInstance& it) const;
+    // Would they take this? why: what they say if not
+    bool tradeFair(int id, const std::vector<uint32_t>& mine, const std::vector<uint32_t>& theirs, std::string* why) const;
+    bool trade(int id, const std::vector<uint32_t>& mine, const std::vector<uint32_t>& theirs);
+    int followers() const;
+    // The goal shown in the journal and the HUD
+    std::string objective() const;
+
+    // --- vehicles -------------------------------------------------------------
+    std::vector<Vehicle>& vehicles() { return vehicles_; }
+    const std::vector<Vehicle>& vehicles() const { return vehicles_; }
+    Vehicle* vehicle(int id);
+    Vehicle* playerVehicle() { return player_.vehicle >= 0 ? vehicle(player_.vehicle) : nullptr; }
+    const Vehicle* playerVehicle() const { return const_cast<Game*>(this)->playerVehicle(); }
+    float carFuelAt(int x, int y) const;   // litres in a parked car's tank (0-40% of it)
 
     // Container the player has open (search finished), or none.
     bool hasOpenContainer() const { return openContainer_; }
@@ -206,6 +249,39 @@ private:
     int findFuel() const;
     float fireReach() const { return 2.2f; }
     void playerHurt(float severity, const AnimalDef* by);
+    void playerHurtBy(float severity, const std::string& who, bool gunshot);
+
+    // people (GameSurvivors.cpp)
+    bool loadSurvivors(const std::string& path);
+    void placeSurvivors();
+    bool resolvePlace(const std::string& spec, Vec2& out, std::string* name);
+    void updateSurvivors(float dt, float gameMinutes);
+    void survivorSay(Survivor& s, const std::string& line, bool log = true);
+    void hurtSurvivor(Survivor& s, float damage, bool byPlayer);
+    void survivorAttack(Survivor& s, Vec2 targetPos, bool atPlayer, Animal* animal, Survivor* other);
+    void learnAbout(const std::string& id);
+    std::string rumour(Survivor& teller);           // someone they know of, and roughly where
+    std::string warningNear(const Survivor& teller); // danger they've seen lately (or empty)
+    std::string placeOf(const Survivor& s) const;   // "around Stampen"
+    bool offerTribute(Survivor& s);                 // raiders: hand over valuables for a truce
+    int countFor(const std::string& want) const;    // how many of a wanted item you carry
+    void takeFor(const std::string& want, int count);
+    bool resolvePlaceCache(Survivor& s, Vec2& out);   // the next stop on a raider's round
+    std::map<std::string, Vec2> placeCache_;
+    std::vector<SurvivorDef> survivorDefs_;
+    std::vector<Survivor> survivors_;
+
+    // vehicles (GameVehicles.cpp)
+    void updateVehicle(float dt, const PlayerInput& in);
+    Vehicle& vehicleFromProp(int x, int y, VehicleKind kind);
+    std::vector<ActionOption> vehicleActionsAt(Vec2 pt);
+    void performVehicle(const ActionOption& o);
+    std::vector<Vehicle> vehicles_;
+    std::set<int64_t> lockedCars_;    // car props whose doors you've tried
+    std::map<int64_t, float> propFuel_;   // parked cars (props) someone siphoned: litres left
+    std::map<int64_t, float> pumpFuel_;   // fuel stations: litres taken from the underground tank
+    int gasCan(bool wantPetrol, bool wantSpace) const;   // a gas can in the inventory (-1 none)
+    int nextVehicleId_ = 1;
 
     ItemRegistry items_;
     MapData map_;

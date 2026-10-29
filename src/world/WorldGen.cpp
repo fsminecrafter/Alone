@@ -1613,6 +1613,52 @@ void WorldGen::applyBuilding(Chunk& c, const Building& b) {
         }
     }
 
+    // Now and then a bike left by the front door (bike shops have a row of them)
+    {
+        bool bikeShop = b.name == "Stampens cykel" || b.name == "Allebike";
+        bool home = (b.type == BuildingType::House || b.type == BuildingType::Apartment || b.type == BuildingType::Cottage ||
+                     b.type == BuildingType::Farmhouse) && !b.isOutbuilding;
+        int n = bikeShop ? 4 : (home && hashFloat(hash32(b.seed ^ 0xB1CE)) < 0.07f) ? 1 : 0;
+        Vec2 out = b.hasPath ? (b.pathEnd - b.doorPos).normalized() : Vec2{0, 1};
+        Vec2 side{-out.y, out.x};
+        for (int i = 0; i < n; ++i) {
+            Vec2 bp = b.doorPos + out * 1.2f + side * (1.6f + 1.1f * i);
+            int bx = (int)std::floor(bp.x), by = (int)std::floor(bp.y);
+            if (!inChunk(bx, by)) continue;
+            Tile& t = tileAt(bx, by);
+            if (t.building >= 0 || t.prop != Prop::None || !groundWalkable(t.ground)) continue;
+            t.prop = Prop::Bike;
+            t.variant = (uint8_t)(hash32(b.seed + i * 31) & 0xFF);
+        }
+    }
+
+    // Fuel stations: a concrete forecourt with two pump islands under a canopy
+    if (b.type == BuildingType::GasStation && !b.isOutbuilding) {
+        Vec2 out = b.hasPath ? (b.pathEnd - b.doorPos).normalized() : Vec2{0, 1};
+        if (out.lengthSq() < 0.5f) out = Vec2{0, 1};
+        // snap to the nearest axis so the islands line up with the tiles
+        if (std::fabs(out.x) > std::fabs(out.y)) out = Vec2{out.x > 0 ? 1.0f : -1.0f, 0};
+        else out = Vec2{0, out.y > 0 ? 1.0f : -1.0f};
+        Vec2 side{-out.y, out.x};
+        Vec2 centre = b.doorPos + out * 6.0f;
+        for (int y = (int)centre.y - 7; y <= (int)centre.y + 7; ++y)
+            for (int x = (int)centre.x - 7; x <= (int)centre.x + 7; ++x) {
+                if (!inChunk(x, y)) continue;
+                Tile& t = tileAt(x, y);
+                if (t.building >= 0 || t.ground == Ground::WaterShallow || t.ground == Ground::WaterDeep) continue;
+                if (distance(Vec2{x + 0.5f, y + 0.5f}, centre) > 7.5f) continue;
+                t.ground = Ground::Concrete;
+                if (t.prop != Prop::Lamppost) t.prop = Prop::None;
+            }
+        for (float k : {-3.0f, 3.0f}) {
+            Vec2 pp = centre + side * k;
+            int px = (int)std::floor(pp.x), py = (int)std::floor(pp.y);
+            if (!inChunk(px, py) || tileAt(px, py).building >= 0) continue;
+            tileAt(px, py).prop = Prop::FuelPump;
+            tileAt(px, py).variant = (uint8_t)(std::fabs(out.x) > 0.5f ? 1 : 0);   // pumps face along the forecourt
+        }
+    }
+
     // Woodpile against a house wall, rain barrel
     if ((b.type == BuildingType::House || b.type == BuildingType::Cottage || b.type == BuildingType::Farmhouse) &&
         (b.seed & 3) != 0) {

@@ -14,7 +14,7 @@ public:
 
 private:
     enum class State { Menu, Playing, Dead };
-    enum class Overlay { None, Inventory, Map, Health, Pause, Settings, Help, Build };
+    enum class Overlay { None, Inventory, Map, Health, Pause, Settings, Help, Build, Talk, Trade, Journal };
 
     struct ContextMenu {
         bool open = false;
@@ -70,8 +70,27 @@ private:
     void drawActionBar();
     void drawContextMenu();
     void drawInventory();
-    void drawItemList(const std::string& title, Rectangle area, std::vector<ItemRef>& refs, int pane, ItemLoc target);
     void drawItemTooltip(const ItemInstance& it);
+    // Inventory grid (AppInventory.cpp)
+    struct ItemStack { std::vector<ItemRef> refs; ItemInstance* top = nullptr; };
+    std::vector<ItemStack> stacksOf(const std::vector<ItemRef>& refs, int tab, int sort);
+    // Draws a grid of item tiles; returns the height used. pane: 0 yours, 1 the other side
+    void drawItemGrid(Rectangle area, std::vector<ItemStack>& stacks, int pane, ItemLoc target);
+    void drawPaperDoll(Rectangle area);
+    void drawItemDetails(Rectangle area);
+    void drawItemTile(Rectangle r, const ItemInstance& it, int count, bool selected, bool hovered);
+    void moveStack(const ItemStack& st, ItemLoc to, bool all);
+    // Survivors (AppSurvivors.cpp)
+    void drawTalk();
+    void drawTrade();
+    void drawJournal();
+    void drawSurvivorLabels();
+    void drawVehicleHud();
+    void openTalk(int survivorId);
+    int talkTo_ = -1;                // survivor id in conversation
+    std::string talkLine_;           // what they just said
+    std::vector<uint32_t> tradeMine_, tradeTheirs_;   // item uids offered in a trade
+    float tradeScroll_[2] = {0, 0};
     void drawHealth();
     void drawMap();
     void drawPause();
@@ -115,15 +134,20 @@ private:
     uint32_t seed_ = 1;
 
     // inventory window
-    uint32_t selectedUid_ = 0;
     bool lootPending_ = false;       // a search is running: show the container when it's done
     int buildKind_ = -1;             // placing this BuildKind (-1: not building)
     int buildX_ = 0, buildY_ = 0, buildDir_ = 0;
     void drawBuildMenu();
     void updateBuildPlacement();
-    struct Drag { ItemRef ref; bool armed = false, active = false; Vector2 start{}; int fromPane = -1; } drag_;
-    Rectangle paneRect_[2]{};        // where the item lists were drawn (drop targets)
+    struct Drag { ItemStack stack; bool armed = false, active = false, all = false; Vector2 start{}; int fromPane = -1; } drag_;
+    Rectangle paneRect_[2]{};        // where the item grids were drawn (drop targets)
     ItemLoc paneLoc_[2]{ItemLoc::Player, ItemLoc::Ground};
+    Rectangle dollRect_{};           // the worn-clothes figure (drop clothes here to put them on)
+    ItemRef selected_{};             // item shown in the details strip
+    int invTab_ = 0;                 // 0 all, 1 food, 2 medical, 3 gear, 4 clothing, 5 other
+    int invSort_ = 0;                // 0 type, 1 name, 2 weight
+    int buildTab_ = 0;
+    int buildPick_ = 0;              // BuildKind shown in the build menu's details
     uint32_t lastClickUid_ = 0;
     double lastClickTime_ = 0;
     float scroll_[2] = {0, 0};

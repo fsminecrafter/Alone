@@ -16,6 +16,10 @@ and listen to your body, because it will tell you *how* you feel but never
 | ![Symptoms with a tooltip](docs/screenshots/symptoms.jpg) | ![Map of Alingsås](docs/screenshots/map.jpg) |
 | ![Alingsås station at night](docs/screenshots/station_night.jpg) | ![You only know the time once you find a watch](docs/screenshots/watch.jpg) |
 | ![Inventory and a searched container](docs/screenshots/inventory.jpg) | ![Cause of death is revealed only when you die](docs/screenshots/death.jpg) |
+| ![Meeting Elin, a nurse a few streets away](docs/screenshots/people.jpg) | ![Shouting across the yard at Jonas in the police station](docs/screenshots/parley.jpg) |
+| ![The journal: who you know of and what they need](docs/screenshots/journal.jpg) | ![Trading: friends give better deals](docs/screenshots/trade.jpg) |
+| ![On a bike in the Vimpeln car park](docs/screenshots/vimpeln_carpark.jpg) | ![A fuel station: fill a gas can at the pumps](docs/screenshots/fuel_station.jpg) |
+| ![The build menu](docs/screenshots/build.jpg) | ![Aiming with Ctrl: a reticle on the ground](docs/screenshots/aim.jpg) |
 
 **The player** is one smooth body mesh skinned to a bone rig, with procedural
 animations that react to how you are: a hurt leg makes you limp, a hurt arm is
@@ -25,7 +29,7 @@ on your knees ([MP4](docs/media/character_animations.mp4)):
 
 ![Character animations](docs/media/character_animations.gif)
 
-> Early prototype (v0.1). The game was originally an NDS project; it has been
+> Early prototype (v0.3). The game was originally an NDS project; it has been
 > rewritten from scratch in C++17 for PC (Linux and Windows), with a browser version on the side.
 
 ## What's in it
@@ -143,6 +147,41 @@ log, saw it into planks, find nails, and build (B): walls, doors, windows,
 floors, roofs, storage crates, rain collectors, beds and fences. A carpentry
 book teaches you doors, windows and roofs. Fish from the shore with a rod.
 
+**Other people.** Nine survivors live at real places in town, and they don't
+all want the same thing. Elin, a nurse a few streets from where you wake up,
+is glad to see you; Gunnar the old radio amateur in Nolby and Britt-Marie the
+hunter up by Enehagen keep you at arm's length until you've earned it; Jonas
+has barricaded himself into the police station and shoots anyone who comes
+close; and two raiders work the shops around Vimpeln while a loner with a bow
+hunts the Noltorp woods. Talk to people (right-click or F), ask what they
+need, trade (they value food, medicine, ammo and petrol), and ask about
+others: people pass on who they've heard of and roughly where, and warn you
+when they've seen raiders nearby - those rumours go on your map as a ring
+with a question mark. Those who trust you may come with you - companions follow you,
+fight what attacks you and ride along in your car. Help someone and they
+teach you things (hotwiring, mushrooms, carpentry). The journal (J) keeps
+track of who you know and what they need, the map marks them, and the goal
+under the clock says what to do next. People are defined in
+`data/survivors/survivors.ini`.
+
+**Talking your way out.** You can call out to people who won't let you near.
+Jonas in the police station will hear you out from across the yard: tell him
+you're not here to fight, strike a deal (he names the price), bring what he
+needs, and he may let you in. Raiders give you a few seconds when you start
+talking: hand over enough of your valuables and the whole gang leaves you alone
+for a day, or face them down - with a loaded gun in your hands they might back
+off; with your fists, probably not.
+
+**Bikes and cars.** Bikes stand by the odd front door (and outside the bike
+shops): get on and ride, quietly and without fuel. Cars are harder: one in
+five doors is unlocked (or has the key left in it), and only one in five of
+those has the key in the ignition - otherwise sit in it out of the rain,
+smash a window, or hotwire it once someone has shown you how. Every car has
+0-40% of a tank. A gas can holds any liquid but is meant for petrol: fill it
+at the pumps of the real fuel stations (while there's power; afterwards a
+hose down the filler pipe works), or siphon any car with a hose. Crash and
+you'll get hurt; run things down and they get hurt.
+
 **Things to do:** search kitchens, wardrobes, sheds, shops, the pharmacy and the
 hospital - a search opens the container so you can look through it and take
 what you want; eat (all, half, a quarter) and drink; open cans (or pry them
@@ -236,11 +275,13 @@ only allows sound after your first click or key press.
 
 | Key | Action |
 |---|---|
-| W A S D | Walk (Shift run, Ctrl sneak) |
+| W A S D | Walk (Shift run, C crouch); on a bike or in a car: steer |
+| Ctrl (hold) | Aim: face the cursor and walk while aiming, steadier shots |
 | Right click | Interact with what's under the cursor |
-| F | Use what's in front of you: the door you face, a cupboard, a tree (else what's under the cursor) |
+| F | Use what's in front of you: the door you face, a cupboard, a person, a car (else what's under the cursor) |
 | Left click / Space | Attack with what you hold |
-| Tab / I | Inventory - double-click or drag to move items, right-click for options |
+| Tab / I | Inventory - double-click moves one, shift-click a stack, drag clothes onto the figure |
+| J | Journal: the people you know of, and what they need |
 | H | Health: look at each body part, right-click to treat it |
 | B | Build: walls, doors, floors, roofs, crates... |
 | M | Map |
@@ -317,7 +358,6 @@ Run it last.
 * Upper floors, basements, more building types (farms, summer cottages)
 * Carpentry skill levels, more to build (stairs, shelves, drying racks)
 * Trapping more animals, preserving food (smoking, drying, salting)
-* Other survivors
 
 ## License
 

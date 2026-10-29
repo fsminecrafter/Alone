@@ -84,6 +84,7 @@ struct ItemInstance {
     float condition = 1.0f;      // tools/weapons/clothes wear
     float liquidMl = 0;          // liquid containers
     bool liquidSafe = true;      // false: untreated lake water
+    uint8_t liquid = 0;          // what's in it: 0 water, 1 petrol
     bool opened = false;         // cans/jars
     int usesLeft = 0;
     bool carriesPathogen = false;  // rolled when created

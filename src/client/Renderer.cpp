@@ -252,6 +252,10 @@ void Renderer::shutdown() {
     UnloadMesh(cylinder_);
     UnloadMesh(cone_);
     playerModel_.shutdown();
+    for (auto& [k, m] : vehicleMeshes_) UnloadMesh(m);
+    vehicleMeshes_.clear();
+    for (auto& [k, g] : npcs_) if (g.model) g.model->shutdown();
+    npcs_.clear();
     for (auto& [k, t] : signTex_) UnloadTexture(t.tex);
     signTex_.clear();
     for (RenderTexture2D* t : {&shadowFront_, &shadowBack_, &shadowMap_})
@@ -848,6 +852,7 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     playerPos_ = game.player().pos;
     currentBuilding_ = world.tile((int)std::floor(playerPos_.x), (int)std::floor(playerPos_.y)).building;
     updatePlayerRig(game, time, dt);
+    updateNpcRigs(game, time, dt);
     // The camera looks at the ground the player stands on, easing over steps
     float ty = world.standHeight(target_);
     if (snapY_ || std::fabs(ty - targetY_) > 6.0f) targetY_ = ty;
@@ -1045,7 +1050,7 @@ void Renderer::drawShowcase(const AnimInput& anim, float facing, float dt, const
     }
     playerRig_.update(anim, dt);
     playerRig_.place(V(0, 0, 0), facing);
-    playerModel_.skin(playerRig_, lookOf(look));
+    playerModel_.skin(playerRig_, lookOf(look.worn, &look.body));
 
     Vector3 sunDir = Vector3Normalize(V(-0.5f, 0.8f, 0.4f));
     Vector3 sunCol = V(0.9f, 0.82f, 0.7f), amb = V(0.38f, 0.4f, 0.46f), sky = V(0.55f, 0.62f, 0.7f);
@@ -1074,7 +1079,7 @@ void Renderer::drawShowcase(const AnimInput& anim, float facing, float dt, const
     active_ = &mat_;
     mat_.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     DrawMesh(stage, mat_, MatrixIdentity());
-    drawCharacter(playerRig_, look, weapon);
+    drawCharacter(playerRig_, playerModel_, look.worn, &look.body, weapon);
     EndMode3D();
 }
 

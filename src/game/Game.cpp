@@ -41,6 +41,7 @@ bool Game::loadData() {
     ok &= map_.load(Paths::data("maps/alingsas"));
     ok &= symptoms_.load(Paths::data("text/symptoms.ini"));
     ok &= animals_.load(Paths::data("animals/animals.ini"));
+    loadSurvivors(Paths::data("survivors/survivors.ini"));   // optional: the town can be empty
     return ok;
 }
 
@@ -51,6 +52,12 @@ void Game::newGame(uint32_t seed) {
     player_ = Player{};
     player_.body = Body(seed + 99);
     animals_.animals().clear();
+    vehicles_.clear();
+    lockedCars_.clear();
+    propFuel_.clear();
+    pumpFuel_.clear();
+    nextVehicleId_ = 1;
+    placeCache_.clear();
     messages_.clear();
     action_ = {};
     openContainer_ = false;
@@ -87,9 +94,10 @@ void Game::newGame(uint32_t seed) {
     bread.portion = 0.4f;
     player_.inventory.add(bread);
 
+    placeSurvivors();
     log("It has been eleven days since you last saw another person.", MessageKind::Info);
-    log("The town is silent. You need food, water and warmth to get through the autumn.", MessageKind::Info);
-    log("Right-click things to interact. Tab opens your inventory.", MessageKind::Info);
+    log("But last night there was candlelight in a window a few streets away. Someone else is alive.", MessageKind::Good);
+    log("Right-click things to interact. Tab: inventory, J: journal, M: map.", MessageKind::Info);
 }
 
 void Game::log(const std::string& text, MessageKind kind) {
@@ -133,12 +141,16 @@ float Game::threat() const {
         float d = distance(a.pos, player_.pos);
         t = std::max(t, std::clamp(1.0f - (d - 15.0f) / 30.0f, 0.0f, 1.0f));
     }
-    // Later: other survivors hunting you
+    for (const auto& s : survivors_) {
+        if (!s.alive() || s.state != SurvivorState::Hunt || !s.hostileTo()) continue;
+        float d = distance(s.pos, player_.pos);
+        t = std::max(t, std::clamp(1.0f - (d - 20.0f) / 40.0f, 0.0f, 1.0f));
+    }
     return t;
 }
 
 bool Game::knowsMushrooms() const {
-    return player_.inventory.findTag("field_guide") >= 0;
+    return player_.knowsMushroomsTaught || player_.inventory.findTag("field_guide") >= 0;
 }
 
 float Game::carryCapacityKg() const {
@@ -213,6 +225,12 @@ Environment Game::environment() {
     env.clothingClo = clo;
     env.waterproof = waterproof;
     env.carriedKg = carriedKg();
+    // In a car: out of the wind and rain (unless you smashed the window), and the heater works
+    if (const Vehicle* v = playerVehicle(); v && v->kind == VehicleKind::Car) {
+        env.wind *= v->windowSmashed ? 0.4f : 0.0f;
+        env.wetness *= v->windowSmashed ? 0.3f : 0.0f;
+        env.airTempC += v->running ? 12.0f : 2.0f;
+    }
     // A tent keeps the wind and rain off and holds some warmth
     if (world_->tentAt(player_.pos)) {
         env.wind = 0;
@@ -266,6 +284,7 @@ void Game::update(float dt, const PlayerInput& input) {
     float animalDt = std::min(dt * std::max(1.0f, speed_ * timeScale * 0.25f), 0.25f);
     for (const auto& atk : animals_.update(animalDt, gameMinutes, *world_, presence, rng_))
         playerHurt(atk.severity, atk.by);
+    updateSurvivors(animalDt, gameMinutes);
 
     // Snares: chance of catching a hare each game hour in good habitat
     for (auto& s : world_->snares()) {
@@ -314,6 +333,11 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     Player& p = player_;
     Capacity cap = p.body.capacity();
 
+    if (p.vehicle >= 0) {
+        // Riding or driving instead of walking
+        if (in.move.lengthSq() > 0.01f && action_.active && action_.option.kind != ActionKind::Hotwire) cancelAction();
+        updateVehicle(dt, in);
+    } else {
     // Movement
     float len = in.move.length();
     bool wantsMove = len > 0.1f;
@@ -328,7 +352,8 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     }
     p.moving = wantsMove;
     p.sneaking = in.sneak;
-    bool canRun = p.stamina > 0.05f && !in.sneak;
+    p.aiming = in.aimHold && !p.asleep && p.fallen <= 0;
+    bool canRun = p.stamina > 0.05f && !in.sneak && !p.aiming;
     p.running = wantsMove && in.run && canRun;
 
     // A hurt leg or foot: you limp, and can't run properly
@@ -337,6 +362,7 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     limp = std::min(1.0f, limp);
     if (limp > 0.65f) p.running = false;
     float speed = p.sneaking ? 1.0f : p.running ? 4.6f : 2.1f;
+    if (p.aiming) speed *= 0.65f;
     speed *= cap.moveSpeed * (1.0f - 0.45f * limp);
     float over = carriedKg() / carryCapacityKg();
     if (over > 1.0f) speed *= std::max(0.35f, 1.0f - (over - 1.0f));
@@ -372,15 +398,22 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
         if (stepDistance_ > stride) { stepDistance_ = 0; sound(Sfx::Footstep, p.pos); }
         p.facing = std::atan2(dir.y, dir.x);
     }
+    // Aiming: you turn to the cursor and walk (more slowly) however you like
+    if (p.aiming) {
+        Vec2 to = in.aim - p.pos;
+        if (to.lengthSq() > 0.01f) p.facing = std::atan2(to.y, to.x);
+    }
 
     // Stamina (real-time). Climbing takes your breath, running uphill most of all.
     float uphill = std::max(0.0f, p.grade);
-    if (p.running) p.stamina -= dt / 14.0f * (1.0f + 2.5f * uphill);
-    else if (p.moving && uphill > 0.12f) p.stamina -= dt * (uphill - 0.12f) * 0.35f;
-    else p.stamina += dt / 22.0f * cap.endurance * (p.moving ? 0.6f : 1.0f);
+    if (p.running) p.stamina -= dt / 26.0f * (1.0f + 2.0f * uphill);
+    else if (p.moving && uphill > 0.12f) p.stamina -= dt * (uphill - 0.12f) * 0.25f;
+    else p.stamina += dt / 9.0f * cap.endurance * (p.moving ? 0.6f : 1.0f);
     p.stamina = clamp01(p.stamina);
 
     p.noise = p.sneaking ? 3.0f : p.running ? 26.0f : p.moving ? 11.0f : 4.0f;
+    }   // on foot
+    float uphill = std::max(0.0f, p.grade);
     if (action_.active && (action_.option.kind == ActionKind::ChopTree)) p.noise = 45.0f;
     if (p.asleep) p.noise = 2.0f;
     p.lastAttack += dt;
@@ -402,6 +435,9 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     Activity act = Activity::Standing;
     if (p.asleep) act = Activity::Sleeping;
     else if (p.lastAttack < 2.0f) act = Activity::Fighting;
+    else if (const Vehicle* v = playerVehicle())
+        act = v->kind == VehicleKind::Bike && std::fabs(v->speed) > 0.5f ? (std::fabs(v->speed) > 4.5f ? Activity::Running : Activity::Walking)
+                                                                         : Activity::Resting;
     else if (p.running) act = Activity::Running;
     else if (p.moving) act = uphill > 0.15f ? Activity::Running : Activity::Walking;   // a steep climb is hard work
     else if (action_.active) act = action_.option.kind == ActionKind::Rest || action_.option.kind == ActionKind::Wait ? Activity::Resting : Activity::Working;
@@ -484,7 +520,7 @@ void Game::playerHurt(float severity, const AnimalDef* by) {
 void Game::updateCombat(float dt, const PlayerInput& in) {
     Player& p = player_;
     p.attackTimer -= dt;
-    if (!in.attack || p.attackTimer > 0 || dead() || p.asleep) return;
+    if (!in.attack || p.attackTimer > 0 || dead() || p.asleep || p.vehicle >= 0) return;
     if (action_.active) cancelAction();
     Capacity cap = p.body.capacity();
     const ItemInstance* w = weapon();
@@ -497,17 +533,21 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     if (w && w->def->firearm) {
         int ammo = p.inventory.find([&](const ItemInstance& it) { return it.def->id == w->def->ammo && it.usesLeft > 0; });
         p.attackTimer = w->def->cooldown;
-        if (ammo < 0) { log("Click. No cartridges."); return; }
+        if (ammo < 0) { log(w->def->noise > 100 ? "Click. No cartridges." : "Nothing to shoot."); return; }
         ItemInstance& a = p.inventory.items()[ammo];
+        const ItemDef* ammoDef = a.def;
         if (--a.usesLeft <= 0) p.inventory.take(ammo);
+        bool loud = w->def->noise > 100;
         p.noise = w->def->noise;
-        // Find the first animal along the line of fire
-        Animal* hit = nullptr;
-        float bestT = w->def->reach;
         // aim sway from dizziness, cold hands, exhaustion
-        float sway = (1.0f - cap.accuracy) * 0.12f + (p.running ? 0.08f : 0.0f);
+        float sway = (1.0f - cap.accuracy) * 0.12f + (p.running ? 0.08f : 0.0f) + (p.moving ? 0.03f : 0.0f);
+        if (p.aiming) sway *= 0.4f;   // taking your time
         float ang = p.facing + rng_.range(-sway, sway);
         Vec2 dir{std::cos(ang), std::sin(ang)};
+        // the first animal or person along the line of fire
+        Animal* hit = nullptr;
+        Survivor* hitS = nullptr;
+        float bestT = w->def->reach;
         for (auto& an : animals_.animals()) {
             if (!an.alive()) continue;
             Vec2 rel = an.pos - p.pos;
@@ -516,13 +556,42 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
             float off = (rel - dir * t).length();
             if (off < an.def->size * 0.6f && world_->lineOfSight(p.pos, an.pos)) { bestT = t; hit = &an; }
         }
-        animals_.scare(p.pos, 350.0f);
-        sound(Sfx::Gunshot, p.pos);
-        log("BANG!");
-        if (hit) {
+        for (auto& sv : survivors_) {
+            if (!sv.alive() || sv.joined) continue;
+            Vec2 rel = sv.pos - p.pos;
+            float t = dot(rel, dir);
+            if (t < 0 || t > bestT) continue;
+            float off = (rel - dir * t).length();
+            if (off < 0.4f && world_->lineOfSight(p.pos, sv.pos)) { bestT = t; hitS = &sv; hit = nullptr; }
+        }
+        if (loud) {
+            animals_.scare(p.pos, 350.0f);
+            sound(Sfx::Gunshot, p.pos);
+            log("BANG!");
+            // a shot carries: raiders come to see
+            for (auto& sv : survivors_)
+                if (sv.alive() && sv.def->disposition == Disposition::Raider && distance(sv.pos, p.pos) < 250 && sv.state != SurvivorState::Hunt) {
+                    sv.state = SurvivorState::Hunt;
+                    sv.stateTimer = 40;
+                }
+        } else {
+            sound(Sfx::Bowshot, p.pos);
+        }
+        Vec2 landed = p.pos + dir * (hit || hitS ? bestT : std::min(w->def->reach, rng_.range(10.0f, 30.0f)));
+        if (hitS) {
+            hurtSurvivor(*hitS, w->def->damage * rng_.range(0.6f, 1.1f) * 0.6f, true);
+            if (hitS->alive()) log("You hit " + (hitS->met ? hitS->def->name : std::string("them")) + ".");
+        } else if (hit) {
             hit->hp -= w->def->damage * rng_.range(0.6f, 1.2f);
             if (hit->hp <= 0) { hit->state = AnimalState::Dead; log("The " + lower(hit->def->name) + " drops.", MessageKind::Good); }
             else log("You hit the " + lower(hit->def->name) + ". It runs.");
+            if (!loud && hit->alive()) { hit->state = AnimalState::Flee; hit->stateTimer = 8; }
+        }
+        // Arrows and bolts can often be found again
+        if (ammoDef->hasTag("arrow") && rng_.chance(hit || hitS ? 0.5f : 0.7f)) {
+            ItemInstance back = items_.create(ammoDef, rng_);
+            back.usesLeft = 1;
+            if (!world_->tileBlocked((int)std::floor(landed.x), (int)std::floor(landed.y))) world_->dropItem(landed, back);
         }
         return;
     }
@@ -535,6 +604,7 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
     p.noise = w ? w->def->noise : 5.0f;
     sound(Sfx::Swing, p.pos);
     Animal* target = nullptr;
+    Survivor* targetS = nullptr;
     float best = 1e9f;
     for (auto& an : animals_.animals()) {
         if (!an.alive()) continue;
@@ -543,6 +613,19 @@ void Game::updateCombat(float dt, const PlayerInput& in) {
         if (d > reach + an.def->size * 0.5f + 0.3f) continue;
         if (d > 0.3f && dot(rel * (1.0f / d), aimDir) < 0.35f) continue;
         if (d < best) { best = d; target = &an; }
+    }
+    for (auto& sv : survivors_) {
+        if (!sv.alive() || sv.joined) continue;
+        Vec2 rel = sv.pos - p.pos;
+        float d = rel.length();
+        if (d > reach + 0.5f) continue;
+        if (d > 0.3f && dot(rel * (1.0f / d), aimDir) < 0.35f) continue;
+        if (d < best) { best = d; targetS = &sv; target = nullptr; }
+    }
+    if (targetS) {
+        if (!rng_.chance(0.75f * cap.accuracy)) { log("You miss."); return; }
+        hurtSurvivor(*targetS, damage * rng_.range(0.7f, 1.3f), true);
+        return;
     }
     if (!target) return;
     if (!rng_.chance(0.8f * cap.accuracy)) { log("You miss."); return; }
@@ -913,6 +996,24 @@ std::vector<std::string> Game::describeBodyPart(BodyPart part) const {
 std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
     std::vector<ActionOption> out;
     if (!world_ || dead()) return out;
+    // On a bike or in a car you can only do what you can do from the seat
+    if (player_.vehicle >= 0) return vehicleActionsAt(pt);
+    // People
+    for (const auto& s : survivors_) {
+        if (distance(s.pos, pt) > 0.9f || !s.alive()) continue;
+        float d = distance(s.pos, player_.pos);
+        ActionOption o;
+        o.kind = ActionKind::Talk;
+        o.targetId = s.id;
+        std::string name = s.met ? s.def->name : "the stranger";
+        float range = talkRange(s.id);
+        o.label = (range > 5 && d > 4 ? "Call out to " : "Talk to ") + name;
+        std::string why;
+        o.enabled = canTalk(s.id, &why) && d < range;
+        o.reason = !why.empty() ? why : "Too far away";
+        out.push_back(o);
+    }
+    for (auto& o : vehicleActionsAt(pt)) out.push_back(o);
     int tx = (int)std::floor(pt.x), ty = (int)std::floor(pt.y);
     float dist = distance(player_.pos, Vec2{tx + 0.5f, ty + 0.5f});
     bool near = dist <= kReach + 0.3f;
@@ -984,6 +1085,7 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
             f.kind = ActionKind::FillBottle;
             f.label = "Fill " + lower(it.def->name) + " from " + sourceName(src);
             f.item = {ItemLoc::Player, 0, 0, 0, it.uid};
+            if (it.liquid == 1 && it.liquidMl > 0) { f.enabled = false; f.reason = "It has petrol in it. Pour that out first"; }
             out.push_back(f);
         }
     }
@@ -1168,7 +1270,10 @@ std::vector<ActionOption> Game::actionsForItem(const ItemRef& ref) {
             if (it->portion > 0.25f) add(ActionKind::Eat, "Eat a quarter", 0.25f);
         }
     }
-    if (d.capacityMl > 0 && it->liquidMl > 0) {
+    if (d.capacityMl > 0 && it->liquidMl > 0 && it->liquid == 1) {
+        add(ActionKind::Drink, "Drink", 1, false, "It's petrol");
+        add(ActionKind::PourOut, "Pour it out");
+    } else if (d.capacityMl > 0 && it->liquidMl > 0) {
         add(ActionKind::Drink, "Drink");
         bool tablet = player_.inventory.findTag("purify") >= 0;
         if (!it->liquidSafe && tablet) add(ActionKind::Purify, "Purify with a tablet");
@@ -1245,6 +1350,13 @@ void Game::perform(const ActionOption& o) {
     if (action_.active) cancelAction();
     ItemInstance* it = (o.item.uid != 0) ? resolve(o.item) : nullptr;
     switch (o.kind) {
+        // people and vehicles -------------------------------------------------
+        case ActionKind::Talk: return;   // the client opens the conversation
+        case ActionKind::TryCarDoor: case ActionKind::SmashCarWindow: case ActionKind::EnterVehicle: case ActionKind::ExitVehicle:
+        case ActionKind::StartEngine: case ActionKind::StopEngine: case ActionKind::Hotwire: case ActionKind::Refuel:
+        case ActionKind::SearchGlovebox: case ActionKind::MountBike: case ActionKind::Siphon: case ActionKind::FillFromPump:
+            performVehicle(o);
+            return;
         // instant ------------------------------------------------------------
         case ActionKind::ToggleDoor:
             world_->toggleDoor(o.x, o.y, o.dir);
@@ -1452,6 +1564,17 @@ void Game::finishAction() {
     };
 
     switch (o.kind) {
+        case ActionKind::Hotwire: {
+            Vehicle* v = playerVehicle();
+            if (!v) break;
+            if (rng_.chance(0.7f)) {
+                v->hotwired = true;
+                log("Two wires touch, the dash lights up. You can start it now.", MessageKind::Good);
+            } else {
+                log("A spark bites your fingers. Nothing. Try again.", MessageKind::Bad);
+            }
+            break;
+        }
         case ActionKind::Search: {
             ContainerState& c = world_->container(o.x, o.y);
             c.searched = true;
@@ -1491,6 +1614,7 @@ void Game::finishAction() {
             if (got <= 0) { log("There's no water left in it."); break; }
             it->liquidSafe = it->liquidMl > 0 ? (it->liquidSafe && safe) : safe;
             it->liquidMl += got;
+            it->liquid = 0;
             log("You fill the " + lower(it->def->name) + ".");
             break;
         }

@@ -16,7 +16,8 @@ public:
 private:
     bool ready_ = false;
     struct Effect { Sound sound{}; bool loaded = false; };
-    Effect effects_[10][3];   // a few variants per effect
+    static constexpr int kEffects = 13;   // number of Sfx values
+    Effect effects_[kEffects][3];   // a few variants per effect
 };
 
 } // namespace alone

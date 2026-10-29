@@ -27,7 +27,7 @@ void init() {
     std::vector<int> cps;
     for (int c = 32; c < 127; ++c) cps.push_back(c);
     for (int c = 160; c < 256; ++c) cps.push_back(c);
-    for (int c : {0x2013, 0x2014, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x2192, 0x00B0}) cps.push_back(c);
+    for (int c : {0x2013, 0x2014, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x2190, 0x2191, 0x2192, 0x2193, 0x00B0, 0x2713, 0x2717, 0x25B8, 0x2605, 0x2665}) cps.push_back(c);
     g_font = LoadFontEx(Paths::data("fonts/DejaVuSans.ttf").c_str(), 40, cps.data(), (int)cps.size());
     g_bold = LoadFontEx(Paths::data("fonts/DejaVuSans-Bold.ttf").c_str(), 40, cps.data(), (int)cps.size());
     if (g_font.texture.id == 0) g_font = GetFontDefault();

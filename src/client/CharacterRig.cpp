@@ -337,6 +337,45 @@ Pose CharacterRig::computeTarget(const AnimInput& in) const {
         p.rot[BChest].y += twist;
         p.rot[BSpine].z += bend;
     }
+    // --- riding a bike, sitting in a car -------------------------------------------
+    if (wRide_ > 0.01f) {
+        Pose r = p;
+        if (in.ride == 2) {
+            r.rootOffset = {-0.05f, -0.46f, 0};
+            r.rot[BPelvis] = {0, 0, 0};
+            r.rot[BThighL] = {0.07f, 0, 1.42f};
+            r.rot[BThighR] = {-0.07f, 0, 1.42f};
+            r.rot[BShinL] = {0, 0, -1.25f};
+            r.rot[BShinR] = {0, 0, -1.25f};
+            r.rot[BFootL] = {0, 0, 0.25f};
+            r.rot[BFootR] = {0, 0, 0.25f};
+            r.rot[BSpine] = {0, 0, 0.12f};
+            r.rot[BChest] = {0, 0, 0};
+            r.rot[BHead] = {0, 0.15f * std::sin(t * 0.5f), -0.08f};
+            r.rot[BUpperArmL] = {0.25f, 0, 0.95f};
+            r.rot[BUpperArmR] = {-0.25f, 0, 0.95f};
+            r.rot[BForearmL] = {0, 0, 0.55f};
+            r.rot[BForearmR] = {0, 0, 0.55f};
+        } else {
+            float ph = in.distance / 2.1f * 2.0f * PI;
+            r.rootOffset = {-0.1f, -0.06f, 0};
+            r.rot[BPelvis] = {0, 0, 0};
+            r.rot[BThighL] = {0.05f, 0, 0.95f + 0.42f * std::sin(ph)};
+            r.rot[BThighR] = {-0.05f, 0, 0.95f + 0.42f * std::sin(ph + PI)};
+            r.rot[BShinL] = {0, 0, -(1.05f + 0.5f * std::cos(ph))};
+            r.rot[BShinR] = {0, 0, -(1.05f + 0.5f * std::cos(ph + PI))};
+            r.rot[BFootL] = {0, 0, 0.2f};
+            r.rot[BFootR] = {0, 0, 0.2f};
+            r.rot[BSpine] = {0, 0, -0.42f};
+            r.rot[BChest] = {0, 0, -0.12f};
+            r.rot[BHead] = {0, 0, 0.5f};
+            r.rot[BUpperArmL] = {0.18f, 0, 1.0f};
+            r.rot[BUpperArmR] = {-0.18f, 0, 1.0f};
+            r.rot[BForearmL] = {0, 0, 0.3f};
+            r.rot[BForearmR] = {0, 0, 0.3f};
+        }
+        p = lerpPose(p, r, wRide_);
+    }
     p = lerpPose(p, lie, wLie_);
     return p;
 }
@@ -350,6 +389,7 @@ void CharacterRig::update(const AnimInput& in, float dt) {
     wEat_ = approach(wEat_, in.eating ? 1.0f : 0.0f, 6.0f, dt);
     wLie_ = approach(wLie_, (in.asleep || in.dead) ? 1.0f : 0.0f, in.dead ? 3.0f : 2.5f, dt);
     wHold_ = approach(wHold_, in.weapon != 0 ? 1.0f : 0.0f, 6.0f, dt);
+    wRide_ = approach(wRide_, in.ride ? 1.0f : 0.0f, 8.0f, dt);
     // the body's state changes slowly
     wLimpL_ = approach(wLimpL_, std::clamp(in.limpL, 0.0f, 1.0f), 2.0f, dt);
     wLimpR_ = approach(wLimpR_, std::clamp(in.limpR, 0.0f, 1.0f), 2.0f, dt);

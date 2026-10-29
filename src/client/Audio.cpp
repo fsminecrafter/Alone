@@ -160,6 +160,46 @@ std::vector<float> synth(Sfx type, int variant) {
             }
             break;
         }
+        case Sfx::Glass: {
+            // a crack, then shards tinkling down
+            len(0.9f);
+            for (size_t i = 0; i < s.size(); ++i) {
+                float t = i / (float)kRate;
+                float crack = noise() * std::exp(-t * 40.0f);
+                float tinkle = 0;
+                for (int k = 0; k < 5; ++k) {
+                    float t0 = 0.05f + 0.13f * k + 0.03f * variant;
+                    if (t > t0) tinkle += std::sin((t - t0) * 6.283f * (2600.0f + 700.0f * k)) * std::exp(-(t - t0) * 30.0f) * 0.25f;
+                }
+                s[i] = crack * 0.9f + tinkle;
+            }
+            break;
+        }
+        case Sfx::Engine: {
+            // the starter grinding, then the engine catching and idling
+            len(1.6f);
+            for (size_t i = 0; i < s.size(); ++i) {
+                float t = i / (float)kRate;
+                float f = t < 0.5f ? 14.0f + 4.0f * std::sin(t * 30.0f) : 28.0f + 10.0f * std::exp(-(t - 0.5f) * 4.0f);
+                ph += f / kRate;
+                float pulse = std::pow(std::fabs(std::sin(ph * 3.14159f)), 6.0f);
+                lp += 0.15f * (noise() - lp);
+                float env = std::fmin(1.0f, t * 8.0f) * (t > 1.3f ? std::fmax(0.0f, 1.0f - (t - 1.3f) / 0.3f) : 1.0f);
+                s[i] = (pulse * 0.7f + lp * 0.5f) * env;
+            }
+            break;
+        }
+        case Sfx::Bowshot: {
+            // the string's twang and the arrow's hiss
+            len(0.35f);
+            for (size_t i = 0; i < s.size(); ++i) {
+                float t = i / (float)kRate;
+                ph += (95.0f + 10.0f * variant) / kRate;
+                lp += 0.4f * (noise() - lp);
+                s[i] = std::sin(ph * 6.283f) * std::exp(-t * 18.0f) * 0.6f + lp * std::exp(-t * 9.0f) * 0.25f;
+            }
+            break;
+        }
     }
     return s;
 }
@@ -172,7 +212,7 @@ void Audio::init() {
     g_stream = LoadAudioStream(kRate, 16, 1);
     SetAudioStreamCallback(g_stream, ambienceCallback);
     PlayAudioStream(g_stream);
-    for (int t = 0; t < 10; ++t)
+    for (int t = 0; t < kEffects; ++t)
         for (int v = 0; v < 3; ++v) {
             effects_[t][v].sound = makeSound(synth((Sfx)t, v));
             effects_[t][v].loaded = true;
@@ -208,10 +248,11 @@ void Audio::update(Game& game, float volume) {
 void Audio::play(const SoundEvent& e, Vec2 listener, float volume) {
     if (!ready_) return;
     int t = (int)e.type;
-    if (t < 0 || t >= 10) return;
+    if (t < 0 || t >= kEffects) return;
     float d = distance(e.pos, listener);
     float vol = volume / (1.0f + d / 12.0f);
     if (e.type == Sfx::Footstep) vol *= 0.35f;
+    if (e.type == Sfx::Gunshot) vol = volume / (1.0f + d / 60.0f);   // carries far
     Sound& s = effects_[t][GetRandomValue(0, 2)].sound;
     SetSoundVolume(s, vol);
     SetSoundPitch(s, 0.92f + GetRandomValue(0, 16) / 100.0f);

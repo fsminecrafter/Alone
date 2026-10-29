@@ -198,6 +198,11 @@ ItemInstance ItemRegistry::create(const ItemDef* d, Rng& rng) const {
     it.uid = nextUid_++;
     it.usesLeft = d->uses;
     if (d->capacityMl > 0) it.liquidMl = d->hasTag("starts_empty") ? 0.0f : d->capacityMl;
+    if (d->hasTag("gascan")) {
+        // found cans usually have some petrol left in them
+        it.liquid = 1;
+        it.liquidMl = rng.chance(0.35f) ? 0.0f : std::round(rng.range(0.1f, 1.0f) * d->capacityMl / 500.0f) * 500.0f;
+    }
     if (d->pathogen != Pathogen::None) it.carriesPathogen = rng.chance(d->pathogenChance);
     if (d->category == ItemCategory::Weapon || d->category == ItemCategory::Tool) it.condition = rng.range(0.5f, 1.0f);
     return it;

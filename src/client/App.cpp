@@ -214,6 +214,13 @@ void App::frame() {
     hv.point = hover_;
     hv.show = state_ == State::Playing && !ui::mouseOverUi() && overlay_ != Overlay::Map && !menu_.open;
     hv.colour = hoverColour();
+    if (state_ == State::Playing && game_.player().aiming && game_.player().vehicle < 0 && overlay_ == Overlay::None) {
+        hv.aiming = true;
+        hv.from = game_.player().pos;
+        const ItemInstance* w = game_.weapon();
+        hv.range = w ? w->def->reach + (w->def->firearm ? 0.0f : 0.5f) : 1.4f;
+        hv.ranged = w && w->def->firearm;
+    }
     if (buildKind_ >= 0 && state_ == State::Playing) {
         hv.buildKind = buildKind_;
         hv.bx = buildX_; hv.by = buildY_; hv.bdir = buildDir_;
@@ -222,9 +229,14 @@ void App::frame() {
     renderer_.draw(game_, time_, dt, hv);
     if (state_ == State::Menu) drawMenu();
     else {
+        drawSurvivorLabels();
         drawHud();
+        drawVehicleHud();
         switch (overlay_) {
             case Overlay::Inventory: drawInventory(); break;
+            case Overlay::Talk: drawTalk(); break;
+            case Overlay::Trade: drawTrade(); break;
+            case Overlay::Journal: drawJournal(); break;
             case Overlay::Health: drawHealth(); break;
             case Overlay::Build: drawBuildMenu(); break;
             case Overlay::Map: drawMap(); break;
@@ -273,6 +285,14 @@ void App::frame() {
             {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
             {0, 0, 0, "screenshot_settings_graphics.png", Overlay::Settings},
             {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
+            {0, 0, 0, "screenshot_build.png", Overlay::Build},
+            {0, 0, 0, "screenshot_people.png", Overlay::None},
+            {0, 0, 0, "screenshot_trade.png", Overlay::None},
+            {0, 0, 0, "screenshot_journal.png", Overlay::Journal},
+            {0, 0, 0, "screenshot_parley.png", Overlay::None},
+            {1, 1, 13, "screenshot_vimpeln_carpark.png", Overlay::None},
+            {0, 0, 0, "screenshot_fuel_station.png", Overlay::None},
+            {0, 0, 0, "screenshot_aim.png", Overlay::None},
             {0, 0, 0, "screenshot_death.png", Overlay::None},
         };
         int n = (int)(sizeof(stops) / sizeof(stops[0]));
@@ -333,6 +353,10 @@ void App::frame() {
                     }
                 }
                 overlay_ = st.ov;
+                if (std::string(st.file) == "screenshot_map.png")
+                    for (auto& sv : game_.survivors())
+                        if (sv.def->id == "elin")
+                            for (int k = 0; k < 4; ++k) game_.talk(sv.id, Topic::Others);
                 if (st.px > 0) {
                     float mpp = game_.map().metresPerPixel();
                     game_.player().pos = Vec2{st.px * mpp, st.py * mpp};
@@ -423,6 +447,12 @@ void App::frame() {
                 body.addWound(burn);
                 body.applyDressing(BodyPart::RightFoot, DressingKind::Bandage, true, 0.1f);
             }
+            if (std::string(st.file) == "screenshot_station_night.png" && sub == 0) {
+                Weather clear;
+                clear.kind = WeatherKind::Clear;
+                clear.cloud = 0.1f;
+                game_.world().clock().forceWeather(clear, game_.world().clock().totalMinutes() + 600);
+            }
             if (std::string(st.file) == "screenshot_rain.png" && sub == 0) {
                 // A downpour on the square: the streaks, rings and puddles
                 Weather wx;
@@ -478,6 +508,123 @@ void App::frame() {
                 pl.pos = Vec2{bx + 0.6f, by + 2.6f};
                 pl.facing = 3.6f;
                 renderer_.snapTo(pl.pos);
+            }
+            if (sub == 0 && idx > 0 && std::string(stops[idx - 1].file) == "screenshot_symptoms.png") {
+                // after the starving-body shot: a healthy body, and the pointer off the symptoms
+                game_.player().body = Body(seed_ + 99);
+                SetMousePosition(GetScreenWidth() / 2, GetScreenHeight() / 2);
+            }
+            if (std::string(st.file) == "screenshot_build.png" && sub == 0) {
+                Rng rng(5);
+                for (int i = 0; i < 4; ++i) game_.player().inventory.add(game_.items().create("plank", rng));
+                game_.player().inventory.add(game_.items().create("nails", rng));
+                game_.player().inventory.add(game_.items().create("hammer", rng));
+                buildPick_ = (int)BuildKind::Door;
+            }
+            Survivor* elin = nullptr;
+            for (auto& sv : game_.survivors())
+                if (sv.def->id == "elin") elin = &sv;
+            std::string file = st.file;
+            if ((file == "screenshot_people.png" || file == "screenshot_trade.png") && elin && sub == 0) {
+                game_.player().pos = elin->pos + Vec2{1.3f, 0.4f};
+                elin->target = elin->pos;
+                game_.animals().animals().clear();
+                renderer_.snapTo(game_.player().pos);
+                double add = 12.5 - game_.world().clock().hourOfDay();
+                if (add < 0) add += 24;
+                game_.world().clock().advance(add * 60);
+                openTalk(elin->id);
+                if (file == "screenshot_people.png") talkLine_ = game_.talk(elin->id, Topic::Request);
+                else {
+                    overlay_ = Overlay::Trade;
+                    tradeMine_.clear(); tradeTheirs_.clear();
+                    for (const auto& it : game_.player().inventory.items()) if (it.def->category == ItemCategory::Food) { tradeMine_.push_back(it.uid); break; }
+                    for (const auto& it : elin->inventory.items()) if (it.def->id == "bandage") { tradeTheirs_.push_back(it.uid); break; }
+                }
+            }
+            if (file == "screenshot_journal.png" && sub == 0) {
+                for (auto& sv : game_.survivors()) {
+                    if (sv.def->id == "elin") { sv.met = sv.known = true; sv.requestKnown = true; sv.trust = 30; }
+                    if (sv.def->id == "gunnar" || sv.def->id == "sofia" || sv.def->id == "kalle" || sv.def->id == "jonas") sv.known = true;
+                }
+            }
+            if (file == "screenshot_vimpeln_carpark.png" && sub == 1) {
+                // On a bike in the Vimpeln car park, with a car someone got going
+                Vec2 p0 = game_.player().pos;
+                int cx = 0, cy = 0;
+                bool found = false;
+                for (int r = 2; r < 40 && !found; ++r)
+                    for (int dy = -r; dy <= r && !found; ++dy)
+                        for (int dx = -r; dx <= r && !found; ++dx)
+                            if (game_.world().tile((int)p0.x + dx, (int)p0.y + dy).prop == Prop::Car) { cx = (int)p0.x + dx; cy = (int)p0.y + dy; found = true; }
+                Vehicle car;
+                car.id = 900;
+                car.kind = VehicleKind::Car;
+                car.pos = found ? Vec2{cx + 0.5f, cy + 4.5f} : p0 + Vec2{4, 2};
+                car.heading = 0.6f;
+                car.variant = 3 * 16 + 4;   // a red van
+                car.running = true;
+                game_.vehicles().push_back(car);
+                Vehicle bike;
+                bike.id = 901;
+                bike.kind = VehicleKind::Bike;
+                bike.pos = car.pos + Vec2{-3.0f, 2.5f};
+                bike.heading = -0.4f;
+                bike.variant = 1;
+                game_.vehicles().push_back(bike);
+                Vehicle parked = bike;
+                parked.id = 902;
+                parked.pos = bike.pos + Vec2{1.8f, 1.2f};
+                parked.variant = 2;
+                parked.heading = 1.2f;
+                game_.vehicles().push_back(parked);
+                game_.player().vehicle = 901;
+                game_.player().pos = bike.pos;
+                renderer_.snapTo(bike.pos);
+                game_.animals().animals().clear();
+            }
+            if (file == "screenshot_parley.png" && sub == 0) {
+                // Shouting across the yard at the man in the police station
+                for (auto& sv : game_.survivors())
+                    if (sv.def->id == "jonas") {
+                        const Building* b = game_.world().buildingAt((int)sv.pos.x, (int)sv.pos.y);
+                        Vec2 out = b ? (b->doorPos - b->rect.centre()).normalized() : Vec2{1, 0};
+                        sv.pos = b ? b->doorPos + out * 1.5f : sv.pos;
+                        game_.player().pos = sv.pos + out * 11.0f;
+                        renderer_.snapTo(game_.player().pos);
+                        openTalk(sv.id);
+                        talkLine_ = game_.talk(sv.id, Topic::Parley);
+                    }
+                game_.animals().animals().clear();
+            }
+            if (file == "screenshot_fuel_station.png" && sub == 0) {
+                game_.player().vehicle = -1;
+                for (const auto& b : game_.world().gen().allBuildings())
+                    if (b.type == BuildingType::GasStation && b.name == "Preem") {
+                        Vec2 out = (b.pathEnd - b.doorPos).normalized();
+                        game_.player().pos = b.doorPos + out * 9.0f;
+                        renderer_.snapTo(game_.player().pos);
+                    }
+                double add = 14 - game_.world().clock().hourOfDay();
+                if (add < 0) add += 24;
+                game_.world().clock().advance(add * 60);
+                game_.animals().animals().clear();
+            }
+            if (file == "screenshot_aim.png") {
+                if (sub == 0) {
+                    Rng rng(2);
+                    ItemInstance bow = game_.items().create("hunting_bow", rng);
+                    game_.player().inventory.add(bow);
+                    game_.player().inventory.add(game_.items().create("arrows", rng));
+                    game_.player().weaponUid = bow.uid;
+                }
+                Vector2 m = renderer_.toScreen(game_.player().pos + Vec2{5, -3}, 0);
+                SetMousePosition((int)m.x, (int)m.y);
+                PlayerInput aim;
+                aim.aimHold = true;
+                aim.aim = game_.player().pos + Vec2{5, -3};
+                hover_ = aim.aim;
+                game_.update(0.016f, aim);
             }
             if (std::string(st.file) == "screenshot_watch.png" && sub == 0) {
                 Rng rng(9);
@@ -535,7 +682,7 @@ void App::continueGame() {
     state_ = State::Playing;
     overlay_ = Overlay::None;
     menu_.open = false;
-    selectedUid_ = 0;
+    selected_ = ItemRef{};
 }
 
 Color App::hoverColour() {
@@ -562,7 +709,7 @@ void App::newGame() {
     state_ = State::Playing;
     overlay_ = Overlay::None;
     menu_.open = false;
-    selectedUid_ = 0;
+    selected_ = ItemRef{};
 }
 
 void App::update(float dt) {
@@ -609,6 +756,7 @@ void App::updatePlaying(float dt) {
         if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I)) { overlay_ = overlay_ == Overlay::Inventory ? Overlay::None : Overlay::Inventory; menu_.open = false; }
         if (IsKeyPressed(KEY_M)) overlay_ = overlay_ == Overlay::Map ? Overlay::None : Overlay::Map;
         if (IsKeyPressed(KEY_H)) overlay_ = overlay_ == Overlay::Health ? Overlay::None : Overlay::Health;
+        if (IsKeyPressed(KEY_J)) overlay_ = overlay_ == Overlay::Journal ? Overlay::None : Overlay::Journal;
         if (IsKeyPressed(KEY_B)) {
             if (buildKind_ >= 0) buildKind_ = -1;
             else overlay_ = overlay_ == Overlay::Build ? Overlay::None : Overlay::Build;
@@ -626,7 +774,8 @@ void App::updatePlaying(float dt) {
         if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) sx += 1;
         in.move = renderer_.screenToWorldDir(sx, sy);
         in.run = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-        in.sneak = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_C);
+        in.sneak = IsKeyDown(KEY_C);
+        in.aimHold = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         if (IsKeyPressed(KEY_Q)) renderer_.rotate(-1);
         if (IsKeyPressed(KEY_E)) renderer_.rotate(1);
         if (IsKeyPressed(KEY_ONE)) game_.setTimeSpeed(1);
@@ -695,6 +844,7 @@ void App::worldInput() {
         game_.perform(o);
         if (o.kind == ActionKind::OpenContainer) overlay_ = Overlay::Inventory;
         if (o.kind == ActionKind::Search) lootPending_ = true;
+        if (o.kind == ActionKind::Talk) openTalk(o.targetId);
     }
 }
 
@@ -743,7 +893,7 @@ void App::drawMenu() {
 #ifndef __EMSCRIPTEN__
     if (ui::button(b, "Quit", true, 20)) quit_ = true;
 #endif
-    ui::text("v0.1 - early prototype", x, H - 40 * s, 14 * s, ui::theme().dim);
+    ui::text("v0.3 - early prototype", x, H - 40 * s, 14 * s, ui::theme().dim);
     if (overlay_ == Overlay::Settings) drawSettings();
 }
 
@@ -901,11 +1051,13 @@ void App::drawHelp() {
     ui::panel(p);
     ui::textCentered("Controls", W / 2, p.y + 16 * s, 28 * s, ui::theme().text, true);
     const char* lines[][2] = {
-        {"W A S D", "Walk (hold Shift to run, Ctrl to sneak)"},
+        {"W A S D", "Walk (Shift run, C crouch); on a bike or in a car: steer"},
+        {"Ctrl (hold)", "Aim: face the cursor, steadier shots, walk while you aim"},
         {"Right click", "Interact with what's under the cursor"},
-        {"F", "Quick interact (doors, search)"},
+        {"F", "Quick interact (doors, search, talk, get in/out of a car)"},
         {"Left click / Space", "Attack with what you hold"},
-        {"Tab / I", "Inventory: double-click to move items, right-click for options"},
+        {"Tab / I", "Inventory: double-click moves one, shift-click a stack, drag clothes onto you"},
+        {"J", "Journal: the people you know of and what they need"},
         {"H", "Health: look yourself over, treat wounds"},
         {"B", "Build (carpentry): walls, doors, floors, roofs, crates"},
         {"M", "Map of Alingsås"},
@@ -1121,7 +1273,8 @@ void App::drawCursor() {
     if (tour_) { input::setPointer(input::Pointer::Hidden); return; }
     const ItemInstance* wpn = state_ == State::Playing ? game_.weapon() : nullptr;
     bool overUi = ui::mouseOverUi() || overlay_ != Overlay::None || menu_.open || state_ != State::Playing;
-    if (wpn && wpn->def->firearm && !overUi) input::setPointer(input::Pointer::Crosshair);
+    bool aiming = state_ == State::Playing && game_.player().aiming;
+    if (((wpn && wpn->def->firearm) || aiming) && !overUi) input::setPointer(input::Pointer::Crosshair);
     else input::setPointer(overUi ? input::Pointer::Arrow : input::Pointer::ArrowWorld);
 }
 
@@ -1321,6 +1474,28 @@ void App::drawHud() {
         ui::text(fmt(">> x%.0f", sp), p.x + p.width - 70 * s, p.y + 10 * s, 16 * s, ui::theme().accent, true);
     }
 
+    // The goal right now, under the clock (J opens the journal)
+    {
+        std::string goal = game_.objective();
+        float gy = p.y + p.height + 6 * s;
+        float gw = std::max(p.width, ui::measure(goal, 14 * s).x + 40 * s);
+        Rectangle g{p.x, gy, gw, 26 * s};
+        ui::panel(g, Color{10, 12, 14, 150});
+        ui::text("\xE2\x98\x85", g.x + 8 * s, g.y + 4 * s, 14 * s, ui::theme().accent);
+        ui::text(goal, g.x + 26 * s, g.y + 5 * s, 14 * s, ui::theme().text);
+        float cy = g.y + g.height + 4 * s;
+        for (const auto& sv : game_.survivors()) {
+            if (!sv.joined || !sv.alive()) continue;
+            float hp = sv.hp / sv.def->hp;
+            Rectangle r{p.x, cy, 170 * s, 22 * s};
+            ui::panel(r, Color{10, 12, 14, 140}, false);
+            ui::text(sv.def->name, r.x + 8 * s, r.y + 3 * s, 13 * s, Color{120, 180, 230, 255});
+            DrawRectangle((int)(r.x + 120 * s), (int)(r.y + 9 * s), (int)(42 * s), (int)(4 * s), Color{40, 40, 40, 255});
+            DrawRectangle((int)(r.x + 120 * s), (int)(r.y + 9 * s), (int)(42 * s * hp), (int)(4 * s), hp > 0.5f ? ui::theme().good : ui::theme().bad);
+            cy += 24 * s;
+        }
+    }
+
     if (buildKind_ >= 0) {
         const Game::BuildRecipe* r = Game::recipe((BuildKind)buildKind_);
         float s2 = ui::scale();
@@ -1343,7 +1518,7 @@ void App::drawHud() {
     ui::panel(hb, Color{10, 12, 14, 170});
     drawItemIcon(wpn ? wpn->def : nullptr, {hb.x + 8 * s, hb.y + 9 * s, 40 * s, 40 * s});
     ui::text(wpn ? game_.itemName(*wpn) : "Bare hands", hb.x + 56 * s, hb.y + 10 * s, 15 * s, ui::theme().text);
-    ui::text("Tab  M  H  F1", hb.x + 56 * s, hb.y + 32 * s, 13 * s, ui::theme().dim);
+    ui::text("Tab  J  M  H  B  F1", hb.x + 56 * s, hb.y + 32 * s, 13 * s, ui::theme().dim);
     // Breath
     float st = game_.player().stamina;
     if (st < 0.99f) {
@@ -1464,6 +1639,7 @@ void App::drawContextMenu() {
                 game_.perform(copy);
                 if (copy.kind == ActionKind::OpenContainer) overlay_ = Overlay::Inventory;
                 if (copy.kind == ActionKind::Search) lootPending_ = true;
+                if (copy.kind == ActionKind::Talk) openTalk(copy.targetId);
                 return;
             }
         }
@@ -1486,234 +1662,7 @@ void App::openItemMenu(const ItemRef& ref, Vector2 at) {
     menu_.title = game_.itemName(*it);
 }
 
-void App::drawItemTooltip(const ItemInstance& it) {
-    const ItemDef& d = *it.def;
-    std::string body = d.description;
-    auto add = [&](const std::string& line) { body += (body.empty() ? "" : "\n") + line; };
-    add(fmt("Weight: %.2f kg", it.weightKg()));
-    if (d.isEdible() && d.capacityMl <= 0) {
-        float sp = it.spoilage();
-        if (d.spoilHours > 0) add(sp >= 1 ? "It smells rotten." : sp > 0.6f ? "It doesn't smell quite right." : sp > 0.3f ? "Still fine." : "Fresh.");
-        if (d.raw) add("Raw.");
-        if (d.hasTag("labelled")) {
-            Nutrients n = d.nutrients.scaled(it.portion);
-            add(fmt("Label: %.0f kcal - fat %.0f g, carbohydrate %.0f g, protein %.0f g", n.kcal(), n.fat, n.carbs, n.protein));
-        }
-    }
-    if (d.capacityMl > 0) add(fmt("Holds %.0f of %.0f ml%s", it.liquidMl, d.capacityMl, it.liquidMl > 0 && !it.liquidSafe ? " (untreated)" : ""));
-    if (d.category == ItemCategory::Clothing && d.clo > 0) {
-        std::string warmth = d.clo >= 0.8f ? "very warm" : d.clo >= 0.4f ? "warm" : d.clo >= 0.15f ? "a little warm" : "barely warm";
-        add("It's " + warmth + (d.waterproof > 0.8f ? " and waterproof." : d.waterproof > 0.4f ? " and keeps some rain out." : "."));
-    }
-    if (d.carryBonusKg > 0) add(fmt("Lets you carry %.0f kg more.", d.carryBonusKg));
-    if (d.uses > 0 && d.category != ItemCategory::Food) add(fmt("%d left.", it.usesLeft));
-    ui::tooltip(game_.itemName(it), body);
-}
-
-void App::drawItemList(const std::string& title, Rectangle area, std::vector<ItemRef>& refs, int pane, ItemLoc target) {
-    float s = ui::scale();
-    if (pane >= 0 && pane < 2) { paneRect_[pane] = area; paneLoc_[pane] = pane == 0 ? ItemLoc::Player : target == ItemLoc::Player ? (game_.hasOpenContainer() ? ItemLoc::Container : ItemLoc::Ground) : target; }
-    ui::text(title, area.x, area.y - 26 * s, 18 * s, ui::theme().accent, true);
-    DrawRectangleRec(area, Color{8, 9, 10, 160});
-    float rowH = 34 * s;
-    float contentH = refs.size() * rowH;
-    if (ui::hovered(area)) {
-        scroll_[pane] -= GetMouseWheelMove() * rowH * 2;
-    }
-    scroll_[pane] = std::clamp(scroll_[pane], 0.0f, std::max(0.0f, contentH - area.height));
-    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
-    float y = area.y - scroll_[pane];
-    for (const auto& ref : refs) {
-        ItemInstance* it = game_.resolve(ref);
-        if (!it) continue;
-        Rectangle row{area.x, y, area.width, rowH - 2};
-        bool hov = ui::hovered(row) && ui::hovered(area);
-        if (it->uid == selectedUid_) DrawRectangleRec(row, Color{70, 60, 40, 200});
-        else if (hov) DrawRectangleRec(row, Color{40, 40, 42, 200});
-        drawItemIcon(it->def, {row.x + 5 * s, row.y + 3 * s, rowH - 8 * s, rowH - 8 * s});
-        std::string name = game_.itemName(*it);
-        if (it->uid == game_.player().weaponUid && pane == 0) name += "  (held)";
-        ui::text(name, row.x + rowH + 4 * s, row.y + 8 * s, 15 * s, ui::theme().text);
-        std::string wt = fmt("%.1f", it->weightKg());
-        ui::text(wt, row.x + row.width - ui::measure(wt, 13 * s).x - 8 * s, row.y + 10 * s, 13 * s, ui::theme().dim);
-        if (hov && !menu_.open && !drag_.active) {
-            drawItemTooltip(*it);
-            if (input::pressed(MOUSE_BUTTON_LEFT)) {
-                double now = GetTime();
-                if (lastClickUid_ == it->uid && now - lastClickTime_ < 0.35) {
-                    game_.transfer(ref, target);
-                    lastClickUid_ = 0;
-                    drag_.armed = false;
-                } else {
-                    selectedUid_ = it->uid;
-                    lastClickUid_ = it->uid;
-                    lastClickTime_ = now;
-                    // hold and drag it to the other list
-                    drag_.ref = ref; drag_.armed = true; drag_.active = false;
-                    drag_.start = GetMousePosition(); drag_.fromPane = pane;
-                }
-            }
-            if (input::pressed(MOUSE_BUTTON_RIGHT)) openItemMenu(ref, GetMousePosition());
-        }
-        y += rowH;
-    }
-    EndScissorMode();
-    if (refs.empty()) ui::text("Nothing.", area.x + 10 * s, area.y + 10 * s, 15 * s, ui::theme().dim);
-    ui::claim(area);
-}
-
-void App::drawInventory() {
-    float s = ui::scale();
-    float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
-    Rectangle p{W / 2 - 520 * s, H / 2 - 290 * s, 1040 * s, 560 * s};
-    p.x = std::max(4.0f, p.x);
-    ui::panel(p, Color{16, 17, 19, 236});
-    Player& pl = game_.player();
-    float colW = (p.width - 80 * s) / 3;
-
-    // Player inventory
-    std::vector<ItemRef> mine;
-    for (const auto& it : pl.inventory.items()) mine.push_back({ItemLoc::Player, 0, 0, 0, it.uid});
-    float carried = game_.carriedKg(), cap = game_.carryCapacityKg();
-    Rectangle a{p.x + 20 * s, p.y + 70 * s, colW, p.height - 90 * s};
-
-    // Other side: open container in reach, otherwise the ground
-    bool container = false;
-    if (game_.hasOpenContainer()) {
-        Vec2 cpos{game_.openContainerX() + 0.5f, game_.openContainerY() + 0.5f};
-        if (distance(cpos, pl.pos) < 2.6f) container = true;
-        else game_.closeContainer();
-    }
-    std::vector<ItemRef> other;
-    std::string otherTitle = "On the ground";
-    if (container) {
-        int cx = game_.openContainerX(), cy = game_.openContainerY();
-        ContainerState& cs = game_.world().container(cx, cy);
-        const ContainerDef* cd = game_.items().container(cs.kind);
-        otherTitle = cd ? cd->name : "Container";
-        for (const auto& it : cs.items) other.push_back({ItemLoc::Container, cx, cy, 0, it.uid});
-    } else {
-        for (auto& [key, idx] : game_.world().groundItemsNear(pl.pos, 1.6f)) {
-            auto* st = game_.world().groundStack(key);
-            if (st && idx < (int)st->size()) other.push_back({ItemLoc::Ground, 0, 0, key, (*st)[idx].uid});
-        }
-    }
-
-    drawItemList(fmt("Carrying  %.1f / %.0f kg", carried, cap), a, mine, 0, container ? ItemLoc::Container : ItemLoc::Ground);
-    if (carried > cap) ui::text("Overloaded", a.x + a.width - 90 * s, a.y - 24 * s, 15 * s, ui::theme().bad);
-
-    // Worn clothing
-    Rectangle wa{a.x + colW + 20 * s, a.y, colW, a.height};
-    ui::text("Wearing", wa.x, wa.y - 26 * s, 18 * s, ui::theme().accent, true);
-    DrawRectangleRec(wa, Color{8, 9, 10, 160});
-    float y = wa.y + 6 * s;
-    for (int sl = 1; sl < (int)ClothingSlot::Count; ++sl) {
-        const ItemInstance& it = pl.worn[sl];
-        Rectangle row{wa.x, y, wa.width, 40 * s};
-        bool hov = ui::hovered(row);
-        if (hov) DrawRectangleRec(row, Color{40, 40, 42, 200});
-        ui::text(slotName((ClothingSlot)sl), row.x + 10 * s, row.y + 4 * s, 12 * s, ui::theme().dim);
-        if (it.def) {
-            drawItemIcon(it.def, {row.x + 10 * s, row.y + 17 * s, 20 * s, 20 * s});
-            ui::text(game_.itemName(it), row.x + 36 * s, row.y + 19 * s, 15 * s, ui::theme().text);
-            ItemRef ref{ItemLoc::Worn, 0, 0, 0, it.uid};
-            if (hov && !menu_.open) {
-                drawItemTooltip(it);
-                if (input::pressed(MOUSE_BUTTON_RIGHT)) openItemMenu(ref, GetMousePosition());
-                if (input::pressed(MOUSE_BUTTON_LEFT)) {
-                    double now = GetTime();
-                    if (lastClickUid_ == it.uid && now - lastClickTime_ < 0.35) { game_.transfer(ref, ItemLoc::Player); lastClickUid_ = 0; }
-                    else { lastClickUid_ = it.uid; lastClickTime_ = now; }
-                }
-            }
-        } else {
-            ui::text("-", row.x + 36 * s, row.y + 19 * s, 15 * s, ui::theme().dim);
-        }
-        y += 44 * s;
-    }
-    ui::claim(wa);
-
-    Rectangle oa{wa.x + colW + 20 * s, a.y, colW, a.height};
-    if (container) {
-        // The container you searched, as its own panel: nothing moves until you take it
-        Rectangle frame{oa.x - 6 * s, oa.y - 34 * s, oa.width + 12 * s, oa.height + 40 * s};
-        DrawRectangleRec(frame, Color{30, 26, 18, 220});
-        DrawRectangleLinesEx(frame, 2.0f, Color{150, 118, 64, 255});
-    }
-    drawItemList(otherTitle, oa, other, 1, ItemLoc::Player);
-    paneLoc_[1] = container ? ItemLoc::Container : ItemLoc::Ground;
-    if (!other.empty() && ui::button({oa.x + oa.width - 100 * s, oa.y - 30 * s, 100 * s, 24 * s}, "Take all", true, 14)) {
-        for (const auto& r : other) game_.transfer(r, ItemLoc::Player);
-    }
-    ui::text("Double-click or drag an item to move it. Right-click for options.", p.x + 20 * s, p.y + 14 * s, 14 * s, ui::theme().dim);
-
-    // Dragging an item between the lists
-    if (drag_.armed) {
-        Vector2 m = GetMousePosition();
-        if (!drag_.active && Vector2Distance(m, drag_.start) > 8 * s) drag_.active = true;
-        if (drag_.active) {
-            if (ItemInstance* it = game_.resolve(drag_.ref)) {
-                drawItemIcon(it->def, {m.x - 14 * s, m.y - 14 * s, 28 * s, 28 * s});
-                ui::text(game_.itemName(*it), m.x + 18 * s, m.y - 8 * s, 14 * s, ui::theme().text);
-            }
-        }
-        if (input::released(MOUSE_BUTTON_LEFT)) {
-            if (drag_.active)
-                for (int pane = 0; pane < 2; ++pane)
-                    if (pane != drag_.fromPane && CheckCollisionPointRec(m, paneRect_[pane])) game_.transfer(drag_.ref, paneLoc_[pane]);
-            drag_ = Drag{};
-        }
-    }
-    if (ui::button({p.x + p.width - 44 * s, p.y + 10 * s, 32 * s, 28 * s}, "X")) overlay_ = Overlay::None;
-}
-
-// ---------------------------------------------------------------------------
-// Carpentry
-// ---------------------------------------------------------------------------
-
-void App::drawBuildMenu() {
-    float s = ui::scale();
-    float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
-    float pw = std::min(720 * s, W - 20), ph = std::min(560 * s, H - 20);
-    Rectangle p{W / 2 - pw / 2, H / 2 - ph / 2, pw, ph};
-    ui::panel(p, Color{18, 17, 15, 240});
-    ui::claim(p);
-    ui::text("Build", p.x + 20 * s, p.y + 14 * s, 24 * s, ui::theme().text, true);
-    const Player& pl = game_.player();
-    int planks = 0, nails = 0;
-    for (const auto& it : pl.inventory.items()) {
-        if (it.def->hasTag("plank")) ++planks;
-        if (it.def->hasTag("nails")) nails += it.usesLeft;
-    }
-    bool hammer = pl.inventory.findId("hammer") >= 0 || pl.inventory.findId("sledgehammer") >= 0;
-    bool saw = pl.inventory.findTag("saw") >= 0;
-    ui::text(fmt("You have %d planks, %d nails%s%s", planks, nails, hammer ? ", a hammer" : " - no hammer", saw ? ", a saw" : ""),
-             p.x + 110 * s, p.y + 20 * s, 15 * s, hammer ? ui::theme().dim : ui::theme().bad);
-    float y = p.y + 58 * s, rowH = 50 * s;
-    for (const auto& r : Game::buildRecipes()) {
-        Rectangle row{p.x + 16 * s, y, p.width - 32 * s, rowH - 4 * s};
-        std::string why;
-        bool ok = game_.canAffordBuild(r.kind, &why);
-        bool hov = ui::hovered(row);
-        DrawRectangleRec(row, hov ? Color{48, 44, 36, 230} : Color{28, 27, 24, 220});
-        ui::text(r.name, row.x + 12 * s, row.y + 6 * s, 17 * s, ok ? ui::theme().text : ui::theme().dim, true);
-        std::string need = fmt("%d planks, %d nails, hammer", r.planks, r.nails);
-        if (r.saw) need += ", saw";
-        if (r.tarp) need += ", tarpaulin";
-        if (r.book) need += pl.knowsCarpentry ? "" : "  (needs a carpentry book)";
-        ui::text(need, row.x + 12 * s, row.y + 27 * s, 13 * s, ok ? ui::theme().accent : ui::theme().bad);
-        if (hov) ui::tooltip(r.name, std::string(r.description) + (ok ? "\n\nClick, then click where to build it." : "\n\n" + why + "."));
-        if (hov && input::pressed(MOUSE_BUTTON_LEFT)) {
-            buildKind_ = (int)r.kind;
-            overlay_ = Overlay::None;
-        }
-        y += rowH;
-    }
-    ui::paragraph("Planks come from hardware stores, garages and warehouses, or saw a log (chop a tree, then use a saw). "
-                  "Walls and doors go on the edge of a tile: point near the edge you want. Right-click something you built "
-                  "to take it apart again.",
-                  p.x + 20 * s, p.y + p.height - 70 * s, p.width - 40 * s, 13 * s, ui::theme().dim);
-}
+// drawItemTooltip, drawInventory and drawBuildMenu live in AppInventory.cpp
 
 void App::updateBuildPlacement() {
     BuildKind k = (BuildKind)buildKind_;
@@ -1998,6 +1947,107 @@ void App::drawMap() {
     for (const auto& wn : m.waterNames()) {
         Vector2 sp = toScreen(wn.pos.x / mpp, wn.pos.y / mpp);
         ui::text(wn.name, sp.x, sp.y, 17 * s, Color{40, 70, 110, 255}, true);
+    }
+    // Important places: fuel, medicine, police, shops...
+    {
+        float ppm = k / mpp;   // screen pixels per metre
+        Vector2 mouse = GetMousePosition();
+        const Building* tip = nullptr;
+        for (const auto& b : game_.world().gen().allBuildings()) {
+            BuildingType t = b.type;
+            bool major = t == BuildingType::GasStation || t == BuildingType::Hospital || t == BuildingType::Pharmacy ||
+                         t == BuildingType::Police || t == BuildingType::Station || t == BuildingType::Mall;
+            bool minor = t == BuildingType::Grocery || t == BuildingType::Hardware || t == BuildingType::FireStation ||
+                         t == BuildingType::Church;
+            if (!major && !(minor && ppm > 0.22f)) continue;
+            if (b.isOutbuilding) continue;
+            Vec2 c = b.rect.centre();
+            Vector2 sp = toScreen(c.x / mpp, c.y / mpp);
+            if (!CheckCollisionPointRec(sp, area)) continue;
+            float r = (major ? 10.0f : 8.0f) * s;
+            Color bg = t == BuildingType::GasStation ? Color{226, 130, 30, 255} : t == BuildingType::Hospital ? Color{200, 40, 40, 255}
+                     : t == BuildingType::Pharmacy ? Color{40, 150, 70, 255} : t == BuildingType::Police ? Color{40, 70, 170, 255}
+                     : t == BuildingType::Station ? Color{60, 60, 70, 255} : t == BuildingType::Mall ? Color{150, 60, 150, 255}
+                     : t == BuildingType::Grocery ? Color{60, 130, 120, 255} : t == BuildingType::Hardware ? Color{120, 90, 60, 255}
+                     : t == BuildingType::FireStation ? Color{220, 60, 30, 255} : Color{110, 110, 120, 255};
+            DrawCircleV(sp, r + 1.5f * s, Color{250, 248, 240, 255});
+            DrawCircleV(sp, r, bg);
+            Color w{255, 255, 255, 255};
+            switch (t) {
+                case BuildingType::GasStation:   // a pump with its hose
+                    DrawRectangleRec({sp.x - r * 0.45f, sp.y - r * 0.55f, r * 0.55f, r * 1.1f}, w);
+                    DrawRectangleRec({sp.x - r * 0.35f, sp.y - r * 0.42f, r * 0.35f, r * 0.3f}, bg);
+                    DrawLineEx({sp.x + r * 0.1f, sp.y - r * 0.2f}, {sp.x + r * 0.5f, sp.y + r * 0.1f}, 2 * s, w);
+                    DrawLineEx({sp.x + r * 0.5f, sp.y + r * 0.1f}, {sp.x + r * 0.5f, sp.y + r * 0.5f}, 2 * s, w);
+                    break;
+                case BuildingType::Pharmacy: case BuildingType::Hospital:
+                    if (t == BuildingType::Hospital) ui::textCentered("H", sp.x, sp.y - r * 0.7f, r * 1.4f, w, true);
+                    else {
+                        DrawRectangleRec({sp.x - r * 0.18f, sp.y - r * 0.6f, r * 0.36f, r * 1.2f}, w);
+                        DrawRectangleRec({sp.x - r * 0.6f, sp.y - r * 0.18f, r * 1.2f, r * 0.36f}, w);
+                    }
+                    break;
+                case BuildingType::Church:
+                    DrawRectangleRec({sp.x - r * 0.12f, sp.y - r * 0.65f, r * 0.24f, r * 1.3f}, w);
+                    DrawRectangleRec({sp.x - r * 0.45f, sp.y - r * 0.35f, r * 0.9f, r * 0.22f}, w);
+                    break;
+                default: {
+                    const char* g = t == BuildingType::Police ? "P" : t == BuildingType::Station ? "T" : t == BuildingType::Mall ? "S"
+                                  : t == BuildingType::Grocery ? "M" : t == BuildingType::Hardware ? "J" : "B";
+                    ui::textCentered(g, sp.x, sp.y - r * 0.7f, r * 1.4f, w, true);
+                }
+            }
+            if (CheckCollisionPointCircle(mouse, sp, r + 2)) tip = &b;
+        }
+        if (tip) {
+            std::string what = tip->type == BuildingType::GasStation ? "Fuel station: fill a gas can at the pumps (or siphon with a hose)"
+                             : tip->type == BuildingType::Pharmacy ? "Pharmacy" : tip->type == BuildingType::Hospital ? "Hospital"
+                             : tip->type == BuildingType::Police ? "Police station" : tip->type == BuildingType::Station ? "Railway station"
+                             : tip->type == BuildingType::Mall ? "Shopping centre" : tip->type == BuildingType::Grocery ? "Grocery store"
+                             : tip->type == BuildingType::Hardware ? "Hardware store" : tip->type == BuildingType::FireStation ? "Fire station"
+                             : "Church";
+            ui::tooltip(tip->name.empty() ? buildingTypeName(tip->type) : tip->name, what);
+        }
+    }
+    // People you know about, and where you left a bike or a car
+    for (const auto& v : game_.vehicles()) {
+        if (v.id == game_.player().vehicle) continue;
+        Vector2 vp = toScreen(v.pos.x / mpp, v.pos.y / mpp);
+        DrawRectangleRounded({vp.x - 6 * s, vp.y - 4 * s, 12 * s, 8 * s}, 0.4f, 4, Color{60, 60, 70, 255});
+        if (CheckCollisionPointCircle(GetMousePosition(), vp, 8 * s)) ui::tooltip(v.kind == VehicleKind::Car ? "Your car" : "Your bike", "Where you left it.");
+    }
+    std::vector<Vector2> placedLabels;
+    for (const auto& sv : game_.survivors()) {
+        if (!sv.known && !sv.joined) continue;
+        bool roams = sv.def->disposition == Disposition::Raider;
+        Vec2 at = sv.joined ? sv.pos : roams ? sv.rumourPos : sv.met ? sv.pos : sv.rumoured ? sv.rumourPos : sv.home;
+        if (!sv.alive()) at = sv.pos;
+        Vector2 sp = toScreen(at.x / mpp, at.y / mpp);
+        bool bad = sv.hostileTo() || sv.def->disposition == Disposition::Hostile || sv.def->disposition == Disposition::Raider;
+        Color c = !sv.alive() ? Color{90, 90, 90, 255} : bad ? Color{190, 50, 40, 255} : sv.joined ? Color{60, 140, 200, 255} : Color{50, 140, 70, 255};
+        if ((sv.met && !roams) || sv.joined || !sv.alive()) DrawCircleV(sp, 6 * s, c);
+        else {   // only heard about: roughly there
+            DrawCircleV(sp, 16 * s, Fade(c, 0.15f));
+            DrawCircleLinesV(sp, 16 * s, c);
+            DrawCircleLinesV(sp, 15 * s, c);
+            ui::textCentered("?", sp.x, sp.y - 8 * s, 16 * s, c, true);
+        }
+        if (CheckCollisionPointCircle(GetMousePosition(), sp, 16 * s)) {
+            std::string body = !sv.alive() ? "Dead." : sv.joined ? "With you." : sv.met && !roams ? sv.def->homeName
+                             : std::string(roams ? "Last seen here, according to someone you spoke to." : "Someone told you they live around here.");
+            if (!sv.def->describe.empty() && sv.alive()) body += "\n" + sv.def->describe;
+            ui::tooltip(sv.def->name, body, c);
+        }
+        std::string label = sv.met && !roams ? sv.def->name : sv.def->name + "?";
+        if (roams && sv.alive()) label += " (last seen)";
+        if (!sv.alive()) label += " (dead)";
+        // people at the same spot (a raider pair): stack their names
+        float ly = sp.y - 8 * s;
+        for (const Vector2& q : placedLabels)
+            if (std::fabs(q.x - sp.x) < 30 * s && std::fabs(q.y - ly) < 16 * s) ly = q.y + 17 * s;
+        placedLabels.push_back({sp.x, ly});
+        bool ring = !((sv.met && !roams) || sv.joined || !sv.alive());
+        ui::text(label, sp.x + (ring ? 20 : 9) * s, ly, 14 * s, c, true);
     }
     // You are here
     Vec2 pp = game_.player().pos;
