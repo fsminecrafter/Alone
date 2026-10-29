@@ -927,3 +927,68 @@ TEST(jonas_freezes_you_walks_up_and_talks) {
     jonas->angry = true;
     CHECK(jonas->hostileTo());
 }
+
+TEST(share_a_tent_with_your_lover) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* elin = find(g, "elin");
+    if (!elin) return;
+    int ox, oy;
+    CHECK(openPatch(g, 20, ox, oy));
+    Tent t;
+    t.id = g.world().newId();
+    t.rect = IRect{ox + 8, oy + 8, 2, 2};
+    t.item = "tent_dome";
+    g.world().tents().push_back(t);
+    elin->met = elin->joined = elin->lover = true;
+    elin->trust = 80;
+    elin->romance = 70;
+    elin->state = SurvivorState::Follow;
+    g.player().pos = Vec2{ox + 9.0f, oy + 11.5f};
+    elin->pos = Vec2{ox + 10.5f, oy + 12.0f};
+    ActionOption crawl;
+    for (auto& o : g.actionsAt(Vec2{ox + 9.0f, oy + 9.0f}))
+        if (o.kind == ActionKind::Sleep && o.enabled) crawl = o;
+    CHECK(crawl.kind == ActionKind::Sleep);
+    g.perform(crawl);
+    // she crawls in, the talk opens, and you're not asleep yet
+    CHECK(!g.player().asleep);
+    CHECK(g.takeTalkRequest() == elin->id);
+    CHECK(g.inTentWith(elin->id));
+    std::string hi = g.greeting(elin->id);
+    bool sleep = false, hold = false, whisper = false;
+    for (auto& [tp, l] : g.talkTopics(elin->id)) {
+        sleep |= tp == Topic::TentSleep;
+        hold |= tp == Topic::TentHold;
+        whisper |= tp == Topic::TentWhisper;
+    }
+    CHECK(sleep && hold && whisper);
+    std::string held = g.talk(elin->id, Topic::TentHold);
+    std::string words = g.talk(elin->id, Topic::TentWhisper);
+    float comfort = g.sleepComfort().score;
+    g.player().body.mutableState().sleepPressure = 1.0f;   // worn out
+    std::string night = g.talk(elin->id, Topic::TentSleep);
+    std::printf("    \"%s\"\n    \"%s\"\n    \"%s\"\n    \"%s\"\n    comfort %.2f\n", hi.c_str(), held.c_str(), words.c_str(), night.c_str(), comfort);
+    CHECK(g.player().asleep);
+    run(g, 2);
+    CHECK(elin->dozing && g.world().tentAt(elin->pos) != nullptr);
+    // alone in a bivvy there's no room: you just sleep
+    Game h;
+    CHECK(h.loadData());
+    h.newGame(42);
+    Survivor* e2 = find(h, "elin");
+    CHECK(openPatch(h, 20, ox, oy));
+    Tent b;
+    b.id = h.world().newId();
+    b.rect = IRect{ox + 8, oy + 8, 1, 2};
+    b.item = "tent_small";
+    h.world().tents().push_back(b);
+    e2->met = e2->joined = true;
+    e2->state = SurvivorState::Follow;
+    h.player().pos = Vec2{ox + 8.5f, oy + 10.8f};
+    e2->pos = Vec2{ox + 9.5f, oy + 11.0f};
+    for (auto& o : h.actionsAt(Vec2{ox + 8.5f, oy + 9.0f}))
+        if (o.kind == ActionKind::Sleep && o.enabled) { h.perform(o); break; }
+    CHECK(h.player().asleep && h.takeTalkRequest() == 0);
+}

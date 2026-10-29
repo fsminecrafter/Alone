@@ -493,6 +493,8 @@ void App::frame() {
                 int bx = (int)std::floor(base.x), by = (int)std::floor(base.y);
                 Tent t; t.id = w.newId(); t.rect = IRect{bx + 3, by - 1, 2, 2}; t.dir = 3; t.item = "tent_dome";
                 w.tents().push_back(t);
+                Tent bivvy; bivvy.id = w.newId(); bivvy.rect = IRect{bx + 6, by - 1, 1, 2}; bivvy.dir = 2; bivvy.item = "tent_small";
+                w.tents().push_back(bivvy);
                 Campfire stove; stove.pos = Vec2{bx + 1.5f, by + 2.5f}; stove.id = w.newId(); stove.stove = true;
                 stove.fuelMl = 80; stove.lit = true; stove.fuelMinutes = 20;
                 w.campfires().push_back(stove);
@@ -783,6 +785,11 @@ void App::update(float dt) {
     for (const auto& e : game_.takeSounds())
         if (state_ != State::Menu) sound_.play(e, game_.player().pos, settings_.sfxVolume);
     if (IsKeyPressed(KEY_F11)) { settings_.fullscreen = !settings_.fullscreen; applySettings(); }
+#ifdef __EMSCRIPTEN__
+    if (int fs = EM_ASM_INT({ return Module.fullscreenState ? Module.fullscreenState() : -1; }); fs >= 0 && (fs == 1) != settings_.fullscreen &&
+        EM_ASM_INT({ return Module.fullscreenPending ? 0 : 1; }))
+        settings_.fullscreen = fs == 1;
+#endif
     if (state_ == State::Menu) {
         menuOrbit_ += dt;
         renderer_.follow(game_.player().pos + Vec2{std::cos(menuOrbit_ * 0.05f) * 6, std::sin(menuOrbit_ * 0.05f) * 6}, dt);
@@ -2516,18 +2523,15 @@ void App::saveSettings() {
 
 void App::applySettings() {
     if (IsWindowReady()) {
-        if (settings_.fullscreen != IsWindowFullscreen()) {
-#ifndef __EMSCRIPTEN__
-            if (settings_.fullscreen) {
-                int mon = GetCurrentMonitor();
-                SetWindowSize(GetMonitorWidth(mon), GetMonitorHeight(mon));
-            }
+#ifdef __EMSCRIPTEN__
+        // Browsers only go fullscreen from inside a click or key handler: the
+        // page asks on the next one (see web/shell.html)
+        EM_ASM({ if (Module.setFullscreen) Module.setFullscreen($0); }, settings_.fullscreen ? 1 : 0);
+#else
+        // Borderless, the size of the monitor: works on X11 and Wayland alike
+        // and doesn't change the screen mode
+        if (settings_.fullscreen != IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE)) ToggleBorderlessWindowed();
 #endif
-            ToggleFullscreen();
-#ifndef __EMSCRIPTEN__
-            if (!settings_.fullscreen) SetWindowSize((int)kBaseW, (int)kBaseH);
-#endif
-        }
 #ifndef __EMSCRIPTEN__
         if (settings_.vsync) SetWindowState(FLAG_VSYNC_HINT);
         else ClearWindowState(FLAG_VSYNC_HINT);

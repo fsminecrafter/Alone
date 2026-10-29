@@ -43,6 +43,27 @@
     }
   };
   window.onerror = function (msg) { statusEl.textContent = 'Something went wrong: ' + msg; };
+  // Fullscreen: the game asks, the next click or key press does it (browsers
+  // only allow it from inside an input event)
+  var wantFs = null;
+  Module.fullscreenPending = false;
+  Module.setFullscreen = function (on) {
+    var isOn = !!document.fullscreenElement;
+    if (!!on === isOn) { wantFs = null; Module.fullscreenPending = false; return; }
+    wantFs = !!on;
+    Module.fullscreenPending = true;
+  };
+  Module.fullscreenState = function () { return document.fullscreenElement ? 1 : 0; };
+  function applyFs() {
+    if (wantFs === null) return;
+    var on = wantFs;
+    wantFs = null;
+    Module.fullscreenPending = false;
+    var el = document.documentElement;
+    if (on && !document.fullscreenElement && el.requestFullscreen) el.requestFullscreen().catch(function () {});
+    if (!on && document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function () {});
+  }
+  ['mouseup', 'keyup', 'touchend'].forEach(function (e) { window.addEventListener(e, applyFs); });
   // Browsers only allow sound after a click or key press
   ['mousedown', 'keydown', 'touchstart'].forEach(function (e) {
     window.addEventListener(e, function () { Module.canvas.focus(); }, { once: true });

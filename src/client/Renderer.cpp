@@ -253,6 +253,8 @@ void Renderer::shutdown() {
     UnloadMesh(cone_);
     playerModel_.shutdown();
     for (auto& [k, m] : vehicleMeshes_) UnloadMesh(m);
+    for (auto& [k, m] : tentMeshes_) UnloadMesh(m);
+    tentMeshes_.clear();
     vehicleMeshes_.clear();
     for (auto& [k, g] : npcs_) if (g.model) g.model->shutdown();
     npcs_.clear();

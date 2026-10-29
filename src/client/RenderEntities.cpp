@@ -486,7 +486,8 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
     for (const auto& t : w.tents())
         if (distance(t.rect.centre(), pp) < 90) {
             liftY_ = w.standHeight(t.rect.centre());
-            drawTent(t, !shadowPass && t.rect.contains((int)std::floor(pp.x), (int)std::floor(pp.y)));
+            const ItemDef* td = game.items().find(t.item);
+            drawTent(t, !shadowPass && t.rect.contains((int)std::floor(pp.x), (int)std::floor(pp.y)), hexColor(td ? td->colour : 0x4a7a3a));
         }
     liftY_ = 0;
     for (const auto& f : w.campfires()) {
@@ -638,37 +639,108 @@ void Renderer::drawWeather(Game& game, float time) {
     rlEnableBackfaceCulling();
 }
 
-void Renderer::drawTent(const Tent& t, bool inside) {
-    static const uint32_t cols[] = {0x4a7a3a, 0xd0702a, 0x2a5a8a, 0xb03030};
-    Color fab = hexColor(cols[t.id % 4]);
-    float x0 = (float)t.rect.x, z0 = (float)t.rect.y, x1 = (float)t.rect.right(), z1 = (float)t.rect.bottom();
-    // groundsheet
-    drawPrim(cube_, V((x0 + x1) * 0.5f, 0.01f, (z0 + z1) * 0.5f), V(x1 - x0 - 0.05f, 0.02f, z1 - z0 - 0.05f), 0, shade(fab, 0.5f));
-    if (inside) return;   // inside it: see yourself
-    if (t.rect.w == t.rect.h) {
-        // a dome
-        drawBlob(V((x0 + x1) * 0.5f, 0.0f, (z0 + z1) * 0.5f), V((x1 - x0) * 0.5f, 1.25f, (z1 - z0) * 0.5f), fab);
-        Vec2 door = t.rect.centre() + Vec2{t.dir == 1 ? 1.0f : t.dir == 3 ? -1.0f : 0.0f, t.dir == 2 ? 1.0f : t.dir == 0 ? -1.0f : 0.0f} * (t.rect.w * 0.45f);
-        drawBlob(V(door.x, 0.35f, door.y), V(0.32f, 0.55f, 0.32f), shade(fab, 0.45f));
-        for (int i = 0; i < 2; ++i) {   // poles crossing over the top
-            float a = i * PI * 0.5f + PI * 0.25f;
-            Vector3 p0 = V(t.rect.centre().x + std::cos(a) * (x1 - x0) * 0.5f, 0, t.rect.centre().y + std::sin(a) * (z1 - z0) * 0.5f);
-            Vector3 p1 = V(t.rect.centre().x, 1.27f, t.rect.centre().y);
-            drawTube(p0, p1, 0.02f, hexColor(0x2a2a2c));
+// Tents are built in their own little frame: across (u) and along (v) from
+// the door, then turned to face the door's way.
+const Mesh& Renderer::tentMesh(const Tent& t, Color fab) {
+    int W = t.rect.w, L = t.rect.h;
+    bool dome = W == L;
+    int dir = t.dir & 3;
+    // a tunnel's door is at one of its short ends
+    if (!dome) dir = W > L ? (dir == 1 ? 1 : 3) : (dir == 2 ? 2 : 0);
+    uint64_t key = ((uint64_t)ColorToInt(fab) << 32) | ((uint64_t)W << 16) | ((uint64_t)L << 8) | (uint64_t)(dir * 2 + dome);
+    auto it = tentMeshes_.find(key);
+    if (it != tentMeshes_.end()) return it->second;
+
+    float cw = (dir == 0 || dir == 2) ? (float)W : (float)L;   // canonical width (across the door)
+    float cl = (dir == 0 || dir == 2) ? (float)L : (float)W;   // canonical length (away from the door)
+    auto at = [&](float u, float v, float y) {
+        switch (dir) {
+            case 0: return V(u, y, v);
+            case 2: return V(W - u, y, L - v);
+            case 1: return V(W - v, y, u);
+            default: return V(v, y, L - u);
         }
+    };
+    MeshBuilder mb;
+    mb.noAo();
+    mb.material(MPlain);
+    Vector3 mid = at(cw * 0.5f, cl * 0.5f, 0.3f);
+    // faces always turned away from the middle of the tent
+    auto tri = [&](Vector3 a, Vector3 b, Vector3 c, Color col) {
+        Vector3 n = Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a));
+        Vector3 cen = Vector3Scale(Vector3Add(Vector3Add(a, b), c), 1.0f / 3.0f);
+        if (Vector3DotProduct(n, Vector3Subtract(cen, mid)) < 0) std::swap(b, c);
+        mb.tri(a, b, c, col);
+    };
+    auto quad = [&](Vector3 a, Vector3 b, Vector3 c, Vector3 d, Color col) { tri(a, b, c, col); tri(a, c, d, col); };
+    Color dark = shade(fab, 0.42f), pole = hexColor(0x2a2a2c), peg = hexColor(0x9a9ea4);
+
+    if (dome) {
+        const int seg = 24, rings = 8;
+        float rx = cw * 0.5f - 0.04f, rz = cl * 0.5f - 0.04f, H = 1.2f;
+        auto P = [&](int i, int j) {
+            float ph = (float)i / rings * PI * 0.5f, th = (float)j / seg * 2 * PI;
+            // a little squarer than a sphere, like poles bent over a square floor
+            float c = std::cos(th), s = std::sin(th);
+            float sq = 1.0f / std::pow(std::pow(std::fabs(c), 3.0f) + std::pow(std::fabs(s), 3.0f), 1.0f / 3.0f);
+            float r = std::cos(ph) * (0.75f + 0.25f * sq);
+            return at(cw * 0.5f + c * rx * r, cl * 0.5f - s * rz * r, H * std::sin(ph));
+        };
+        for (int i = 0; i < rings; ++i)
+            for (int j = 0; j < seg; ++j) {
+                // the door: a dark zipped panel low on the front (th around 90 deg = towards v = 0)
+                float th = (j + 0.5f) / seg * 2 * PI;
+                float toDoor = std::fabs(std::atan2(std::sin(th - PI * 0.5f), std::cos(th - PI * 0.5f)));
+                bool door = toDoor < 0.42f && i < 5;
+                Color c = door ? dark : shade(fab, (j / 3) % 2 ? 0.92f : 1.0f);   // sewn panels
+                if (i == rings - 1) c = shade(fab, 1.06f);
+                quad(P(i, j), P(i, j + 1), P(i + 1, j + 1), P(i + 1, j), c);
+            }
+        // two poles crossing over the top, corner to corner
+        for (int k = 0; k < 2; ++k) {
+            int j0 = seg / 8 + k * seg / 4;
+            for (int side = 0; side < 2; ++side) {
+                int j = j0 + side * seg / 2;
+                for (int i = 0; i < rings; ++i) {
+                    Vector3 a = P(i, j), b = P(i + 1, j);
+                    Vector3 oa = Vector3Add(a, Vector3Scale(Vector3Normalize(Vector3Subtract(a, mid)), 0.025f));
+                    Vector3 ob = Vector3Add(b, Vector3Scale(Vector3Normalize(Vector3Subtract(b, mid)), 0.025f));
+                    mb.tube(oa, ob, 0.018f, 0.018f, 5, pole, false);
+                }
+            }
+        }
+        // pegs at the corners
+        for (float u : {0.05f, cw - 0.05f})
+            for (float v : {0.05f, cl - 0.05f}) mb.tube(at(u, v, 0.0f), at(u, v, 0.12f), 0.015f, 0.01f, 4, peg);
     } else {
-        // a low tunnel: an A-frame along its length
-        bool alongX = t.rect.w > t.rect.h;
-        Vector3 c = V((x0 + x1) * 0.5f, 0, (z0 + z1) * 0.5f);
-        float len = alongX ? (x1 - x0) : (z1 - z0);
-        for (int side = -1; side <= 1; side += 2) {
-            float yaw = alongX ? 0 : PI * 0.5f;
-            drawPrim(cube_, V(c.x + (alongX ? 0 : side * 0.24f), 0.42f, c.z + (alongX ? side * 0.24f : 0)),
-                     V(alongX ? len - 0.1f : 0.04f, 0.95f, alongX ? 0.04f : len - 0.1f), 0,
-                     shade(fab, side < 0 ? 0.9f : 1.0f), alongX ? side * 0.55f : 0, alongX ? 0 : -side * 0.55f);
-            (void)yaw;
-        }
+        // a low tunnel: a ridge from a tall front (the door) down to a low back
+        float hf = 0.95f, hb = 0.55f, e = 0.04f;
+        Vector3 fl = at(e, e, 0), fr = at(cw - e, e, 0), bl = at(e, cl - e, 0), br = at(cw - e, cl - e, 0);
+        Vector3 rf = at(cw * 0.5f, 0.12f, hf), rb = at(cw * 0.5f, cl - 0.1f, hb);
+        quad(fl, rf, rb, bl, fab);                 // the two sides
+        quad(fr, rf, rb, br, shade(fab, 0.9f));
+        tri(bl, br, rb, shade(fab, 0.8f));         // back
+        tri(fl, fr, rf, fab);                      // front, with the door in it
+        Vector3 dl = at(cw * 0.5f - 0.24f, 0.07f, 0.02f), dr = at(cw * 0.5f + 0.24f, 0.07f, 0.02f), dt = at(cw * 0.5f, 0.1f, hf * 0.8f);
+        tri(dl, dr, dt, dark);
+        // the ridge pole, and pegs
+        mb.tube(Vector3Add(rf, V(0, 0.02f, 0)), Vector3Add(rb, V(0, 0.02f, 0)), 0.015f, 0.015f, 5, pole, false);
+        mb.tube(at(cw * 0.5f, -0.35f, 0.0f), rf, 0.008f, 0.008f, 3, hexColor(0xd8d4c8), false);   // guy line
+        for (float u : {0.03f, cw - 0.03f})
+            for (float v : {0.05f, cl - 0.05f}) mb.tube(at(u, v, 0.0f), at(u, v, 0.1f), 0.015f, 0.01f, 4, peg);
     }
+    Mesh m = mb.build();
+    return tentMeshes_[key] = m;
+}
+
+void Renderer::drawTent(const Tent& t, bool inside, Color fab) {
+    float x0 = (float)t.rect.x, z0 = (float)t.rect.y, x1 = (float)t.rect.right(), z1 = (float)t.rect.bottom();
+    // groundsheet (a round dome would show its square corners: only from inside)
+    if (inside || t.rect.w != t.rect.h)
+        drawPrim(cube_, V((x0 + x1) * 0.5f, 0.01f, (z0 + z1) * 0.5f), V(x1 - x0 - 0.05f, 0.02f, z1 - z0 - 0.05f), 0, shade(fab, 0.5f));
+    if (inside) return;   // inside it: see yourself
+    active_->maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    DrawMesh(tentMesh(t, fab), *active_, MatrixTranslate(x0, liftY_, z0));
 }
 
 void Renderer::drawStove(const Campfire& f, float time, bool shadowPass) {

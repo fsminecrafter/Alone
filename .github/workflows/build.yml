@@ -3,6 +3,7 @@ name: Build
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   linux:
@@ -64,3 +65,31 @@ jobs:
             build-web/alone.js
             build-web/alone.wasm
             build-web/alone.data
+      # The site for GitHub Pages: the game is the front page
+      - name: Prepare site
+        run: |
+          mkdir -p site
+          cp build-web/alone.js build-web/alone.wasm build-web/alone.data site/
+          cp build-web/alone.html site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Publishes the web version on GitHub Pages (pushes to the default branch only).
+  # One-time setup: repository Settings > Pages > Source: "GitHub Actions".
+  pages:
+    needs: web
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

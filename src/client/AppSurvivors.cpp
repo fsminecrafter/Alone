@@ -102,6 +102,7 @@ void App::openTalk(int id) {
 }
 
 void App::drawTalk() {
+    if (game_.player().asleep) { overlay_ = Overlay::None; return; }   // "Let's sleep now"
     Survivor* s = game_.survivor(talkTo_);
     if (!s || !game_.canTalk(talkTo_) || distance(s->pos, game_.player().pos) > game_.talkRange(talkTo_) + 3.0f) { overlay_ = Overlay::None; return; }
     float sc = ui::scale();

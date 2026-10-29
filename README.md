@@ -293,6 +293,10 @@ The output is `build-web/alone.html`, `.js`, `.wasm` and `.data` (the packed
 Saves and settings are kept in the browser's storage (IndexedDB). The browser
 only allows sound after your first click or key press.
 
+GitHub Actions builds the web version on every push and publishes it on GitHub
+Pages (https://fsminecrafter.github.io/Alone/) from the default branch. To turn
+that on once: repository Settings > Pages > Source: **GitHub Actions**.
+
 ### Options
 
 * `-DALONE_BUILD_CLIENT=OFF` builds only the backend library and tests (no graphics).

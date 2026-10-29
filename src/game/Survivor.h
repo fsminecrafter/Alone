@@ -133,6 +133,7 @@ struct Survivor {
     bool family = false, lover = false;
     int lastChatDay = -1;              // the day you last chatted (daily trust)
     int lastFlirtDay = -1, lastGiftDay = -1, lastJokeDay = -1, lastSorryDay = -1;
+    int lastTentHoldDay = -1, lastTentWhisperDay = -1;   // lovers, in a tent with you
     int storiesTold = 0;               // how much of `about` you've heard
     Bond shownBond = Bond::Stranger;   // last step announced in the log
     float companyMinutes = 0;          // travelling together: trust grows
@@ -160,6 +161,7 @@ struct Survivor {
 
 // What you can say in a conversation.
 enum class Topic { Chat, Others, Request, Give, Gift, Trade, Join, Follow, Wait, Dismiss, Bye, Parley, LetIn, PayOff, Threaten,
-                   About, Joke, Flirt, Confess, Family, Hug, Sorry, BackToSleep, Breakup, Kin };
+                   About, Joke, Flirt, Confess, Family, Hug, Sorry, BackToSleep, Breakup, Kin,
+                   TentSleep, TentHold, TentWhisper };
 
 } // namespace alone

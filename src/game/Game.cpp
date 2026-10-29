@@ -310,6 +310,9 @@ SleepComfort Game::sleepComfortIn(const Environment& env) {
     } else if (bed) add(0.45f, "a proper bed");
     else if (sofa) add(0.25f, "a soft sofa");
     else if (tent) add(-0.1f, "hard ground under the tent");
+    if (tentMate_)
+        if (Survivor* m = survivor(tentMate_); m && m->alive() && distance(m->pos, p.pos) < 2.0f)
+            add(m->bond() == Bond::Lover ? 0.25f : 0.08f, m->bond() == Bond::Lover ? m->def->name + " beside you" : "company in the tent");
     else if (inside) add(-0.15f, "a hard floor");
     else add(-0.3f, "the bare ground");
     bool soft = bed || sofa;
@@ -330,6 +333,15 @@ SleepComfort Game::sleepComfortIn(const Environment& env) {
     return c;
 }
 
+bool Game::inTentWith(int survivorId) {
+    if (!tentMate_ || tentMate_ != survivorId) return false;
+    Survivor* m = survivor(survivorId);
+    if (!m || !m->alive() || !m->joined) { tentMate_ = 0; return false; }
+    Tent* t = world_->tentAt(player_.pos);
+    if (!t || !t->rect.contains((int)std::floor(m->pos.x), (int)std::floor(m->pos.y))) { tentMate_ = 0; return false; }
+    return true;
+}
+
 void Game::sleepReport() {
     if (sleepMinutes_ >= 30) {
         float avg = sleepComfortSum_ / sleepMinutes_;
@@ -340,6 +352,7 @@ void Game::sleepReport() {
     }
     sleepStartMin_ = -1;
     sleepComfortSum_ = sleepMinutes_ = 0;
+    tentMate_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1528,9 +1541,35 @@ void Game::perform(const ActionOption& o) {
             return;
         }
         case ActionKind::Sleep: {
-            if (o.targetId != 0 && player_.vehicle < 0)   // crawling into a tent
+            if (o.targetId != 0 && player_.vehicle < 0) {   // crawling into a tent
+                const Tent* tent = nullptr;
                 for (const auto& t : world_->tents())
-                    if (t.id == o.targetId) player_.pos = t.rect.centre();
+                    if (t.id == o.targetId) tent = &t;
+                if (tent) {
+                    player_.pos = tent->rect.centre();
+                    // room for two: a companion nearby crawls in too, and you
+                    // talk before you sleep ("Let's sleep now")
+                    bool two = tent->rect.w * tent->rect.h >= 4;
+                    Survivor* mate = nullptr;
+                    for (auto& s : survivors_)
+                        if (two && s.joined && s.alive() && s.state != SurvivorState::Wait && distance(s.pos, player_.pos) < 20 &&
+                            (!mate || s.bond() > mate->bond()))
+                            mate = &s;
+                    if (mate) {
+                        const IRect& r = tent->rect;
+                        bool wide = r.w >= r.h;
+                        player_.pos = wide ? Vec2{r.x + r.w * 0.27f, r.y + r.h * 0.5f} : Vec2{r.x + r.w * 0.5f, r.y + r.h * 0.27f};
+                        mate->pos = wide ? Vec2{r.x + r.w * 0.73f, r.y + r.h * 0.5f} : Vec2{r.x + r.w * 0.5f, r.y + r.h * 0.73f};
+                        mate->vel = {};
+                        mate->path.clear();
+                        mate->nav.clear();
+                        tentMate_ = mate->id;
+                        talkRequest_ = mate->id;
+                        log(mate->def->name + " crawls in beside you.");
+                        return;
+                    }
+                }
+            }
             bool car = playerVehicle() && playerVehicle()->kind == VehicleKind::Car;
             if (car) if (Vehicle* v = playerVehicle()) v->speed = 0;
             player_.asleep = true;

@@ -141,7 +141,8 @@ private:
     void addRoadSurfaces(MeshBuilder& mb, World& world, int x0, int y0);
     void addPowerLines(MeshBuilder& mb, World& world, int x0, int y0);
     void addBuilt(MeshBuilder& mb, World& world, int x0, int y0);
-    void drawTent(const Tent& t, bool inside);
+    void drawTent(const Tent& t, bool inside, Color fabric);
+    const Mesh& tentMesh(const Tent& t, Color fabric);   // built once per shape, size, door side and colour
     void drawStove(const Campfire& f, float time, bool shadowPass);
     void drawBuildGhost(const HoverInfo& hover, float time);
 
@@ -163,6 +164,7 @@ private:
     void updateNpcRigs(Game& game, float time, float dt);
     void drawSurvivors(Game& game);
     std::unordered_map<int, Mesh> vehicleMeshes_;
+    std::unordered_map<uint64_t, Mesh> tentMeshes_;
     struct NpcGfx {
         CharacterRig rig;
         std::unique_ptr<CharacterModel> model;

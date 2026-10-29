@@ -205,6 +205,9 @@ public:
     std::vector<std::pair<Topic, std::string>> talkTopics(int id);
     // Why flirting isn't on offer right now (empty when it is, or it can't ever be)
     std::string romanceHint(int id);
+    // In a tent with a companion: who (0 if nobody)
+    int tentMate() const { return tentMate_; }
+    bool inTentWith(int survivorId);
     // Someone walked up to you and wants to talk (0 if nobody); taking it clears it
     int takeTalkRequest() { int id = talkRequest_; talkRequest_ = 0; return id; }
     // Say it; returns their answer
@@ -358,6 +361,7 @@ private:
     std::unique_ptr<World> world_;
     // This night's sleep: when it began, and how comfortable it has been
     int talkRequest_ = 0;
+    int tentMate_ = 0;               // the companion who crawled into the tent with you (survivor id)
     double sleepStartMin_ = -1;
     float sleepComfortSum_ = 0, sleepMinutes_ = 0;
     Player player_;

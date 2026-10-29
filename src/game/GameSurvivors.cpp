@@ -482,6 +482,7 @@ const char* bondKey(Bond b) {
 std::string Game::greeting(int id) {
     Survivor* s = survivor(id);
     if (!s) return "";
+    if (inTentWith(id) && !player_.asleep) return personal(line(std::string("tent_in.") + bondKey(s->bond())));
     const SurvivorDef& d = *s->def;
     bool hostile = d.disposition == Disposition::Hostile && !s->admitted;
     bool raider = d.disposition == Disposition::Raider;
@@ -594,6 +595,17 @@ std::vector<std::pair<Topic, std::string>> Game::talkTopics(int id) {
     if (b == Bond::Enemy) {
         if (s->lastSorryDay != today) out.push_back({Topic::Sorry, "I'm sorry. For whatever I did."});
         out.push_back({Topic::Bye, "(Leave them be.)"});
+        return out;
+    }
+    // Lying in the tent together
+    if (inTentWith(id) && !player_.asleep) {
+        out.push_back({Topic::TentSleep, "Let's sleep now."});
+        if (b == Bond::Lover) {
+            if (s->lastTentHoldDay != today) out.push_back({Topic::TentHold, "Come here. (Hold them close.)"});
+            if (s->lastTentWhisperDay != today) out.push_back({Topic::TentWhisper, "Tell me something. Anything. (Whisper in the dark.)"});
+        }
+        out.push_back({Topic::Chat, b >= Bond::Friend ? "So, how are you, really?" : "How are you holding up?"});
+        out.push_back({Topic::Bye, "(Not yet. Lie awake a while.)"});
         return out;
     }
     out.push_back({Topic::Chat, b >= Bond::Friend ? "So, how are you, really?" : "How are you holding up?"});
@@ -883,7 +895,29 @@ std::string Game::talk(int id, Topic t) {
             s->state = SurvivorState::Home;
             s->path.clear();
             return say(b == Bond::Lover ? line("dismiss.lover") : "I'll head home. You know where to find me.");
+        case Topic::TentSleep: {
+            if (!inTentWith(id)) return "";
+            std::string l = personal(line(std::string("tent_sleep.") + bondKey(b)));
+            ActionOption o;
+            o.kind = ActionKind::Sleep;
+            o.label = "Sleeping";
+            perform(o);
+            tentMate_ = s->id;   // still beside you
+            survivorSay(*s, l, false);
+            return l;
+        }
+        case Topic::TentHold:
+            s->lastTentHoldDay = today;
+            addTrust(*s, 2);
+            player_.body.mutableState().wetness = std::max(0.0f, player_.body.state().wetness - 0.1f);   // dry warmth
+            return personal(line("tent_hold.lover"));
+        case Topic::TentWhisper:
+            s->lastTentWhisperDay = today;
+            addTrust(*s, 2);
+            if (!d.loverChat.empty() && rng_.chance(0.4f)) return personal(pickLine(d.loverChat[rng_.rangeInt(0, (int)d.loverChat.size() - 1)], rng_));
+            return personal(line("tent_whisper.lover"));
         case Topic::Bye:
+            if (inTentWith(id)) return "Mm. Say when you're ready to sleep.";
             if (d.disposition == Disposition::Hostile && !s->admitted) {
                 // back to his post; he leaves you be for a while
                 if (s->state == SurvivorState::Alert) s->state = SurvivorState::Home;
