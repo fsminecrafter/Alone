@@ -78,7 +78,7 @@ if(ALONE_BUILD_CLIENT)
             -sUSE_GLFW=3 -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
             -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sSTACK_SIZE=5242880
             -sFORCE_FILESYSTEM=1 -lidbfs.js
-            -sEXPORTED_RUNTIME_METHODS=FS,IDBFS,addRunDependency,removeRunDependency,HEAPF32,HEAP32,HEAPU8,HEAP16,HEAP8
+            -sEXPORTED_RUNTIME_METHODS=FS,IDBFS,ENV,addRunDependency,removeRunDependency,HEAPF32,HEAP32,HEAPU8,HEAP16,HEAP8
             --preload-file ${CMAKE_SOURCE_DIR}/data@/data
             --pre-js ${CMAKE_SOURCE_DIR}/web/pre.js
             --shell-file ${CMAKE_SOURCE_DIR}/web/shell.html)

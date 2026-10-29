@@ -574,11 +574,22 @@ void Renderer::drawWeather(Game& game, float time) {
     };
     Vec2 windDir{0.8f, 0.6f};
     float slant = std::clamp(w.wind * 0.035f, 0.0f, 0.45f);
+    // Streaks and flakes go out as plain triangles, flushed in small batches.
+    // (Quads go through rlgl's shared index buffer on WebGL, where they came
+    // out as big white triangles in Chrome.)
+    int inBatch = 0;
+    auto quad = [&](Vector3 a, Color ca, Vector3 b, Color cb, Vector3 c2, Color cc, Vector3 d, Color cd) {
+        if (++inBatch > 500) { rlEnd(); rlDrawRenderBatchActive(); rlBegin(RL_TRIANGLES); inBatch = 1; }
+        auto v = [](Vector3 p, Color col) { rlColor4ub(col.r, col.g, col.b, col.a); rlVertex3f(p.x, p.y, p.z); };
+        v(a, ca); v(b, cb); v(c2, cc);
+        v(a, ca); v(c2, cc); v(d, cd);
+    };
+    rlTexCoord2f(0, 0);
     if (!snow) {
         // Streaks: thin quads facing the camera, faint at the top, slanting with the wind
         int drops = (int)(1400 * w.rain);
         float fallSpeed = 16.0f, height = 16.0f;
-        rlBegin(RL_QUADS);
+        rlBegin(RL_TRIANGLES);
         for (int i = 0; i < drops; ++i) {
             uint32_t h = hash32(i * 7919 + 1);
             float x = c.x + (hashFloat(h) - 0.5f) * span;
@@ -596,15 +607,12 @@ void Renderer::drawWeather(Game& game, float time) {
             Vector3 top = Vector3Add(bottom, Vector3Scale(dir, len));
             Vector3 side = Vector3Scale(Vector3Normalize(Vector3CrossProduct(dir, view)), px * 0.9f);
             unsigned char a = (unsigned char)(70 + 90 * w.rain * hashFloat(h + 13));
-            rlColor4ub(196, 212, 226, 0);
-            rlVertex3f(top.x - side.x, top.y - side.y, top.z - side.z);
-            rlColor4ub(196, 212, 226, a);
-            rlVertex3f(bottom.x - side.x, bottom.y - side.y, bottom.z - side.z);
-            rlVertex3f(bottom.x + side.x, bottom.y + side.y, bottom.z + side.z);
-            rlColor4ub(196, 212, 226, 0);
-            rlVertex3f(top.x + side.x, top.y + side.y, top.z + side.z);
+            Color clear{196, 212, 226, 0}, seen{196, 212, 226, a};
+            quad(Vector3Subtract(top, side), clear, Vector3Subtract(bottom, side), seen, Vector3Add(bottom, side), seen, Vector3Add(top, side), clear);
         }
         rlEnd();
+        rlDrawRenderBatchActive();
+        inBatch = 0;
         // Splashes: little rings spreading where the drops hit
         int splashes = (int)(260 * w.rain);
         const float life = 0.35f;
@@ -636,7 +644,7 @@ void Renderer::drawWeather(Game& game, float time) {
         float height = 14.0f;
         Vector3 right = Vector3Normalize(Vector3CrossProduct(view, V(0, 1, 0)));
         Vector3 up = Vector3CrossProduct(right, view);
-        rlBegin(RL_QUADS);
+        rlBegin(RL_TRIANGLES);
         for (int i = 0; i < flakes; ++i) {
             uint32_t h = hash32(i * 7919 + 3);
             float x = c.x + (hashFloat(h) - 0.5f) * span;
@@ -652,11 +660,9 @@ void Renderer::drawWeather(Game& game, float time) {
             Vector3 p = V(x, y, z);
             Vector3 a = Vector3Scale(right, r), b = Vector3Scale(up, r);
             unsigned char al = (unsigned char)(180 + 60 * hashFloat(h + 9));
-            rlColor4ub(246, 248, 252, al);
-            rlVertex3f(p.x - a.x - b.x, p.y - a.y - b.y, p.z - a.z - b.z);
-            rlVertex3f(p.x + a.x - b.x, p.y + a.y - b.y, p.z + a.z - b.z);
-            rlVertex3f(p.x + a.x + b.x, p.y + a.y + b.y, p.z + a.z + b.z);
-            rlVertex3f(p.x - a.x + b.x, p.y - a.y + b.y, p.z - a.z + b.z);
+            Color fc{246, 248, 252, al};
+            quad(V(p.x - a.x - b.x, p.y - a.y - b.y, p.z - a.z - b.z), fc, V(p.x + a.x - b.x, p.y + a.y - b.y, p.z + a.z - b.z), fc,
+                 V(p.x + a.x + b.x, p.y + a.y + b.y, p.z + a.z + b.z), fc, V(p.x - a.x + b.x, p.y - a.y + b.y, p.z - a.z + b.z), fc);
         }
         rlEnd();
     }

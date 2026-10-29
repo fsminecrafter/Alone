@@ -310,11 +310,12 @@ SleepComfort Game::sleepComfortIn(const Environment& env) {
     } else if (bed) add(0.45f, "a proper bed");
     else if (sofa) add(0.25f, "a soft sofa");
     else if (tent) add(-0.1f, "hard ground under the tent");
-    if (tentMate_)
-        if (Survivor* m = survivor(tentMate_); m && m->alive() && distance(m->pos, p.pos) < 2.0f)
-            add(m->bond() == Bond::Lover ? 0.25f : 0.08f, m->bond() == Bond::Lover ? m->def->name + " beside you" : "company in the tent");
     else if (inside) add(-0.15f, "a hard floor");
     else add(-0.3f, "the bare ground");
+    if (tentMate_) {
+        if (Survivor* m = survivor(tentMate_); m && m->alive() && distance(m->pos, p.pos) < 2.0f)
+            add(m->bond() == Bond::Lover ? 0.25f : 0.08f, m->bond() == Bond::Lover ? m->def->name + " beside you" : "company in the tent");
+    }
     bool soft = bed || sofa;
     bool bag = p.inventory.findTag("sleeping_bag") >= 0;
     if (p.inventory.findTag("pillow") >= 0) add(soft ? 0.05f : 0.2f, "your pillow");

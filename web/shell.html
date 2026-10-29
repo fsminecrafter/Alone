@@ -29,8 +29,8 @@
   var fill = document.getElementById('fill'), statusEl = document.getElementById('status');
   var Module = {
     canvas: document.getElementById('canvas'),
-    print: function (t) { console.log(t); },
-    printErr: function (t) { console.warn(t); },
+    print: function (t) { console.log(t); (window.__log = window.__log || []).push(t); },
+    printErr: function (t) { console.warn(t); (window.__log = window.__log || []).push(t); },
     setStatus: function (t) {
       if (!t) return;
       var m = t.match(/\((\d+(?:\.\d+)?)\/(\d+)\)/);
@@ -42,6 +42,17 @@
       Module.canvas.focus();
     }
   };
+  // For testing: alone.html?args=--screenshots&env=ALONE_SHOTS=game,camp
+  (function () {
+    var q = new URLSearchParams(location.search);
+    if (q.get('args')) Module.arguments = q.get('args').split(' ');
+    if (q.get('env')) {
+      Module.preRun = Module.preRun || [];
+      Module.preRun.push(function () {
+        q.get('env').split(';').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) ENV[kv.slice(0, i)] = kv.slice(i + 1); });
+      });
+    }
+  })();
   window.onerror = function (msg) { statusEl.textContent = 'Something went wrong: ' + msg; };
   // Fullscreen: the game asks, the next click or key press does it (browsers
   // only allow it from inside an input event)

@@ -834,11 +834,13 @@ void Renderer::drawSigns(Game& game, const std::vector<int>& buildingIds) {
             float light = sg.lit && power && day < 0.5f ? 1.0f : std::clamp(0.25f + day, 0.25f, 1.0f);
             unsigned char l = (unsigned char)(255 * light);
             rlSetTexture(st->second.tex.id);
-            rlBegin(RL_QUADS);
+            rlBegin(RL_TRIANGLES);   // not RL_QUADS: see drawWeather
             rlColor4ub(l, l, l, 255);
             rlNormal3f(nrm.x, nrm.y, nrm.z);
             rlTexCoord2f(0, 0); rlVertex3f(bl.x, bl.y, bl.z);
             rlTexCoord2f(1, 0); rlVertex3f(br.x, br.y, br.z);
+            rlTexCoord2f(1, 1); rlVertex3f(tr.x, tr.y, tr.z);
+            rlTexCoord2f(0, 0); rlVertex3f(bl.x, bl.y, bl.z);
             rlTexCoord2f(1, 1); rlVertex3f(tr.x, tr.y, tr.z);
             rlTexCoord2f(0, 1); rlVertex3f(tl.x, tl.y, tl.z);
             rlEnd();
