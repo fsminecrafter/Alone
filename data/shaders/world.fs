@@ -43,6 +43,8 @@ uniform float shadowTexel;
 uniform float brightness;    // player setting, 1 = neutral
 uniform float sheltered;     // 1 while drawing what stands under a roof: no snow or rain on it
 uniform float rainNow;       // how hard it's raining right now (ripples in puddles)
+uniform vec4 clipRect;       // x0, z0, x1, z1: inside it, nothing above clipY is drawn (CUTAWAY only)
+uniform float clipY;         // < -1e8: off. Upstairs it takes off the storeys above; in a basement, the house and the ground over it
 
 out vec4 finalColor;
 
@@ -199,6 +201,9 @@ void main() {
     // Only in the variant used for the few chunks between you and the camera:
     // a shader that may discard can't use the early depth test, so everything
     // else is drawn with the variant without it.
+    if (clipY > -1e8 && fragWorld.y > clipY && fragWorld.x > clipRect.x && fragWorld.x < clipRect.z &&
+        fragWorld.z > clipRect.y && fragWorld.z < clipRect.w)
+        discard;
     if (cutaway > 0.5 && cutRadius > 0.0) {
         vec3 rel = fragWorld - playerPos;
         float towardsCamera = -dot(rel, viewDir);

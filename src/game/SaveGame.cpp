@@ -141,7 +141,7 @@ public:
             }
         }
         o << "PLACES " << g.knownPlaces_.size() << '\n';
-        for (const auto& k : g.knownPlaces_) o << std::quoted(k.name) << ' ' << k.pos.x << ' ' << k.pos.y << '\n';
+        for (const auto& k : g.knownPlaces_) o << std::quoted(k.name) << ' ' << k.pos.x << ' ' << k.pos.y << ' ' << k.level << '\n';
         o << "END\n";
     }
 
@@ -403,7 +403,7 @@ public:
                 size_t np = 0;
                 in >> tag >> np;
                 g.knownPlaces_.clear();
-                for (size_t i = 0; i < np && in; ++i) { KnownPlace k; in >> std::quoted(k.name) >> k.pos.x >> k.pos.y; g.knownPlaces_.push_back(k); }
+                for (size_t i = 0; i < np && in; ++i) { KnownPlace k; in >> std::quoted(k.name) >> k.pos.x >> k.pos.y >> k.level; g.knownPlaces_.push_back(k); }
             }
         }
         // Saved before people had a bed: whatever they were doing, they're awake

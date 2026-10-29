@@ -288,6 +288,8 @@ void App::frame() {
             {1120.0f, 604.0f, 13, "screenshot_container.png", Overlay::None},
             {0, 0, 0, "screenshot_upstairs.png", Overlay::None},
             {0, 0, 0, "screenshot_basement.png", Overlay::None},
+            {0, 0, 0, "screenshot_floor2.png", Overlay::None},
+            {0, 0, 0, "screenshot_map_floor2.png", Overlay::Map},
             {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
             {0, 0, 0, "screenshot_settings_graphics.png", Overlay::Settings},
             {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
@@ -629,6 +631,24 @@ void App::frame() {
                         break;
                     }
             }
+            if ((file == "screenshot_floor2.png" || file == "screenshot_map_floor2.png") && sub == 0) {
+                // Maja asks for her notes: the hospital's floor 2, marked on the map
+                for (auto& sv : game_.survivors())
+                    if (sv.def->id == "maja") { game_.player().pos = sv.pos + Vec2{1, 0}; game_.greeting(sv.id); game_.talk(sv.id, Topic::Request); }
+                int hosp = game_.baseBuildingAt("at:3589,2663");
+                if (int top = game_.ensureFloor(hosp, 2); top >= 0) {
+                    const Building* f = game_.world().building(top);
+                    if (f && !f->stairs.empty()) {
+                        const Stair& st = f->stairs[0];
+                        game_.player().pos = Vec2{st.x + 0.5f, st.y + 1.5f};
+                        if (game_.world().tileBlocked(st.x, st.y + 1)) game_.player().pos = Vec2{st.x + 1.5f, st.y + 0.5f};
+                    }
+                    renderer_.snapTo(game_.player().pos);
+                }
+                mapLayer_ = 2;
+                mapCentre_ = {0, 0};
+                mapZoom_ = 6;
+            }
             if (file == "screenshot_journal_lore.png" && sub == 0) {
                 for (const char* id : {"un_meeting", "the_breach", "the_tests", "the_farm"}) game_.learnLore(id, false);
                 journalTab_ = 1;
@@ -746,6 +766,7 @@ void App::shutdownApp() {
     sound_.shutdown();
     if (audio_) CloseAudioDevice();
     if (mapReady_) UnloadTexture(mapTex_);
+    if (logoReady_) UnloadRenderTexture(logoRT_);
     renderer_.shutdown();
     input::shutdown();
     ui::shutdown();
@@ -872,7 +893,10 @@ void App::updatePlaying(float dt) {
     bool blocking = overlay_ == Overlay::Pause || overlay_ == Overlay::Settings || overlay_ == Overlay::Help || overlay_ == Overlay::Map;
     if (!blocking || overlay_ == Overlay::Map) {
         if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I)) { overlay_ = overlay_ == Overlay::Inventory ? Overlay::None : Overlay::Inventory; menu_.open = false; }
-        if (IsKeyPressed(KEY_M)) overlay_ = overlay_ == Overlay::Map ? Overlay::None : Overlay::Map;
+        if (IsKeyPressed(KEY_M)) {
+            overlay_ = overlay_ == Overlay::Map ? Overlay::None : Overlay::Map;
+            mapLayer_ = game_.floorLevel();   // the map opens on the floor you're on
+        }
         if (IsKeyPressed(KEY_N)) { settings_.minimap = !settings_.minimap; saveSettings(); }
         if (IsKeyPressed(KEY_H)) overlay_ = overlay_ == Overlay::Health ? Overlay::None : Overlay::Health;
         if (IsKeyPressed(KEY_J)) overlay_ = overlay_ == Overlay::Journal ? Overlay::None : Overlay::Journal;
@@ -999,12 +1023,63 @@ bool App::interactTarget(ActionOption& out) {
 // Menu screens
 // ---------------------------------------------------------------------------
 
+// The title, ALONE, with an A that has no crossbar (a capital lambda). Drawn
+// once at 256 px into a texture, so it stays sharp at any size; it slowly
+// breathes in and out of focus: shifted copies spread and gather while the
+// sharp one fades and comes back.
+void App::drawLogo(float x, float y, float height) {
+    if (!logoReady_) {
+        // one font per letter: at this size raylib's atlas for all five overflows
+        const int cps[] = {0x039B, 'L', 'O', 'N', 'E'};
+        Font fonts[5];
+        float spacing = 28, width = 0;
+        for (int k = 0; k < 5; ++k) {
+            int cp = cps[k];
+            fonts[k] = LoadFontEx(Paths::data("fonts/DejaVuSans-Bold.ttf").c_str(), 256, &cp, 1);
+            width += fonts[k].glyphs[0].advanceX + (k < 4 ? spacing : 0);
+        }
+        int pad = 24;
+        logoRT_ = LoadRenderTexture((int)width + pad * 2, 256 + pad * 2);
+        BeginTextureMode(logoRT_);
+        ClearBackground(BLANK);
+        float pen = (float)pad;
+        for (int k = 0; k < 5; ++k) {
+            DrawTextCodepoint(fonts[k], cps[k], {pen, (float)pad}, 256, WHITE);
+            pen += fonts[k].glyphs[0].advanceX + spacing;
+        }
+        EndTextureMode();
+        for (auto& f : fonts) UnloadFont(f);
+        GenTextureMipmaps(&logoRT_.texture);
+        SetTextureFilter(logoRT_.texture, TEXTURE_FILTER_TRILINEAR);
+        logoReady_ = true;
+    }
+    const Texture2D& t = logoRT_.texture;
+    float k = height / (float)t.height;
+    Rectangle src{0, 0, (float)t.width, -(float)t.height};   // render textures are upside down
+    Rectangle dst{x, y, t.width * k, t.height * k};
+    float breath = 0.5f + 0.5f * std::sin((float)GetTime() * 2.0f * PI / 6.0f);   // one breath every six seconds
+    float blur = (1.0f + 7.0f * breath) * height / 112.0f;
+    Color ink{236, 232, 222, 255};
+    // the soft glow: copies in two rings round the letters
+    for (int ring = 1; ring <= 2; ++ring)
+        for (int i = 0; i < 12; ++i) {
+            float a = i * 2.0f * PI / 12 + ring * 0.26f;
+            float r = blur * ring * 0.5f;
+            Rectangle d = dst;
+            d.x += std::cos(a) * r;
+            d.y += std::sin(a) * r;
+            DrawTexturePro(t, src, d, {0, 0}, 0, Fade(ink, (0.05f + 0.06f * breath) / ring));
+        }
+    // the letters themselves, sharper as the glow gathers in
+    DrawTexturePro(t, src, dst, {0, 0}, 0, Fade(ink, 1.0f - 0.55f * breath));
+}
+
 void App::drawMenu() {
     float s = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
     DrawRectangleGradientH(0, 0, (int)(W * 0.55f), (int)H, Color{0, 0, 0, 210}, Color{0, 0, 0, 0});
     float x = 70 * s, y = H * 0.22f;
-    ui::text("ALONE", x, y, 96 * s, ui::theme().text, true);
+    drawLogo(x - 6 * s, y - 14 * s, 112 * s);
     ui::text("Alingsås, Västra Götaland. Autumn.", x + 4 * s, y + 100 * s, 22 * s, ui::theme().accent);
     ui::paragraph("Everyone is gone. Find food, keep warm, stay healthy. Your body will tell you when something is wrong - "
                   "but not what.", x + 4 * s, y + 140 * s, 460 * s, 17 * s, ui::theme().dim);
@@ -2294,7 +2369,7 @@ void App::drawMap() {
     float mpp = m.metresPerPixel();
     Rectangle area{20 * s, 20 * s, W - 40 * s, H - 40 * s};
     ui::panel(area, Color{30, 32, 34, 250});
-    if (mapCentre_.x == 0 && mapCentre_.y == 0) mapCentre_ = {game_.player().pos.x / mpp, game_.player().pos.y / mpp};
+    if (mapCentre_.x == 0 && mapCentre_.y == 0) { Vec2 sp = surfacePos(game_.player().pos); mapCentre_ = {sp.x / mpp, sp.y / mpp}; }
     if (ui::hovered(area)) {
         float wheel = GetMouseWheelMove();
         if (wheel != 0) mapZoom_ = std::clamp(mapZoom_ * (wheel > 0 ? 1.2f : 1 / 1.2f), 0.6f, 12.0f);
@@ -2453,14 +2528,39 @@ void App::drawMap() {
         bool ring = !((sv.met && !roams) || sv.joined || !sv.alive());
         ui::text(label, sp.x + (ring ? 20 : 9) * s, ly, 14 * s, c, true);
     }
-    // Places people told you about
+    // Another floor: the town fades back, the floors you know show their rooms
+    if (mapLayer_ != 0) {
+        DrawRectangleRec(area, Color{18, 20, 24, 175});
+        for (const auto& b : game_.world().gen().allBuildings()) {
+            if (b.levelOf < 0 || b.level != mapLayer_) continue;
+            float off = (float)floorOffset(b.level);
+            auto rectOf = [&](const IRect& r) {
+                Vector2 a = toScreen((r.x - off) / mpp, r.y / mpp), c = toScreen((r.right() - off) / mpp, r.bottom() / mpp);
+                return Rectangle{a.x, a.y, c.x - a.x, c.y - a.y};
+            };
+            Rectangle br = rectOf(b.rect);
+            DrawRectangleRec(br, mapLayer_ < 0 ? Color{120, 120, 116, 255} : Color{214, 206, 190, 255});
+            for (const auto& room : b.rooms) DrawRectangleLinesEx(rectOf(room.rect), 1.0f, Color{90, 84, 76, 255});
+            DrawRectangleLinesEx(br, 2.0f * s, Color{60, 56, 50, 255});
+            for (const auto& st : b.stairs) {   // stairs: up and down
+                Vector2 c = toScreen((st.x + 0.5f - off) / mpp, (st.y + 0.5f) / mpp);
+                float q = std::max(3.0f * s, 0.6f * k / mpp * 1.5f);
+                if (st.dir > 0) DrawTriangle({c.x, c.y - q}, {c.x - q, c.y + q}, {c.x + q, c.y + q}, Color{60, 110, 170, 255});
+                else DrawTriangle({c.x - q, c.y - q}, {c.x, c.y + q}, {c.x + q, c.y - q}, Color{170, 90, 50, 255});
+            }
+        }
+    }
+    // Places people told you about (bright on their own floor)
     for (const auto& kp : game_.knownPlaces()) {
         Vector2 sp = toScreen(kp.pos.x / mpp, kp.pos.y / mpp);
+        bool here = kp.level == mapLayer_;
         float r = 9 * s;
-        DrawPoly(sp, 4, r + 2 * s, 45, Color{250, 248, 240, 255});
-        DrawPoly(sp, 4, r, 45, Color{90, 110, 60, 255});
-        ui::text(kp.name, sp.x + r + 6 * s, sp.y - 8 * s, 14 * s, Color{60, 80, 40, 255}, true);
-        if (CheckCollisionPointCircle(GetMousePosition(), sp, r + 4 * s)) ui::tooltip(kp.name, "Someone told you where this is.");
+        DrawPoly(sp, 4, r + 2 * s, 45, Fade(Color{250, 248, 240, 255}, here ? 1.0f : 0.45f));
+        DrawPoly(sp, 4, r, 45, Fade(kp.level != 0 ? Color{170, 90, 140, 255} : Color{90, 110, 60, 255}, here ? 1.0f : 0.45f));
+        std::string label = kp.name + (kp.level != 0 ? std::string(" (") + floorName(kp.level) + ")" : "");
+        ui::text(label, sp.x + r + 6 * s, sp.y - 8 * s, 14 * s, here ? (mapLayer_ != 0 ? Color{240, 220, 230, 255} : Color{60, 80, 40, 255}) : Color{110, 110, 110, 200}, true);
+        if (CheckCollisionPointCircle(GetMousePosition(), sp, r + 4 * s))
+            ui::tooltip(kp.name, std::string("Someone told you where this is.") + (kp.level != 0 ? std::string("\nOn the map's ") + floorName(kp.level) + " layer." : ""));
     }
     // You are here
     Vec2 pp = surfacePos(game_.player().pos);   // upstairs / in a basement: where the building is
@@ -2471,8 +2571,22 @@ void App::drawMap() {
     EndScissorMode();
     ui::text("Alingsås", area.x + 16 * s, area.y + 12 * s, 26 * s, Color{40, 40, 44, 255}, true);
     ui::text("Drag to pan, wheel to zoom, M to close", area.x + 16 * s, area.y + 44 * s, 14 * s, Color{60, 60, 64, 255});
+    // Layers: one per floor
+    {
+        static const int layers[] = {-1, 0, 1, 2};
+        float bx = area.x + area.width - 16 * s;
+        for (int i = 3; i >= 0; --i) {
+            const char* name = floorName(layers[i]);
+            float w = ui::measure(name, 14 * s, true).x + 22 * s;
+            bx -= w + 6 * s;
+            Rectangle tb{bx, area.y + 12 * s, w, 30 * s};
+            if (ui::button(tb, name, true, 14)) mapLayer_ = layers[i];
+            if (layers[i] == mapLayer_) DrawRectangle((int)tb.x, (int)(tb.y + tb.height - 3 * s), (int)tb.width, (int)(3 * s), ui::theme().accent);
+            if (layers[i] == game_.floorLevel()) DrawCircle((int)(tb.x + 8 * s), (int)(tb.y + 8 * s), 3 * s, Color{200, 40, 40, 255});   // you're here
+        }
+    }
     if (m.hasElevation()) {   // the contour lines are 5 m apart
-        float here = m.elevation(game_.player().pos.x, game_.player().pos.y);
+        float here = game_.world().standHeight(game_.player().pos);
         ui::text(fmt("You are %.0f m above sea level. Contours every 5 m.", here), area.x + 16 * s, area.y + 64 * s, 14 * s,
                  Color{60, 60, 64, 255});
     }

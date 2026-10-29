@@ -396,9 +396,18 @@ Run it last.
 
 * Procedural Swedish countryside beyond the map edge (Västra Bodarna and the
   rest of Mjörn's shore; its orienteering map is waiting)
-* Upper floors, basements, more building types (farms, summer cottages)
-* Carpentry skill levels, more to build (stairs, shelves, drying racks)
-* Trapping more animals, preserving food (smoking, drying, salting)
+* Done: upper floors (up to floor 2) and basements, drawn in place so you can
+  see out; farms and summer cottages; carpentry skill levels, shelves, drying
+  racks and box traps; snares, fish traps and more animals; drying, smoking
+  and salting food; military equipment and armour; map layers per floor; a
+  new title logo; winter clothes, Swedish pantry food, tools and trade goods
+* Floors above floor 2 for tall buildings, and other people using stairs
+* More uses for what you find: sharpening, sewing, smoking tobacco to trade
+* Seasons: snow on the ground all winter, ice on the lakes you can walk on
+* Vehicles that break down and can be repaired; boats on Mjörn
+* Crafting with pelts (fur hats, mittens), and a simple workbench
+* Radio messages from the bunker and from other survivors outside Alingsås
+* The rest of the story: who at Veyra Systems is still alive, and where
 
 ## License
 

@@ -533,17 +533,29 @@ std::vector<int> WorldGen::buildingsIn(const IRect& r) {
     return std::vector<int>(ids.begin(), ids.end());
 }
 
+int WorldGen::findLevel(int baseId, int level) const {
+    auto it = levels_.find((int64_t)baseId * 8 + (level + 1));
+    return it == levels_.end() ? -1 : it->second;
+}
+
 int WorldGen::levelBuilding(int baseId, int level) {
-    if (baseId < 0 || baseId >= (int)buildings_.size() || level == 0) return -1;
-    int64_t key = (int64_t)baseId * 4 + (level + 1);
+    if (baseId < 0 || baseId >= (int)buildings_.size() || level == 0 || level < -1 || level > kMaxUpperFloor) return -1;
+    int64_t key = (int64_t)baseId * 8 + (level + 1);
     auto it = levels_.find(key);
     if (it != levels_.end()) return it->second;
-    const Building& base = buildings_[(size_t)baseId];
-    bool any = false;
-    for (const auto& s : base.stairs) any |= (s.dir > 0) == (level > 0);
-    if (!any) return -1;
-    int off = floorOffset(level);
+    if (buildings_[(size_t)baseId].levelOf >= 0) return -1;
+    int topFloor = std::min(kMaxUpperFloor, buildings_[(size_t)baseId].floors - 1);
+    if (level > topFloor) return -1;
+    // the floor you come from, and the stairs that lead here from it
+    int belowId = level >= 2 ? levelBuilding(baseId, level - 1) : baseId;   // (may add to buildings_)
+    if (belowId < 0) return -1;
+    const Building base = buildings_[(size_t)baseId];
+    const Building below = buildings_[(size_t)belowId];
+    int fromOff = floorOffset(below.levelOf >= 0 ? below.level : 0), off = floorOffset(level);
     Building f;
+    for (const auto& s : below.stairs)
+        if ((s.dir > 0) == (level > 0)) f.stairs.push_back({s.x - fromOff + off, s.y, -s.dir, s.main});
+    if (f.stairs.empty()) return -1;
     f.type = base.type;
     f.shop = base.shop;
     f.rect = IRect{base.rect.x + off, base.rect.y, base.rect.w, base.rect.h};
@@ -551,11 +563,9 @@ int WorldGen::levelBuilding(int baseId, int level) {
     f.seed = hash3(baseId, level, 0xF1004, seed_);
     f.levelOf = baseId;
     f.level = level;
+    f.stairsOnUp = level > 0 && level < topFloor;
     f.osm = base.osm;
     f.levels = 1;
-    // the same staircases, the other way
-    for (const auto& s : base.stairs)
-        if ((s.dir > 0) == (level > 0)) f.stairs.push_back({s.x + off, s.y, -s.dir, s.main});
     layout(f);
     // no way out up here (or down there) but the stairs; no windows underground
     for (auto& e : f.edges) {
@@ -570,7 +580,7 @@ int WorldGen::levelBuilding(int baseId, int level) {
     f.shopFront = false;
     f.sign.clear();
     f.floor = level < 0 ? Ground::FloorConcrete : base.floor;
-    f.floorY = base.floorY + (level > 0 ? 3.0f : -3.0f);
+    f.floorY = base.floorY + 3.0f * level;
     f.doorPos = f.stairs.empty() ? f.rect.centre() : Vec2{f.stairs[0].x + 0.5f, f.stairs[0].y + 0.5f};
     f.id = (int)buildings_.size();
     buildings_.push_back(std::move(f));
@@ -1279,10 +1289,18 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
             }
         }
         // the staircases that lead here, exactly above (below) the ones downstairs
-        for (const auto& st : b.stairs) {
+        std::vector<Stair> came = b.stairs;
+        for (const auto& st : came) {
             blocked.erase(tileKey(st.x, st.y));
             place(st.x, st.y, st.dir > 0 ? Prop::StairsUp : Prop::StairsDown, 2);
         }
+        // the stairwell goes on up: stairs up right beside the ones you came by
+        if (b.stairsOnUp)
+            for (const auto& st : came) {
+                static const int nx[4] = {1, -1, 0, 0}, ny[4] = {0, 0, 1, -1};
+                for (int k = 0; k < 4; ++k)
+                    if (place(st.x + nx[k], st.y + ny[k], Prop::StairsUp, 2)) { b.stairs.push_back({st.x + nx[k], st.y + ny[k], 1, st.main}); break; }
+            }
     } else if (!b.isOutbuilding && b.stairs.empty()) {
         bool home = b.type == BuildingType::House || b.type == BuildingType::Farmhouse || b.type == BuildingType::Manor;
         bool corridor = b.type == BuildingType::Apartment || b.type == BuildingType::Office || b.type == BuildingType::School ||

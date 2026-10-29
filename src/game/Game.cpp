@@ -150,7 +150,7 @@ std::vector<ActiveSymptom> Game::currentSymptoms() const {
 std::string Game::location() const {
     std::string district = map_.districtAt(surfacePos(player_.pos));
     int level = floorLevelAt(player_.pos.x);
-    std::string floorWord = level > 0 ? "Upstairs: " : level < 0 ? "Basement: " : "";
+    std::string floorWord = level != 0 ? std::string(floorName(level)) + ": " : "";
     int tx = (int)std::floor(player_.pos.x), ty = (int)std::floor(player_.pos.y);
     const Tile& t = world_->tile(tx, ty);
     if (t.building >= 0) {
@@ -470,7 +470,51 @@ void Game::updateDryingRacks(float gameMinutes) {
     }
 }
 
-int Game::ensureFloor(int baseId, int level) { return world_->ensureFloor(baseId, level); }
+int Game::ensureFloor(int baseId, int level) {
+    // the floors on the way up get made too
+    size_t before = world_->gen().allBuildings().size();
+    int id = world_->ensureFloor(baseId, level);
+    if (id >= 0 && world_->gen().allBuildings().size() != before)
+        for (int l = level > 0 ? 1 : level; l <= level; ++l)
+            if (int fid = world_->gen().findLevel(baseId, l); fid >= 0) placeStoryItems(fid);
+    return id;
+}
+
+// Things the story put on an upper floor or in a basement (a survivor's
+// want_place): into a cabinet or desk on that floor, found when you search it
+void Game::placeStoryItems(int floorId) {
+    const Building* f = world_->building(floorId);
+    if (!f || f->levelOf < 0) return;
+    for (const auto& s : survivors_) {
+        const SurvivorDef& d = *s.def;
+        if (d.wantPlace.empty() || d.wantPlaceLevel != f->level || d.wantItem.empty() || d.wantItem.rfind("tag:", 0) == 0) continue;
+        if (baseBuildingAt(d.wantPlace) != f->levelOf) continue;
+        // a cabinet or desk, as far from the stairs as the floor allows
+        const Furniture* best = nullptr;
+        float bestD = -1;
+        Vec2 stairs = f->stairs.empty() ? f->rect.centre() : Vec2{f->stairs[0].x + 0.5f, f->stairs[0].y + 0.5f};
+        for (const auto& fu : f->furniture) {
+            if (fu.container.empty()) continue;
+            bool good = fu.prop == Prop::MedicalCabinet || fu.prop == Prop::Desk || fu.prop == Prop::Bookshelf || fu.prop == Prop::Locker;
+            float dd = distance(Vec2{fu.x + 0.5f, fu.y + 0.5f}, stairs) + (good ? 100.0f : 0.0f);
+            if (dd > bestD) { bestD = dd; best = &fu; }
+        }
+        if (!best) continue;
+        world_->container(best->x, best->y).items.push_back(items_.create(d.wantItem, rng_));
+        storySpots_[d.id] = KnownPlace{d.wantPlaceName, surfacePos(Vec2{best->x + 0.5f, best->y + 0.5f}), f->level};
+    }
+}
+
+int Game::baseBuildingAt(const std::string& spec) {
+    if (spec.rfind("at:", 0) != 0) return -1;
+    auto parts = split(spec.substr(3), ':');
+    auto xy = split(parts.empty() ? std::string() : parts[0], ',');
+    if (xy.size() != 2) return -1;
+    Vec2 p{(float)std::atof(xy[0].c_str()), (float)std::atof(xy[1].c_str())};
+    for (int id : world_->gen().buildingsIn(IRect{(int)p.x - 2, (int)p.y - 2, 4, 4}))
+        if (const Building* b = world_->building(id); b && b->levelOf < 0 && b->rect.contains((int)p.x, (int)p.y)) return id;
+    return -1;
+}
 
 bool Game::knowsPlace(const std::string& name) const {
     for (const auto& k : knownPlaces_) if (k.name == name) return true;
@@ -1423,7 +1467,8 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
         } else {
             bool up = t.prop == Prop::StairsUp;
             o.kind = ActionKind::UseStairs;
-            o.label = up ? (level < 0 ? "Go up to the ground floor" : "Go upstairs") : (level > 0 ? "Go downstairs" : "Go down to the basement");
+            o.label = up ? (level < 0 ? "Go up to the ground floor" : level == 0 ? "Go upstairs" : "Go up to floor " + std::to_string(level + 1))
+                         : (level > 0 ? (level == 1 ? "Go down to the ground floor" : "Go down to floor " + std::to_string(level - 1)) : "Go down to the basement");
         }
         out.push_back(o);
     }
@@ -2400,8 +2445,8 @@ void Game::finishAction() {
                     s.nav.clear();
                 }
             sound(Sfx::Door, player_.pos);
-            log(to > from ? (to > 0 ? "You climb the stairs." : "You climb back up to the ground floor.")
-                          : (to < 0 ? "You go down into the basement. It smells of damp and old potatoes." : "You go back downstairs."));
+            log(to > from ? (to > 0 ? std::string("You climb the stairs to ") + lower(floorName(to)) + "." : "You climb back up to the ground floor.")
+                          : (to < 0 ? "You go down into the basement. It smells of damp and old potatoes." : std::string("You go down to the ") + lower(floorName(to)) + "."));
             break;
         }
         case ActionKind::RepairStairs: {

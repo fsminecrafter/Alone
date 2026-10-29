@@ -99,8 +99,8 @@ const char* const kUniformNames[] = {
     "sunDir", "sunColor", "ambientColor", "skyColor", "playerPos", "viewDir", "cutRadius", "cutaway", "lights", "lightColors",
     "lightCount", "time", "fogColor", "fogStart", "fogEnd", "unlit", "spotPos", "spotDir", "spotOn", "snow", "wet", "emissive",
     "lampGlow", "visionCone", "facing", "lightVP", "shadowMap", "shadowOn", "shadowTexel", "brightness", "wallCut",
-    "sheltered", "rainNow", "wallFloor"};
-static_assert(sizeof(kUniformNames) / sizeof(kUniformNames[0]) == 34, "one name per Renderer::Uni");
+    "sheltered", "rainNow", "wallFloor", "clipRect", "clipY"};
+static_assert(sizeof(kUniformNames) / sizeof(kUniformNames[0]) == 36, "one name per Renderer::Uni");
 }
 
 // Uniforms go to both world programs, so either can draw at any time
@@ -298,7 +298,8 @@ void Renderer::faceTowards(Vec2 dir) {
 }
 
 void Renderer::follow(Vec2 target, float dt) {
-    if (distance(target, target_) > 60.0f) { snapTo(target); return; }   // stairs to another floor, a long jump: cut
+    target = surfacePos(target);   // on an upper floor / in a basement: over (under) its building
+    if (distance(target, target_) > 60.0f) { snapTo(target); return; }   // a long jump: cut
     float k = std::min(1.0f, dt * 8.0f);
     target_ = target_ + (target - target_) * k;
     yaw_ += (yawTarget_ - yaw_) * std::min(1.0f, dt * 10.0f);
@@ -306,10 +307,11 @@ void Renderer::follow(Vec2 target, float dt) {
 }
 
 void Renderer::snapTo(Vec2 target) {
-    target_ = target;
+    float y = world_ ? world_->standHeight(target) : 0.0f;
+    target_ = surfacePos(target);
     yaw_ = yawTarget_;
     snapY_ = true;
-    if (world_) targetY_ = world_->standHeight(target);
+    if (world_) targetY_ = y;
     updateCamera();
 }
 
@@ -330,14 +332,31 @@ Vec2 Renderer::pickGround(Vector2 mouse) {
         if (i > 0 && distance(p, q) < 0.02f) { p = q; break; }
         p = q;
         if (!world_) break;
-        // around an upper floor or a basement there's nothing: treat it as level with the floor you're on
-        if (floorLevelAt(p.x) != 0 && world_->tile((int)std::floor(p.x), (int)std::floor(p.y)).ground == Ground::Void) h = targetY_;
-        else h = world_->standHeight(p);
+        h = viewHeight(p);
     }
     return p;
 }
 
+// Ground height as you see it: over your building, the floor you're on
+float Renderer::viewHeight(Vec2 p) const {
+    if (viewLevel_ != 0 && world_) {
+        Vec2 q{p.x + viewOffset_, p.y};
+        if (world_->tile((int)std::floor(q.x), (int)std::floor(q.y)).ground != Ground::Void) return world_->standHeight(q);
+    }
+    return world_ ? world_->standHeight(p) : 0.0f;
+}
+
 Vec2 Renderer::pick(Vector2 mouse, World& world) {
+    Vec2 out = pickOnMap(mouse, world);
+    // pointing at something on your floor: that's where it really is
+    if (viewLevel_ != 0) {
+        Vec2 q{out.x + viewOffset_, out.y};
+        if (world.tile((int)std::floor(q.x), (int)std::floor(q.y)).ground != Ground::Void) return q;
+    }
+    return out;
+}
+
+Vec2 Renderer::pickOnMap(Vector2 mouse, World& world) {
     Ray r = GetScreenToWorldRay(mouse, cam_);
     Vec2 g = pickGround(mouse);
     float best = 1e9f;
@@ -345,12 +364,13 @@ Vec2 Renderer::pick(Vector2 mouse, World& world) {
     int gx = (int)std::floor(g.x), gy = (int)std::floor(g.y);
     for (int y = gy - 4; y <= gy + 4; ++y)
         for (int x = gx - 4; x <= gx + 4; ++x) {
-            const Tile& t = world.tile(x, y);
+            int fx = viewLevel_ != 0 && world.tile(x + (int)viewOffset_, y).ground != Ground::Void ? x + (int)viewOffset_ : x;
+            const Tile& t = world.tile(fx, y);
             if (t.prop == Prop::None) continue;
             float h = std::min(propHeight(t.prop), 2.2f);
             if (h < 0.3f) continue;
             float inset = isTree(t.prop) ? 0.3f : 0.05f;
-            float gy = world.standHeight(Vec2{x + 0.5f, y + 0.5f});
+            float gy = world.standHeight(Vec2{fx + 0.5f, y + 0.5f});
             BoundingBox bb{{x + inset, gy, y + inset}, {x + 1 - inset, gy + h, y + 1 - inset}};
             RayCollision c = GetRayCollisionBox(r, bb);
             if (c.hit && c.distance < best) { best = c.distance; out = Vec2{x + 0.5f, y + 0.5f}; }
@@ -360,6 +380,7 @@ Vec2 Renderer::pick(Vector2 mouse, World& world) {
 
 Vector2 Renderer::toScreen(Vec2 p, float h) const {
     float gy = world_ ? world_->standHeight(p) : 0.0f;
+    p = surfacePos(p);   // something on an upper floor / in a basement: shown where its building is
     return GetWorldToScreen(Vector3{p.x, gy + h, p.y}, cam_);
 }
 
@@ -441,8 +462,9 @@ void Renderer::setLighting(Game& game, float time, const std::vector<LightSrc>& 
     uni(USky, &sky, SHADER_UNIFORM_VEC3);
 
     const Player& p = game.player();
-    Vector3 pp = V(p.pos.x, playerY_ + 1.0f, p.pos.y);
+    Vector3 pp = V(playerPos_.x, playerY_ + 1.0f, playerPos_.y);
     uni(UPlayer, &pp, SHADER_UNIFORM_VEC3);
+    setClip(false);
     Vector3 view = Vector3Normalize(Vector3Subtract(cam_.target, cam_.position));
     uni(UViewDir, &view, SHADER_UNIFORM_VEC3);
     float cut = 3.2f, on = 1.0f;
@@ -462,7 +484,7 @@ void Renderer::setLighting(Game& game, float time, const std::vector<LightSrc>& 
     uni(UFacing, &facing, SHADER_UNIFORM_VEC2);
 
     float spotOn = p.flashlightOn ? 1.0f : 0.0f;
-    Vector3 spotPos = V(p.pos.x, playerY_ + 1.3f, p.pos.y);
+    Vector3 spotPos = V(playerPos_.x, playerY_ + 1.3f, playerPos_.y);
     Vector3 spotDir = Vector3Normalize(V(std::cos(p.facing), -0.35f, std::sin(p.facing)));
     uni(USpotOn, &spotOn, SHADER_UNIFORM_FLOAT);
     uni(USpotPos, &spotPos, SHADER_UNIFORM_VEC3);
@@ -614,9 +636,19 @@ void Renderer::drawStatic(Game& game, const std::vector<DrawItem>& chunks, const
     if (!shadowPass) cutBuildings_.clear();
     for (const auto& d : blds) {
         int id = d.building;
+        if (id == floorBase_ && viewLevel_ < 0) continue;   // in its basement: the house over you is left out
         ids.push_back(id);
         auto it = buildings_.find(id);
         if (it == buildings_.end()) continue;
+        if (id == floorBase_) {
+            // upstairs: the storey under you and nothing above (your floor is drawn in its place)
+            const BuildingGfx& bg = it->second;
+            if (!shadowPass) setSheltered(true);
+            if (bg.hasWallsLow) DrawMesh(bg.wallsLow, m, identity);
+            else if (bg.hasWalls) DrawMesh(bg.walls, m, identity);
+            if (!shadowPass) setSheltered(false);
+            continue;
+        }
         if (!shadowPass) setEmissive(power_ && world.buildingLightsOn(id) ? windowGlow_ : V(0, 0, 0));
         // Inside it, or it stands between you and the camera: only the ground
         // floor, no roof, and the walls in front of you cut down to a low
@@ -651,24 +683,85 @@ void Renderer::drawStatic(Game& game, const std::vector<DrawItem>& chunks, const
     active_ = &mat_;
 }
 
+void Renderer::setClip(bool on) {
+    const Building* b = on && world_ ? world_->building(floorBase_) : nullptr;
+    float y = b ? b->floorY - 0.05f : -1e9f;
+    Vector4 r = b ? Vector4{(float)b->rect.x, (float)b->rect.y, (float)b->rect.right(), (float)b->rect.bottom()} : Vector4{0, 0, 0, 0};
+    uni(UClipRect, &r, SHADER_UNIFORM_VEC4);
+    uni(UClipY, &y, SHADER_UNIFORM_FLOAT);
+}
+
 void Renderer::drawScene(Game& game, float time) {
     passCam_ = cam_;
     passAspect_ = aspect_;
     drawStatic(game, viewChunks_, viewBuildings_, false);
+    // Your floor, moved from its band to where it really is
+    if (viewLevel_ != 0) {
+        rlPushMatrix();
+        rlTranslatef(-viewOffset_, 0, 0);
+        cullShift_ = viewOffset_;
+        drawStatic(game, levelChunks_, levelBuildings_, false);
+        cullShift_ = 0;
+        rlPopMatrix();
+        // on floor 2: the walls of floor 1 between you and the ground floor
+        for (int l = 1; l < viewLevel_; ++l) {
+            auto it = buildings_.find(world_->gen().findLevel(floorBase_, l));
+            if (it == buildings_.end() || !it->second.hasWalls) continue;
+            rlPushMatrix();
+            rlTranslatef(-(float)floorOffset(l), 0, 0);
+            setSheltered(true);
+            DrawMesh(it->second.walls, mat_, MatrixIdentity());
+            setSheltered(false);
+            rlPopMatrix();
+        }
+    }
     // Where something still hides you, a faint outline of you shows through
+    if (viewLevel_ != 0) { rlPushMatrix(); rlTranslatef(-viewOffset_, 0, 0); }
     drawSilhouette();
+    if (viewLevel_ != 0) rlPopMatrix();
     active_ = &mat_;
-    drawEntities(game, time, false);
+    drawBands(game, time, false);
     // The ground last: whatever stands on it has already covered part of it
     Matrix identity = MatrixIdentity();
     // Entities leave their own tint on the material (a dark jacket would
     // otherwise darken the whole ground)
     mat_.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    matCut_.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    // In a basement, the ground over it is cut away so you can see down in
+    const Building* cellar = viewLevel_ < 0 && world_ ? world_->building(floorBase_) : nullptr;
+    if (cellar) setClip(true);
     for (const auto& d : viewChunks_)
         if (d.chunk->hasGround) {
-            DrawMesh(d.chunk->ground, mat_, identity);
+            bool over = cellar && d.chunk->mx.x > cellar->rect.x && d.chunk->mn.x < cellar->rect.right() &&
+                        d.chunk->mx.z > cellar->rect.y && d.chunk->mn.z < cellar->rect.bottom();
+            DrawMesh(d.chunk->ground, over ? matCut_ : mat_, identity);
             prof_.verts += d.chunk->ground.vertexCount;
         }
+    if (cellar) setClip(false);
+    if (viewLevel_ != 0) {
+        rlPushMatrix();
+        rlTranslatef(-viewOffset_, 0, 0);
+        for (const auto& d : levelChunks_)
+            if (d.chunk->hasGround) DrawMesh(d.chunk->ground, mat_, identity);
+        rlPopMatrix();
+    }
+}
+
+// Things on the map, then (upstairs / in a basement) the things on your floor, moved into place
+void Renderer::drawBands(Game& game, float time, bool shadowPass) {
+    band_ = 0;
+    bandPos_ = playerPos_;
+    drawEntities(game, time, shadowPass);
+    if (viewLevel_ != 0) {
+        band_ = viewLevel_;
+        bandPos_ = shadowPlayer_;
+        rlPushMatrix();
+        rlTranslatef(-viewOffset_, 0, 0);
+        drawEntities(game, time, shadowPass);
+        rlPopMatrix();
+        band_ = 0;
+        bandPos_ = playerPos_;
+    }
 }
 
 #ifndef __EMSCRIPTEN__
@@ -773,7 +866,7 @@ void Renderer::renderShadows(Game& game, float time) {
     passAspect_ = 1.0f;
     active_ = &depthMat_;
     depthMat_.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-    drawEntities(game, time, true);
+    drawBands(game, time, true);
     active_ = &mat_;
     EndMode3D();
     rlEnableBackfaceCulling();
@@ -859,12 +952,18 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     double tStart = GetTime();
     World& world = game.world();
     world_ = &world;
-    playerPos_ = game.player().pos;
-    currentBuilding_ = world.tile((int)std::floor(playerPos_.x), (int)std::floor(playerPos_.y)).building;
+    shadowPlayer_ = game.player().pos;
+    viewLevel_ = floorLevelAt(shadowPlayer_.x);
+    viewOffset_ = (float)floorOffset(viewLevel_);
+    playerPos_ = surfacePos(shadowPlayer_);
+    currentBuilding_ = world.tile((int)std::floor(shadowPlayer_.x), (int)std::floor(shadowPlayer_.y)).building;
+    floorBase_ = -1;
+    if (viewLevel_ != 0)
+        if (const Building* fb = world.building(currentBuilding_)) floorBase_ = fb->levelOf;
     updatePlayerRig(game, time, dt);
     updateNpcRigs(game, time, dt);
     // The camera looks at the ground the player stands on, easing over steps
-    float ty = world.standHeight(target_);
+    float ty = viewHeight(target_);
     if (snapY_ || std::fabs(ty - targetY_) > 6.0f) targetY_ = ty;
     else targetY_ += (ty - targetY_) * std::min(1.0f, dt * 5.0f);
     snapY_ = false;
@@ -883,12 +982,14 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
 
     struct Need { int cx, cy; float d; };
     std::vector<Need> needs;
+    int bandShift = (int)viewOffset_ / kChunkSize;   // the floor's band, the same area moved over
+    for (int pass = 0; pass < (viewLevel_ != 0 ? 2 : 1); ++pass)
     for (int cy = cy0; cy <= cy1; ++cy)
-        for (int cx = cx0; cx <= cx1; ++cx) {
+        for (int cx = cx0 + pass * bandShift; cx <= cx1 + pass * bandShift; ++cx) {
             auto it = chunks_.find(tileKey(cx, cy));
             Chunk* c = world.chunkIfLoaded(cx, cy);
             if (it == chunks_.end() || !c || it->second.version != c->version) {
-                float d = distance(Vec2{(cx + 0.5f) * kChunkSize, (cy + 0.5f) * kChunkSize}, playerPos_);
+                float d = distance(Vec2{(cx - pass * bandShift + 0.5f) * kChunkSize, (cy + 0.5f) * kChunkSize}, playerPos_);
                 needs.push_back({cx, cy, d});
             }
         }
@@ -902,7 +1003,8 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     }
     for (auto it = chunks_.begin(); it != chunks_.end();) {
         int cx = (int)(it->first >> 32), cy = (int)(uint32_t)it->first;
-        if (cx < cx0 - 2 || cx > cx1 + 2 || cy < cy0 - 2 || cy > cy1 + 2) { unloadChunk(it->second); it = chunks_.erase(it); }
+        bool inBand = viewLevel_ != 0 && cx >= cx0 + bandShift - 2 && cx <= cx1 + bandShift + 2 && cy >= cy0 - 2 && cy <= cy1 + 2;
+        if (!inBand && (cx < cx0 - 2 || cx > cx1 + 2 || cy < cy0 - 2 || cy > cy1 + 2)) { unloadChunk(it->second); it = chunks_.erase(it); }
         else ++it;
     }
 
@@ -911,6 +1013,9 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
         for (int cx = cx0; cx <= cx1; ++cx)
             if (Chunk* c = world.chunkIfLoaded(cx, cy))
                 for (int id : c->buildings) buildingIds.push_back(id);
+    if (viewLevel_ != 0 && currentBuilding_ >= 0) buildingIds.push_back(currentBuilding_);   // your floor
+    for (int l = 1; l < viewLevel_; ++l)   // and the floors between it and the ground
+        if (int id = world.gen().findLevel(floorBase_, l); id >= 0) buildingIds.push_back(id);
     std::sort(buildingIds.begin(), buildingIds.end());
     buildingIds.erase(std::unique(buildingIds.begin(), buildingIds.end()), buildingIds.end());
     int built = 0;
@@ -962,6 +1067,16 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
         float depth;
         if (inView(cam_, aspect_, it->second.boxMin, it->second.boxMax, &depth)) viewBuildings_.push_back({nullptr, id, depth});
     }
+    // Your floor: its chunks (the floor itself) and the building, drawn moved into place
+    levelChunks_.clear();
+    levelBuildings_.clear();
+    if (viewLevel_ != 0) {
+        for (auto& [key, g] : chunks_) {
+            int cx = (int)(key >> 32);
+            if (cx * kChunkSize >= 15000 && floorLevelAt((float)(cx * kChunkSize)) == viewLevel_) levelChunks_.push_back({&g, -1, 0});
+        }
+        if (buildings_.count(currentBuilding_)) levelBuildings_.push_back({nullptr, currentBuilding_, 0});
+    }
     auto nearFirst = [](const DrawItem& a, const DrawItem& b) { return a.depth < b.depth; };
     std::sort(viewChunks_.begin(), viewChunks_.end(), nearFirst);
     std::sort(viewBuildings_.begin(), viewBuildings_.end(), nearFirst);
@@ -988,13 +1103,13 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
         }
     }
     const Player& p = game.player();
-    if (p.flashlightOn) lights.push_back({V(p.pos.x + std::cos(p.facing) * 0.6f, playerY_ + 1.2f, p.pos.y + std::sin(p.facing) * 0.6f), 3.0f, V(1, 0.95f, 0.85f), 0.6f});
+    if (p.flashlightOn) lights.push_back({V(playerPos_.x + std::cos(p.facing) * 0.6f, playerY_ + 1.2f, playerPos_.y + std::sin(p.facing) * 0.6f), 3.0f, V(1, 0.95f, 0.85f), 0.6f});
     Vector3 ctr = V(target_.x, targetY_, target_.y);
     std::sort(lights.begin(), lights.end(), [&](const LightSrc& a, const LightSrc& b) {
         return Vector3DistanceSqr(a.pos, ctr) < Vector3DistanceSqr(b.pos, ctr);
     });
     if (1.0f - day > 0.3f)
-        lights.insert(lights.begin(), LightSrc{V(p.pos.x, playerY_ + 2.0f, p.pos.y), 12.0f, V(0.32f, 0.38f, 0.55f), (1.0f - day) * 0.5f});
+        lights.insert(lights.begin(), LightSrc{V(playerPos_.x, playerY_ + 2.0f, playerPos_.y), 12.0f, V(0.32f, 0.38f, 0.55f), (1.0f - day) * 0.5f});
 
     for (int id : buildingIds) {
         auto it = buildings_.find(id);
@@ -1017,7 +1132,7 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     }
     if (scaled && sceneRT_.id) BeginTextureMode(sceneRT_);
     else scaled = false;
-    ClearBackground(floorLevelAt(playerPos_.x) != 0 ? Color{12, 12, 14, 255} : skyColor_);   // upstairs / in a basement: nothing outside
+    ClearBackground(skyColor_);
     BeginMode3D(cam_);
     drawScene(game, time);
     sync();
@@ -1026,7 +1141,9 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     for (const auto& d : viewBuildings_) visibleIds.push_back(d.building);
     drawSigns(game, visibleIds);
     rlDisableBackfaceCulling();
+    if (floorLevelAt(hover.point.x) != 0) { rlPushMatrix(); rlTranslatef(-(float)floorOffset(floorLevelAt(hover.point.x)), 0, 0); }
     drawCursor(game, hover, time);
+    if (floorLevelAt(hover.point.x) != 0) rlPopMatrix();
     rlEnableBackfaceCulling();
     if (opts_.weather) drawWeather(game, time);
     EndMode3D();

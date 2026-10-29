@@ -56,9 +56,14 @@ struct Stair {
 // Upper floors and basements live off the edge of the map, one band each, so
 // every system (walls, loot, light) works on them unchanged. A floor is at
 // its building's ground floor + this offset in x.
-constexpr int kUpperFloorOffset = 20000, kBasementOffset = 40000;
-inline int floorLevelAt(float x) { return x >= 35000 ? -1 : x >= 15000 ? 1 : 0; }
-inline int floorOffset(int level) { return level > 0 ? kUpperFloorOffset : level < 0 ? kBasementOffset : 0; }
+// Levels: -1 basement, 0 ground floor, 1 and 2 upper floors.
+constexpr int kUpperFloorOffset = 20000, kBasementOffset = 40000, kSecondFloorOffset = 60000;
+constexpr int kMaxUpperFloor = 2;
+inline int floorLevelAt(float x) { return x >= 55000 ? 2 : x >= 35000 ? -1 : x >= 15000 ? 1 : 0; }
+inline int floorOffset(int level) {
+    return level == 2 ? kSecondFloorOffset : level == 1 ? kUpperFloorOffset : level < 0 ? kBasementOffset : 0;
+}
+inline const char* floorName(int level) { return level == 2 ? "Floor 2" : level == 1 ? "Floor 1" : level < 0 ? "Basement" : "Ground floor"; }
 // Where a point on an upper floor / in a basement is on the map
 inline Vec2 surfacePos(Vec2 p) { return Vec2{p.x - floorOffset(floorLevelAt(p.x)), p.y}; }
 
@@ -100,7 +105,8 @@ struct Building {
     float floorY = 0;            // height of the ground floor above sea level (level on any slope)
     std::vector<Stair> stairs;   // up and down from this floor
     int levelOf = -1;            // an upper floor / basement: the building it belongs to
-    int level = 0;               // +1 upstairs, -1 the basement
+    int level = 0;               // +1 / +2 upstairs, -1 the basement
+    bool stairsOnUp = false;     // an upper floor with another above it: stairs up next to the ones you came by
 
     const Room* roomAt(int x, int y) const;
     const Furniture* furnitureAt(int x, int y) const;

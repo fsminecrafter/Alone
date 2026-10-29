@@ -24,6 +24,7 @@ public:
     // The floor above (+1) or the basement (-1) of a building, made the first
     // time someone takes the stairs (-1 if it has none)
     int levelBuilding(int baseId, int level);
+    int findLevel(int baseId, int level) const;   // -1 if not made (yet)
     // (baseId, level) of every floor made so far, to make them again after loading
     std::vector<std::pair<int, int>> madeLevels() const;
 

@@ -75,6 +75,10 @@ struct SurvivorDef {
     std::string reveal;                // place spec, as for home
     std::string revealName, revealText;
     int revealTrust = 30;
+    // Where the thing they want is, if the story put it somewhere (marked on
+    // your map when they ask you for it): at:x,y spec, which floor, a name
+    std::string wantPlace, wantPlaceName;
+    int wantPlaceLevel = 0;
     // Who they tell you about once they trust you a little
     std::vector<std::string> leads;
     std::string leadText;

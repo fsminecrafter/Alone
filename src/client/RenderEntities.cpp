@@ -321,6 +321,7 @@ void Renderer::drawBlood(float time) {
     if (bloodDrops_.empty()) return;
     (void)time;
     for (const auto& d : bloodDrops_) {
+        if (floorLevelAt(d.pos.x) != band_) continue;
         // fresh blood is bright, it dries dark; rain thins it out
         Color c = mixColor(Color{120, 10, 10, 255}, Color{58, 20, 16, 255}, std::min(1.0f, d.age / 120.0f));
         float r = d.size * (0.4f + 0.6f * std::max(0.0f, d.amount));
@@ -490,7 +491,9 @@ void Renderer::drawDoors(World& world, const std::vector<int>& ids, bool mainPas
 
 void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
     World& w = game.world();
-    Vec2 pp = game.player().pos;
+    Vec2 pp = bandPos_;   // (drawBands: first the map, then your floor)
+    auto here = [&](Vec2 p) { return floorLevelAt(p.x) == band_; };
+    if (band_ == 0)
     for (const auto& a : game.animals().animals()) {
         if (a.butchered || distance(a.pos, pp) > 90) continue;
         liftY_ = w.standHeight(a.pos);
@@ -501,7 +504,7 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
         for (const auto& [key, stack] : w.allGroundItems()) {
             if (stack.empty()) continue;
             int x = (int)(key >> 32), y = (int)(uint32_t)key;
-            if (std::abs(x - pp.x) > 70 || std::abs(y - pp.y) > 70) continue;
+            if (std::abs(x - pp.x) > 70 || std::abs(y - pp.y) > 70 || !here(Vec2{(float)x, (float)y})) continue;
             liftY_ = w.standHeight(Vec2{x + 0.5f, y + 0.5f});
             for (size_t i = 0; i < stack.size() && i < 5; ++i) {
                 float ox = 0.25f + 0.22f * (i % 3), oz = 0.3f + 0.35f * (i / 3);
@@ -510,13 +513,14 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
         }
     }
     for (const auto& t : w.tents())
-        if (distance(t.rect.centre(), pp) < 90) {
+        if (band_ == 0 && distance(t.rect.centre(), pp) < 90) {
             liftY_ = w.standHeight(t.rect.centre());
             const ItemDef* td = game.items().find(t.item);
             drawTent(t, !shadowPass && t.rect.contains((int)std::floor(pp.x), (int)std::floor(pp.y)), hexColor(td ? td->colour : 0x4a7a3a));
         }
     liftY_ = 0;
     for (const auto& f : w.campfires()) {
+        if (!here(f.pos)) continue;
         liftY_ = w.standHeight(f.pos);
         if (f.stove) { if (distance(f.pos, pp) < 90) drawStove(f, time, shadowPass); continue; }
         if (distance(f.pos, pp) > 80) continue;
@@ -540,7 +544,7 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
         }
     }
     for (const auto& s : w.snares()) {
-        if (distance(s.pos, pp) > 60) continue;
+        if (distance(s.pos, pp) > 60 || !here(s.pos)) continue;
         if (s.kind == TrapKind::BoxTrap) continue;   // a built prop
         liftY_ = w.standHeight(s.pos);
         if (s.kind == TrapKind::FishTrap) {   // a net funnel half under water, and its marker stick
@@ -554,8 +558,9 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
     }
     liftY_ = 0;
     if (!shadowPass) drawBlood(time);
-    drawVehicles(game, shadowPass);
+    if (band_ == 0) drawVehicles(game, shadowPass);
     drawSurvivors(game);
+    if (!here(game.player().pos)) return;
     const Vehicle* ride = game.playerVehicle();
     drawCharacter(playerRig_, playerModel_, game.player().worn, &game.player().body,
                   game.weapon() && !ride ? game.weapon()->def : nullptr, game.stowedWeapon() && !ride ? game.stowedWeapon()->def : nullptr);
@@ -565,7 +570,7 @@ void Renderer::drawWeather(Game& game, float time) {
     World& world = game.world();
     const Weather& w = world.clock().weather();
     if (w.rain <= 0.01f) return;
-    if (floorLevelAt(game.player().pos.x) != 0) return;   // upstairs or in a basement: indoors
+    if (floorLevelAt(game.player().pos.x) < 0) return;   // in a basement: no sky (upstairs you see it fall outside)
     bool snow = w.kind == WeatherKind::Snow;
     rlDrawRenderBatchActive();
     rlDisableDepthMask();      // see-through: streaks don't hide each other

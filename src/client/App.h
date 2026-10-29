@@ -158,6 +158,7 @@ private:
     Rectangle dollRect_{};           // the worn-clothes figure (drop clothes here to put them on)
     ItemRef selected_{};             // item shown in the details strip
     int healthTab_ = 0;
+    int mapLayer_ = 0;               // which floor the map shows: -1 basement .. 2
     int journalTab_ = 0;             // 0 people, 1 what happened
     float journalScroll_ = 0;
     std::string loreFocus_;          // the entry you just read: scrolled to and lit              // 0 body, 1 info
@@ -171,6 +172,10 @@ private:
 
     // map
     Texture2D mapTex_{};
+    // The title: ALONE with a crossbarless A, drawn big once into a texture
+    RenderTexture2D logoRT_{};
+    bool logoReady_ = false;
+    void drawLogo(float x, float y, float height);
     bool mapReady_ = false;
     Vector2 mapCentre_{};
     float mapZoom_ = 1;

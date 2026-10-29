@@ -72,7 +72,7 @@ TEST(houses_have_stairs_up_and_down) {
     const Building* floor = g.world().buildingAt((int)g.player().pos.x, (int)g.player().pos.y);
     CHECK(floor && floor->levelOf == baseId && floor->level == 1);
     CHECK(g.world().tile(up.x + kUpperFloorOffset, up.y).prop == Prop::StairsDown);
-    CHECK(g.location().rfind("Upstairs", 0) == 0);
+    CHECK(g.location().rfind("Floor 1", 0) == 0);
     CHECK(!g.world().tileBlocked((int)g.player().pos.x, (int)g.player().pos.y));
     std::printf("    upstairs: %s\n", g.location().c_str());
     // no way out but the stairs
@@ -284,4 +284,56 @@ TEST(farms_and_summer_cottages) {
             }
     std::printf("    %d farmhouses, %d barns, %d summer cottages\n", farms, barns, cottages);
     CHECK(farms >= 5 && cottages >= 5 && barns >= 3);
+}
+
+TEST(majas_notes_on_the_hospitals_top_floor) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* maja = find(g, "maja");
+    CHECK(maja != nullptr);
+    if (!maja) return;
+    g.player().pos = maja->pos + Vec2{1, 0};
+    g.greeting(maja->id);
+    g.talk(maja->id, Topic::Request);
+    // marked on the map, on the floor 2 layer
+    const KnownPlace* mark = nullptr;
+    for (const auto& k : g.knownPlaces()) if (k.name == "Maja's lab notes") mark = &k;
+    CHECK(mark && mark->level == 2);
+    if (!mark) return;
+    int hospital = g.baseBuildingAt("at:3589,2663");
+    CHECK(hospital >= 0);
+    int top = g.world().gen().findLevel(hospital, 2);
+    CHECK(top >= 0 && g.world().gen().findLevel(hospital, 1) >= 0);
+    // the notes are in a cabinet up there, where the mark is
+    const Building* f = g.world().building(top);
+    bool found = false;
+    if (f)
+        for (const auto& fu : f->furniture) {
+            if (fu.container.empty()) continue;
+            for (const auto& it : g.world().container(fu.x, fu.y).items)
+                if (it.def->id == "lab_notes" && distance(surfacePos(Vec2{fu.x + 0.5f, fu.y + 0.5f}), mark->pos) < 1.0f) found = true;
+        }
+    CHECK(found);
+    // and you can walk up there: ground -> floor 1 -> floor 2
+    const Building* h = g.world().building(hospital);
+    Stair up{};
+    for (const auto& s : h->stairs) if (s.dir > 0 && g.world().tile(s.x, s.y).prop == Prop::StairsUp) up = s;
+    CHECK(up.dir > 0);
+    auto climb = [&](int x, int y) {
+        static const int dx[4] = {0, 1, 0, -1}, dy[4] = {1, 0, -1, 0};
+        for (int k = 0; k < 4; ++k)
+            if (!g.world().tileBlocked(x + dx[k], y + dy[k])) { g.player().pos = Vec2{x + dx[k] + 0.5f, y + dy[k] + 0.5f}; break; }
+        for (auto& o : g.actionsAt(Vec2{x + 0.5f, y + 0.5f}))
+            if (o.kind == ActionKind::UseStairs && o.enabled) { g.perform(o); finish(g); return; }
+    };
+    climb(up.x, up.y);
+    CHECK(g.floorLevel() == 1);
+    const Building* f1 = g.world().building(g.world().gen().findLevel(hospital, 1));
+    Stair up2{};
+    if (f1) for (const auto& s : f1->stairs) if (s.dir > 0) up2 = s;
+    CHECK(up2.dir > 0);
+    climb(up2.x, up2.y);
+    CHECK(g.floorLevel() == 2);
+    std::printf("    %s; notes marked at %.0f,%.0f\n", g.location().c_str(), mark->pos.x, mark->pos.y);
 }

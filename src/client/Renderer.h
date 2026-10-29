@@ -124,7 +124,11 @@ private:
     // The camera of the pass being drawn (the view, or the sun for shadows)
     Camera3D passCam_{};
     float passAspect_ = 1.0f, aspect_ = 1.0f;
-    bool partVisible(const Part& p) const { return inView(passCam_, passAspect_, p.mn, p.mx); }
+    // (cullShift_: while drawing your floor moved into place from its band)
+    bool partVisible(const Part& p) const {
+        return inView(passCam_, passAspect_, Vector3{p.mn.x - cullShift_, p.mn.y, p.mn.z}, Vector3{p.mx.x - cullShift_, p.mx.y, p.mx.z});
+    }
+    float cullShift_ = 0;
     bool nearSightLine(Vector3 mn, Vector3 mx) const;   // could stand between you and the camera
     uint64_t buildingStamp(World& world, const Building& b);
     void unloadBuilding(BuildingGfx& g);
@@ -232,7 +236,7 @@ private:
         USunDir, USunColor, UAmbient, USky, UPlayer, UViewDir, UCutRadius, UCutaway, ULights, ULightColors,
         ULightCount, UTime, UFogColor, UFogStart, UFogEnd, UUnlit, USpotPos, USpotDir, USpotOn, USnow, UWet, UEmissive,
         ULampGlow, UVision, UFacing, ULightVP, UShadowMap, UShadowOn, UShadowTexel, UBrightness, UWallCut,
-        USheltered, URainNow, UWallFloor, UCount
+        USheltered, URainNow, UWallFloor, UClipRect, UClipY, UCount
     };
     int loc_[2][UCount]{};
     void uni(Uni u, const void* value, int type, int count = 1);
@@ -255,6 +259,20 @@ private:
     Color skyColor_{};
     Vec2 playerPos_;
     int currentBuilding_ = -1;
+    // Upstairs / in a basement: the floor (kept off the map, see Building.h)
+    // is drawn moved into place over (under) its building, which is cut down
+    // to its ground floor (or left out, with the ground over the basement).
+    int viewLevel_ = 0;              // 0 ground, +1 upstairs, -1 basement
+    float viewOffset_ = 0;           // x of the floor's band
+    int floorBase_ = -1;             // the building whose floor you're on
+    Vec2 shadowPlayer_;              // where the player really is (in the floor's band)
+    int band_ = 0;                   // what drawEntities draws: things on the map (0) or on your floor
+    Vec2 bandPos_;                   // the player's position in that band
+    std::vector<DrawItem> levelChunks_, levelBuildings_;
+    void setClip(bool on);           // the clip box over your building (see world.fs)
+    void drawBands(Game& game, float time, bool shadowPass);
+    float viewHeight(Vec2 p) const;  // ground height as seen: over your building, your floor
+    Vec2 pickOnMap(Vector2 mouse, World& world);
     Vector3 lampGlow_{0, 0, 0}, windowGlow_{0, 0, 0};
     float dark_ = 0;
     bool power_ = true;

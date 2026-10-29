@@ -120,6 +120,9 @@ bool Game::loadSurvivors(const std::string& path) {
         d.revealName = s.str("reveal_name", "a place");
         d.revealText = s.str("reveal_text");
         d.revealTrust = s.integer("reveal_trust", 30);
+        d.wantPlace = s.str("want_place");
+        d.wantPlaceLevel = s.integer("want_place_level", 0);
+        d.wantPlaceName = s.str("want_place_name", "What " + d.name + " asked for");
         d.leads = s.list("leads");
         d.leadText = s.str("lead_text");
         d.canJoin = s.flag("can_join");
@@ -864,11 +867,25 @@ std::string Game::talk(int id, Topic t) {
         }
         case Topic::Request:
             s->requestKnown = true;
+            // the story put it somewhere: make that floor (and the item on it) and mark it on your map
+            if (!d.wantPlace.empty() && !s->requestDone && !knowsPlace(d.wantPlaceName)) {
+                int base = baseBuildingAt(d.wantPlace);
+                if (base >= 0 && ensureFloor(base, d.wantPlaceLevel) >= 0) {
+                    auto spot = storySpots_.find(d.id);
+                    if (spot != storySpots_.end()) {
+                        knownPlaces_.push_back(spot->second);
+                        log("Marked on your map (M), " + lower(floorName(spot->second.level)) + ": " + spot->second.name + ".", MessageKind::Good);
+                    }
+                }
+            }
             return say(d.wantText);
         case Topic::Give: {
             if (countFor(d.wantItem) < d.wantCount) return "You don't have it.";
             takeFor(d.wantItem, d.wantCount);
             s->requestDone = true;
+            // found: its mark comes off the map
+            knownPlaces_.erase(std::remove_if(knownPlaces_.begin(), knownPlaces_.end(),
+                                              [&](const KnownPlace& k) { return k.name == d.wantPlaceName; }), knownPlaces_.end());
             addTrust(*s, 40);
             std::string got;
             for (const auto& [rid, n] : d.reward)

@@ -166,7 +166,8 @@ struct LoreEntry {
 // A place someone told you about, marked on the map
 struct KnownPlace {
     std::string name;
-    Vec2 pos;
+    Vec2 pos;                    // on the map
+    int level = 0;               // which floor: -1 basement, 0 ground, 1-2 upstairs
 };
 
 struct DeathInfo {
@@ -310,6 +311,8 @@ public:
     // Upper floors and basements: the floor made (if needed), the way there
     int ensureFloor(int baseId, int level);
     int floorLevel() const { return floorLevelAt(player_.pos.x); }
+    void placeStoryItems(int floorId);
+    int baseBuildingAt(const std::string& spec);   // the building at an at:x,y spec
     static const std::vector<BuildRecipe>& buildRecipes();
     static const BuildRecipe* recipe(BuildKind k);
     bool canAffordBuild(BuildKind k, std::string* why) const;
@@ -424,6 +427,7 @@ private:
     std::vector<LoreEntry> lore_;
     std::vector<std::string> loreKnown_;
     std::vector<KnownPlace> knownPlaces_;
+    std::map<std::string, KnownPlace> storySpots_;   // survivor id -> where their story item lies
     std::string loreOpened_;               // the companion who crawled into the tent with you (survivor id)
     double sleepStartMin_ = -1;
     float sleepComfortSum_ = 0, sleepMinutes_ = 0;

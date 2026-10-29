@@ -300,7 +300,7 @@ const Mesh& Renderer::vehicleMesh(const Vehicle& v) {
 void Renderer::drawVehicles(Game& game, bool shadowPass) {
     (void)shadowPass;
     World& w = game.world();
-    Vec2 pp = game.player().pos;
+    Vec2 pp = surfacePos(game.player().pos);
     for (const auto& v : game.vehicles()) {
         if (distance(v.pos, pp) > 100) continue;
         float y = w.standHeight(v.pos);
@@ -327,9 +327,9 @@ void Renderer::drawVehicles(Game& game, bool shadowPass) {
 
 void Renderer::updateNpcRigs(Game& game, float time, float dt) {
     World& w = game.world();
-    Vec2 pp = game.player().pos;
+    Vec2 pp = surfacePos(game.player().pos);
     for (const auto& s : game.survivors()) {
-        float d = distance(s.pos, pp);
+        float d = distance(surfacePos(s.pos), pp);
         if (d > 90) continue;
         NpcGfx& g = npcs_[s.id];
         if (!g.init) {
@@ -405,9 +405,9 @@ void Renderer::updateNpcRigs(Game& game, float time, float dt) {
 }
 
 void Renderer::drawSurvivors(Game& game) {
-    Vec2 pp = game.player().pos;
+    Vec2 pp = bandPos_;
     for (const auto& s : game.survivors()) {
-        if (distance(s.pos, pp) > 90) continue;
+        if (floorLevelAt(s.pos.x) != band_ || distance(s.pos, pp) > 90) continue;
         auto it = npcs_.find(s.id);
         if (it == npcs_.end() || !it->second.init) continue;
         drawCharacter(it->second.rig, *it->second.model, s.worn, nullptr, it->second.weapon);

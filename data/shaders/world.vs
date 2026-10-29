@@ -29,7 +29,9 @@ void main() {
     vec3 p = vertexPosition;
     if (wallCut > 0.5 && vertexTangent.w < 1.5) {
         vec2 toCam = -normalize(viewDir.xz);
-        vec2 rel = vertexTangent.xy - playerPos.xz;
+        // (the piece's centre goes through the model matrix too: an upper
+        // floor is kept off the map and drawn moved into place)
+        vec2 rel = (matModel * vec4(vertexTangent.x, 0.0, vertexTangent.y, 1.0)).xz - playerPos.xz;
         float ahead = dot(rel, toCam);
         float aside = abs(rel.x * toCam.y - rel.y * toCam.x);
         if (ahead > 0.05 && (wallCut < 1.5 || (aside < 4.5 && ahead < 30.0))) {
