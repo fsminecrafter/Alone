@@ -19,6 +19,7 @@ struct Environment {
     float clothingClo = 1.0f;   // total clothing insulation in clo
     float waterproof = 0.0f;    // 0..1, how well the outer layer keeps rain out
     float carriedKg = 0.0f;     // weight carried
+    float sleepComfort = 0.0f;  // -1..1 while asleep: bed or bare ground, pillow, dry clothes, warmth
 };
 
 enum class DeathCause {
@@ -197,7 +198,7 @@ private:
     void updateInfections(float dt);
     void updateToxins(float dt);
     void updateWounds(float dt);
-    void updateRest(float dt);
+    void updateRest(float dt, float comfort);
     void updateDamage(float dt);
     void checkDeath();
     float immuneStrength() const;

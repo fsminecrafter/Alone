@@ -38,6 +38,7 @@ private:
         GraphicsOptions gfx;
         float uiScale = 1.0f;
         bool screenEffects = true;    // cold/pain vignette, hallucination tint
+        bool minimap = true;          // small map in the corner (N)
         bool showFps = false;
         // Game
         float minutesPerSecond = 1.0f;
@@ -101,6 +102,8 @@ private:
     std::vector<uint32_t> tradeMine_, tradeTheirs_;   // item uids offered in a trade
     float tradeScroll_[2] = {0, 0};
     void drawHealth();
+    void drawMinimap();
+    void drawHealthInfo(Rectangle p);   // the Info tab: who you are
     void drawMap();
     void drawPause();
     void drawSettings();
@@ -153,6 +156,7 @@ private:
     ItemLoc paneLoc_[2]{ItemLoc::Player, ItemLoc::Ground};
     Rectangle dollRect_{};           // the worn-clothes figure (drop clothes here to put them on)
     ItemRef selected_{};             // item shown in the details strip
+    int healthTab_ = 0;              // 0 body, 1 info
     int invTab_ = 0;                 // 0 all, 1 food, 2 medical, 3 gear, 4 clothing, 5 other
     int invSort_ = 0;                // 0 type, 1 name, 2 weight
     int buildTab_ = 0;

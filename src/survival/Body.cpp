@@ -422,7 +422,7 @@ void Body::stepMinute(float dt, const Environment& env, Activity activity) {
     updateInfections(dt);
     updateToxins(dt);
     updateWounds(dt);
-    updateRest(dt);
+    updateRest(dt, env.sleepComfort);
 
     // Nausea can make you throw up
     vomitCooldown_ = std::max(0.0f, vomitCooldown_ - dt);
@@ -803,9 +803,11 @@ void Body::updateWounds(float dt) {
                     s_.wounds.end());
 }
 
-void Body::updateRest(float dt) {
+void Body::updateRest(float dt, float comfort) {
     if (s_.asleep) {
         float quality = 1.0f - 0.6f * s_.shivering - 0.4f * pain();
+        // a good bed rests you faster; a cramped car seat or wet clothes, slower
+        quality *= 1.0f + 0.5f * std::clamp(comfort, -1.0f, 1.0f);
         s_.sleepPressure = std::max(0.0f, s_.sleepPressure - dt / (7.0f * 60.0f) * std::max(0.2f, quality));
     } else {
         s_.sleepPressure = std::min(1.0f, s_.sleepPressure + dt / (17.0f * 60.0f));

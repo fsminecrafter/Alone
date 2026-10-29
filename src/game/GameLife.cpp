@@ -369,16 +369,6 @@ void Game::updateHomeLife(Survivor& s, float dt, bool sees, Vec2& goal, float& s
         goal = next;
         speed = spd;
     };
-    if (s.doorDir >= 0) {
-        Vec2 dc = s.doorDir == 0 ? Vec2{s.doorX + 0.5f, (float)s.doorY} : Vec2{(float)s.doorX, s.doorY + 0.5f};
-        if (distance(s.pos, dc) > 1.4f) {
-            if (distance(player_.pos, dc) > 1.4f && world_->doorOpen(s.doorX, s.doorY, s.doorDir)) {
-                world_->toggleDoor(s.doorX, s.doorY, s.doorDir);
-                if (dist < 25) sound(Sfx::Door, s.pos);
-            }
-            s.doorDir = -1;
-        }
-    }
     // Bedtime
     if (sleepTime(s) && s.hasBed && s.awakeHold <= 0) {
         if (!s.saidGoodnight) {
@@ -412,6 +402,141 @@ void Game::updateHomeLife(Survivor& s, float dt, bool sees, Vec2& goal, float& s
         if (dist < 14 && rng_.chance(0.35f)) survivorSay(s, personal(pickOf(d.idle, "idle.any")), false);
     }
     walk(1.05f);
+}
+
+// ---------------------------------------------------------------------------
+// Getting about: round props, water and walls, through doors
+// ---------------------------------------------------------------------------
+
+namespace {
+// A wall between the tile and its neighbour that has no door in it
+bool solidWall(World& w, int x, int y, int dx, int dy) {
+    Edge e = edgeBetween(x, y, dx, dy);
+    const Tile& t = w.tile(e.x, e.y);
+    uint8_t wall = e.dir == 0 ? WallN : WallW, door = e.dir == 0 ? DoorN : DoorW;
+    return (t.walls & wall) && !(t.walls & door);
+}
+} // namespace
+
+bool Game::walkClear(Vec2 a, Vec2 b, float radius) {
+    Vec2 d = b - a;
+    float len = d.length();
+    if (len < 0.05f) return true;
+    Vec2 dir = d * (1.0f / len), side{-dir.y * radius, dir.x * radius};
+    int gx = (int)std::floor(b.x), gy = (int)std::floor(b.y);
+    int steps = (int)std::ceil(len / 0.2f);
+    // the middle and both shoulders
+    for (Vec2 off : {Vec2{0, 0}, side, side * -1.0f}) {
+        Vec2 from = a + off;
+        int px = (int)std::floor(from.x), py = (int)std::floor(from.y);
+        for (int i = 1; i <= steps; ++i) {
+            Vec2 p = from + d * (i / (float)steps);
+            int x = (int)std::floor(p.x), y = (int)std::floor(p.y);
+            if (x == px && y == py) continue;
+            if (world_->tileBlocked(x, y) && !(x == gx && y == gy)) return false;
+            int sx = x - px, sy = y - py;
+            if (std::abs(sx) + std::abs(sy) == 1) {
+                if (solidWall(*world_, px, py, sx, sy)) return false;
+            } else {
+                // a corner: blocked unless one of the two ways round it is open
+                bool viaX = !solidWall(*world_, px, py, sx, 0) && !solidWall(*world_, px + sx, py, 0, sy) && !world_->tileBlocked(px + sx, py);
+                bool viaY = !solidWall(*world_, px, py, 0, sy) && !solidWall(*world_, px, py + sy, sx, 0) && !world_->tileBlocked(px, py + sy);
+                if (!viaX && !viaY) return false;
+            }
+            px = x; py = y;
+        }
+    }
+    return true;
+}
+
+// Breadth-first over tiles (8 ways, no cutting corners) in a box round both
+// ends. If the goal can't be reached (it's in a lake, or too far), the way
+// leads as close as it gets.
+bool Game::planRoute(Vec2 from, Vec2 to, std::vector<Vec2>& out) {
+    out.clear();
+    int sx = (int)std::floor(from.x), sy = (int)std::floor(from.y);
+    int gx = (int)std::floor(to.x), gy = (int)std::floor(to.y);
+    // far away: aim at a point on the way there
+    const int reach = 60;
+    if (std::abs(gx - sx) > reach || std::abs(gy - sy) > reach) {
+        Vec2 d = to - from;
+        Vec2 mid = from + d * (reach / std::max(std::fabs(d.x), std::fabs(d.y)));
+        gx = (int)std::floor(mid.x); gy = (int)std::floor(mid.y);
+    }
+    const int pad = 14;
+    IRect area{std::min(sx, gx) - pad, std::min(sy, gy) - pad, std::abs(sx - gx) + 2 * pad + 1, std::abs(sy - gy) + 2 * pad + 1};
+    std::vector<int> prev((size_t)area.area(), -1);
+    auto idx = [&](int x, int y) { return (y - area.y) * area.w + (x - area.x); };
+    auto open = [&](int x, int y) { return area.contains(x, y) && (!world_->tileBlocked(x, y) || (x == gx && y == gy)); };
+    std::deque<int> q;
+    int start = idx(sx, sy), goal = idx(gx, gy);
+    prev[(size_t)start] = start;
+    q.push_back(start);
+    int best = start;
+    int bestD = std::abs(sx - gx) + std::abs(sy - gy);
+    static const int dx[8] = {1, -1, 0, 0, 1, 1, -1, -1}, dy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    while (!q.empty()) {
+        int c = q.front();
+        q.pop_front();
+        if (c == goal) { best = c; break; }
+        int cx = area.x + c % area.w, cy = area.y + c / area.w;
+        for (int k = 0; k < 8; ++k) {
+            int nx = cx + dx[k], ny = cy + dy[k];
+            if (!open(nx, ny) || prev[(size_t)idx(nx, ny)] >= 0) continue;
+            if (k < 4) {
+                if (solidWall(*world_, cx, cy, dx[k], dy[k])) continue;
+            } else {
+                // diagonal: both side tiles free and no wall on either way round
+                if (!open(nx, cy) || !open(cx, ny) || world_->tileBlocked(nx, cy) || world_->tileBlocked(cx, ny)) continue;
+                if (solidWall(*world_, cx, cy, dx[k], 0) || solidWall(*world_, cx, cy, 0, dy[k]) ||
+                    solidWall(*world_, nx, cy, 0, dy[k]) || solidWall(*world_, cx, ny, dx[k], 0)) continue;
+            }
+            int n = idx(nx, ny);
+            prev[(size_t)n] = c;
+            int dd = std::abs(nx - gx) + std::abs(ny - gy);
+            if (dd < bestD) { bestD = dd; best = n; }
+            q.push_back(n);
+        }
+    }
+    if (best == start) return false;
+    std::vector<Vec2> rev;
+    if (best == goal && gx == (int)std::floor(to.x) && gy == (int)std::floor(to.y)) rev.push_back(to);
+    else rev.push_back(Vec2{area.x + best % area.w + 0.5f, area.y + best / area.w + 0.5f});
+    for (int c = prev[(size_t)best]; c != start; c = prev[(size_t)c])
+        rev.push_back(Vec2{area.x + c % area.w + 0.5f, area.y + c / area.w + 0.5f});
+    out.assign(rev.rbegin(), rev.rend());
+    return true;
+}
+
+Vec2 Game::navigate(Survivor& s, Vec2 goal, float dt) {
+    const float r = 0.3f;
+    s.navTimer -= dt;
+    if (walkClear(s.pos, goal, r)) { s.nav.clear(); return goal; }
+    if (s.nav.empty() || s.navTimer <= 0 || distance(goal, s.navGoal) > 1.5f) {
+        s.navGoal = goal;
+        s.navTimer = rng_.range(0.8f, 1.4f);
+        if (!planRoute(s.pos, goal, s.nav)) { s.navTimer = 1.5f; return goal; }
+    }
+    while (!s.nav.empty() && distance(s.pos, s.nav.front()) < 0.35f) s.nav.erase(s.nav.begin());
+    if (s.nav.empty()) return goal;
+    // cut corners where the way is clear
+    size_t far = 0;
+    for (size_t i = std::min<size_t>(s.nav.size(), 8); i-- > 1;)
+        if (walkClear(s.pos, s.nav[i], r)) { far = i; break; }
+    s.nav.erase(s.nav.begin(), s.nav.begin() + (long)far);
+    return s.nav.front();
+}
+
+void Game::openDoorAhead(Survivor& s, Vec2 dir) {
+    Vec2 ahead = s.pos + dir * 0.5f;
+    int ax = (int)std::floor(s.pos.x), ay = (int)std::floor(s.pos.y);
+    int bx = (int)std::floor(ahead.x), by = (int)std::floor(ahead.y);
+    if (std::abs(ax - bx) + std::abs(ay - by) != 1) return;
+    Edge e = edgeBetween(ax, ay, bx - ax, by - ay);
+    if (!world_->doorAt(e.x, e.y, e.dir) || world_->doorOpen(e.x, e.y, e.dir)) return;
+    world_->toggleDoor(e.x, e.y, e.dir);
+    if (distance(s.pos, player_.pos) < 25) sound(Sfx::Door, s.pos);
+    s.doorX = e.x; s.doorY = e.y; s.doorDir = e.dir;
 }
 
 } // namespace alone

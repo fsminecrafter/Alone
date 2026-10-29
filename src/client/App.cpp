@@ -281,6 +281,7 @@ void App::frame() {
             {880, 120, 10, "screenshot_wildlife.png", Overlay::None},
             {0, 0, 0, "screenshot_watch.png", Overlay::None},
             {0, 0, 0, "screenshot_health.png", Overlay::Health},
+            {0, 0, 0, "screenshot_health_info.png", Overlay::Health},
             {0, 0, 0, "screenshot_camp.png", Overlay::None},
             {1086.6f, 322.1f, 11, "screenshot_hjortmarka.png", Overlay::None},
             {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
@@ -423,6 +424,7 @@ void App::frame() {
                 Animal& d = game_.animals().spawn(game_.animals().find("roe_deer"), p0 + Vec2{3, 4}, rng);
                 d.state = AnimalState::Dead;
             }
+            if (sub == 0) healthTab_ = std::string(st.file) == "screenshot_health_info.png" ? 1 : 0;
             if (sub == 0 && std::string(st.file).find("settings_") != std::string::npos)
                 settingsTab_ = std::string(st.file).find("graphics") != std::string::npos ? 1 : 0;
             if (std::string(st.file) == "screenshot_hjortmarka.png" && sub == 0) {
@@ -815,6 +817,7 @@ void App::updatePlaying(float dt) {
     if (!blocking || overlay_ == Overlay::Map) {
         if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_I)) { overlay_ = overlay_ == Overlay::Inventory ? Overlay::None : Overlay::Inventory; menu_.open = false; }
         if (IsKeyPressed(KEY_M)) overlay_ = overlay_ == Overlay::Map ? Overlay::None : Overlay::Map;
+        if (IsKeyPressed(KEY_N)) { settings_.minimap = !settings_.minimap; saveSettings(); }
         if (IsKeyPressed(KEY_H)) overlay_ = overlay_ == Overlay::Health ? Overlay::None : Overlay::Health;
         if (IsKeyPressed(KEY_J)) overlay_ = overlay_ == Overlay::Journal ? Overlay::None : Overlay::Journal;
         if (IsKeyPressed(KEY_B)) {
@@ -823,6 +826,8 @@ void App::updatePlaying(float dt) {
         }
     }
     if (IsKeyPressed(KEY_F1)) overlay_ = overlay_ == Overlay::Help ? Overlay::None : Overlay::Help;
+    // Someone came up to you to talk (Jonas, gun raised)
+    if (int who = game_.takeTalkRequest(); who && (overlay_ == Overlay::None || overlay_ == Overlay::Inventory)) openTalk(who);
     if (debug_ && IsKeyPressed(KEY_F3)) showDebug_ = !showDebug_;
 
     PlayerInput in;
@@ -1072,6 +1077,7 @@ void App::drawSettings() {
         toggle("Rain & snow", settings_.gfx.weather);
         toggle("Vision cone", settings_.gfx.visionCone);
         toggle("Screen effects", settings_.screenEffects);
+        toggle("Minimap (N)", settings_.minimap);
         slider("Brightness", settings_.gfx.brightness, 0.7f, 1.4f, pct(settings_.gfx.brightness));
         {
             static const float sizes[] = {0.85f, 1.0f, 1.2f};
@@ -1632,13 +1638,104 @@ void App::drawHud() {
     ui::panel(hb, Color{10, 12, 14, 170});
     drawItemIcon(wpn ? wpn->def : nullptr, {hb.x + 8 * s, hb.y + 9 * s, 40 * s, 40 * s});
     ui::text(wpn ? game_.itemName(*wpn) : "Bare hands", hb.x + 56 * s, hb.y + 10 * s, 15 * s, ui::theme().text);
-    ui::text("Tab  J  M  H  B  F1", hb.x + 56 * s, hb.y + 32 * s, 13 * s, ui::theme().dim);
+    ui::text("Tab  J  M  N  H  B  F1", hb.x + 56 * s, hb.y + 32 * s, 13 * s, ui::theme().dim);
+    if (settings_.minimap && overlay_ == Overlay::None) drawMinimap();
     // Breath
     float st = game_.player().stamina;
     if (st < 0.99f) {
         Rectangle sb{W / 2 - 80 * s, H - 26 * s, 160 * s, 6 * s};
         DrawRectangleRec(sb, Color{0, 0, 0, 140});
         DrawRectangle((int)sb.x, (int)sb.y, (int)(sb.width * st), (int)sb.height, Color{200, 200, 190, 200});
+    }
+}
+
+// Bottom right: the land around you, turned the way the camera looks
+void App::drawMinimap() {
+    if (!mapReady_) buildMapTexture();
+    float s = ui::scale();
+    float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
+    float size = 210 * s;
+    Rectangle r{W - size - 12 * s, H - 76 * s - size, size, size};
+    ui::panel(r, Color{10, 12, 14, 200});
+    Rectangle in{r.x + 4 * s, r.y + 4 * s, r.width - 8 * s, r.height - 8 * s};
+    const MapData& m = game_.map();
+    const float radius = 110.0f;                  // metres from the centre to the edge
+    float k = (in.width * 0.5f) / radius;         // screen pixels per metre
+    Vec2 pp = game_.player().pos;
+    float yaw = renderer_.yaw();
+    Vec2 right{std::cos(yaw), -std::sin(yaw)}, fwd{-std::sin(yaw), -std::cos(yaw)};
+    Vector2 c{in.x + in.width / 2, in.y + in.height / 2};
+    auto toScreen = [&](Vec2 wpos) {
+        Vec2 d = wpos - pp;
+        return Vector2{c.x + (d.x * right.x + d.y * right.y) * k, c.y - (d.x * fwd.x + d.y * fwd.y) * k};
+    };
+    float reach = radius * 1.45f;                 // corners of the square, turned
+    auto near = [&](Vec2 a) { return std::fabs(a.x - pp.x) < reach && std::fabs(a.y - pp.y) < reach; };
+
+    BeginScissorMode((int)in.x, (int)in.y, (int)in.width, (int)in.height);
+    // the ground: the map picture, turned with the camera
+    float tmpp = m.terrainMetresPerPixel();
+    float half = reach / tmpp;
+    Rectangle src{pp.x / tmpp - half, pp.y / tmpp - half, half * 2, half * 2};
+    float dw = half * 2 * tmpp * k;
+    DrawTexturePro(mapTex_, src, {c.x, c.y, dw, dw}, {dw / 2, dw / 2}, yaw * RAD2DEG, WHITE);
+    // buildings
+    for (const auto& b : game_.world().gen().allBuildings()) {
+        Vec2 bc = b.rect.centre();
+        if (!near(bc)) continue;
+        Vector2 q[4] = {toScreen({(float)b.rect.x, (float)b.rect.y}), toScreen({(float)b.rect.x, (float)b.rect.bottom()}),
+                        toScreen({(float)b.rect.right(), (float)b.rect.bottom()}), toScreen({(float)b.rect.right(), (float)b.rect.y})};
+        Color bcol = b.id == game_.world().tile((int)std::floor(pp.x), (int)std::floor(pp.y)).building ? Color{190, 170, 140, 255}
+                                                                                                        : Color{150, 142, 132, 255};
+        DrawTriangleFan(q, 4, bcol);
+    }
+    // roads and paths
+    for (const auto& rd : m.roads()) {
+        if (!near(rd.a) && !near(rd.b)) continue;
+        bool path = isFootpath(rd.cls);
+        float wdt = rd.cls == RoadClass::Motorway ? 9.0f : rd.cls == RoadClass::Major ? 7.0f : path ? 1.5f : rd.cls == RoadClass::Service ? 3.0f : 5.0f;
+        Color col = rd.cls == RoadClass::Motorway ? Color{226, 190, 110, 255} : path ? Color{150, 130, 100, 220} : Color{246, 246, 240, 255};
+        DrawLineEx(toScreen(rd.a), toScreen(rd.b), std::max(1.0f, wdt * k), col);
+    }
+    // bikes and cars you've used, people you know
+    for (const auto& v : game_.vehicles()) {
+        if (v.id == game_.player().vehicle || !near(v.pos)) continue;
+        Vector2 vp = toScreen(v.pos);
+        DrawRectangleRounded({vp.x - 4 * s, vp.y - 3 * s, 8 * s, 6 * s}, 0.4f, 4, Color{60, 60, 70, 255});
+    }
+    for (const auto& sv : game_.survivors()) {
+        if (!sv.alive() || !near(sv.pos)) continue;
+        bool see = sv.joined || (sv.met && distance(sv.pos, pp) < 40.0f);
+        if (!see) continue;
+        bool bad = sv.hostileTo() || sv.def->disposition == Disposition::Raider;
+        Color col = bad ? Color{190, 50, 40, 255} : sv.joined ? Color{60, 140, 200, 255} : Color{50, 140, 70, 255};
+        Vector2 sp = toScreen(sv.pos);
+        DrawCircleV(sp, 4 * s, Color{250, 248, 240, 255});
+        DrawCircleV(sp, 3 * s, col);
+    }
+    // you: an arrow the way you face
+    {
+        float f = game_.player().facing;
+        Vec2 dir{std::cos(f), std::sin(f)};
+        Vector2 dv{dir.x * right.x + dir.y * right.y, -(dir.x * fwd.x + dir.y * fwd.y)};
+        Vector2 a{c.x + dv.x * 8 * s, c.y + dv.y * 8 * s};
+        Vector2 sideV{-dv.y * 5 * s, dv.x * 5 * s};
+        Vector2 b1{c.x - dv.x * 5 * s + sideV.x, c.y - dv.y * 5 * s + sideV.y};
+        Vector2 b2{c.x - dv.x * 5 * s - sideV.x, c.y - dv.y * 5 * s - sideV.y};
+        DrawTriangle(a, b2, b1, Color{200, 40, 40, 255});
+        DrawTriangle(a, b1, b2, Color{200, 40, 40, 255});
+    }
+    EndScissorMode();
+    // north
+    Vector2 north = toScreen(pp + Vec2{0, -radius * 0.82f});
+    north.x = std::clamp(north.x, in.x + 8 * s, in.x + in.width - 8 * s);
+    north.y = std::clamp(north.y, in.y + 8 * s, in.y + in.height - 8 * s);
+    DrawCircleV(north, 8 * s, Color{20, 22, 24, 220});
+    ui::textCentered("N", north.x, north.y - 7 * s, 13 * s, ui::theme().text, true);
+    ui::claim(r);
+    if (ui::hovered(r)) {
+        ui::tooltip("Minimap", "Click to open the map (M). N hides it.");
+        if (input::pressed(MOUSE_BUTTON_LEFT)) overlay_ = Overlay::Map;
     }
 }
 
@@ -1661,7 +1758,7 @@ void App::drawSymptoms() {
         ui::claim(r);
         if (ui::hovered(r)) ui::tooltip(sym.name(), sym.description(), col);
         y += size + 6 * s;
-        if (y > GetScreenHeight() - 100 * s) { y = 14 * s; x -= size + 6 * s; }
+        if (y > GetScreenHeight() - (settings_.minimap ? 330 : 100) * s) { y = 14 * s; x -= size + 6 * s; }
     }
 }
 
@@ -1835,6 +1932,20 @@ void App::drawHealth() {
     Rectangle p{W / 2 - pw / 2, H / 2 - ph / 2, pw, ph};
     ui::panel(p, Color{16, 17, 19, 238});
     ui::claim(p);
+    // Tabs: your body, and who you are
+    {
+        const char* tabs[] = {"Body", "Info"};
+        for (int i = 0; i < 2; ++i) {
+            Rectangle tb{p.x + p.width - 240 * s + i * 112 * s, p.y + 12 * s, 106 * s, 32 * s};
+            if (ui::button(tb, tabs[i], true, 16)) healthTab_ = i;
+            if (i == healthTab_) DrawRectangle((int)tb.x, (int)(tb.y + tb.height - 3 * s), (int)tb.width, (int)(3 * s), ui::theme().accent);
+        }
+    }
+    if (healthTab_ == 1) {
+        drawHealthInfo(p);
+        if (ui::button({p.x + p.width - 160 * s, p.y + p.height - 50 * s, 140 * s, 36 * s}, "Close")) overlay_ = Overlay::None;
+        return;
+    }
     ui::text("You look yourself over", p.x + 20 * s, p.y + 14 * s, 22 * s, ui::theme().text, true);
     const Body& body = game_.player().body;
     const BodyState& b = body.state();
@@ -1932,6 +2043,92 @@ void App::drawHealth() {
                   "or take a dirty one off. Dirty dressings can be washed in water.",
                   x, p.y + p.height - 78 * s, w, 13 * s, ui::theme().dim);
     if (ui::button({p.x + p.width - 160 * s, p.y + p.height - 50 * s, 140 * s, 36 * s}, "Close")) overlay_ = Overlay::None;
+}
+
+void App::drawHealthInfo(Rectangle p) {
+    float s = ui::scale();
+    const Player& pl = game_.player();
+    const Body& body = pl.body;
+    const BodyState& b = body.state();
+    const auto& clock = game_.world().clock();
+    ui::text(pl.look.name, p.x + 20 * s, p.y + 14 * s, 24 * s, ui::theme().text, true);
+    float col = (p.width - 60 * s) / 2;
+    float lx = p.x + 20 * s, rx = p.x + 40 * s + col;
+    float lw = 150 * s;
+    auto heading = [&](const char* t, float x, float& y) {
+        ui::text(t, x, y, 17 * s, ui::theme().accent, true);
+        y += 26 * s;
+    };
+    auto row = [&](const std::string& k, const std::string& v, float x, float& y, Color c = ui::theme().text) {
+        ui::text(k, x, y, 15 * s, ui::theme().dim);
+        y = std::max(y + 21 * s, ui::paragraph(v, x + lw, y, col - lw, 15 * s, c));
+    };
+
+    // --- left: who you are, your body ------------------------------------------------
+    float y = p.y + 60 * s;
+    heading("You", lx, y);
+    row("Name", pl.look.name, lx, y);
+    row("Age", std::to_string(pl.look.age), lx, y);
+    row("Gender", genderName(pl.look.gender), lx, y);
+    row("Hair", hairStyleName(pl.look.hairStyle), lx, y);
+    int day = std::max(1, (int)((clock.totalMinutes() - 9 * 60) / 1440.0) + 1);
+    row("Surviving", fmt("Day %d", day), lx, y);
+    row("Today", clock.dateString() + ", " + clock.timeString(), lx, y);
+    y += 10 * s;
+    heading("Body", lx, y);
+    row("Weight", fmt("%.1f kg", body.bodyMassKg()), lx, y);
+    float fatPct = b.fatMassKg / std::max(1.0f, body.bodyMassKg());
+    row("Body fat", fmt("%.0f%%", fatPct * 100), lx, y);
+    row("Temperature", b.coreTempC < 35.0f ? "Dangerously cold" : b.coreTempC < 36.3f ? "Cold" : b.coreTempC > 38.0f ? "Feverish" : "Fine", lx, y,
+        b.coreTempC < 35.0f || b.coreTempC > 38.5f ? ui::theme().bad : ui::theme().text);
+    row("Awake for", fmt("%.0f hours", b.hoursAwake), lx, y);
+    row("Clothes", b.wetness > 0.6f ? "Soaked" : b.wetness > 0.15f ? "Damp" : "Dry", lx, y);
+    {
+        SleepComfort sc = game_.sleepComfort();
+        std::string why;
+        for (const auto& g : sc.good) why += "+ " + g + "\n";
+        for (const auto& g : sc.bad) why += "- " + g + "\n";
+        if (!why.empty()) why.pop_back();
+        row(pl.asleep ? "Sleeping" : "Sleeping here", sc.word(), lx, y,
+            sc.score >= 0.15f ? ui::theme().good : sc.score <= -0.15f ? ui::theme().bad : ui::theme().text);
+        y = ui::paragraph(why, lx + lw, y, col - lw, 13 * s, ui::theme().dim) + 4 * s;
+    }
+
+    // --- right: what you carry, know, and who you know --------------------------------
+    y = p.y + 60 * s;
+    heading("Gear", rx, y);
+    float clo = 0, wp = 0;
+    for (const auto& c : pl.worn)
+        if (c.def) { clo += c.def->clo; if (c.def->slot == ClothingSlot::Jacket) wp = std::max(wp, c.def->waterproof); }
+    std::string warm = clo >= 2.2f ? "Dressed for winter" : clo >= 1.4f ? "Warmly dressed" : clo >= 0.8f ? "Dressed for autumn" : "Lightly dressed";
+    row("Dressed", warm + (wp > 0.7f ? ", rainproof" : wp > 0.3f ? ", showerproof" : ""), rx, y);
+    row("Carrying", fmt("%.1f / %.0f kg", game_.carriedKg(), game_.carryCapacityKg()), rx, y,
+        game_.carriedKg() > game_.carryCapacityKg() ? ui::theme().bad : ui::theme().text);
+    const ItemInstance* w = game_.weapon();
+    row("In hand", w ? w->def->name : "Nothing", rx, y);
+    y += 10 * s;
+    heading("Know-how", rx, y);
+    std::string know;
+    if (pl.knowsCarpentry) know += "Carpentry: doors, windows and roofs\n";
+    if (pl.knowsHotwire) know += "Hotwiring cars\n";
+    if (game_.knowsMushrooms()) know += "Telling mushrooms apart\n";
+    if (know.empty()) know = "Nothing special yet. Books and people can teach you.";
+    else know.pop_back();
+    y = ui::paragraph(know, rx, y, col, 15 * s, know.rfind("Nothing", 0) == 0 ? ui::theme().dim : ui::theme().text) + 10 * s;
+    heading("People", rx, y);
+    int met = 0;
+    std::string with, close;
+    for (const auto& sv : game_.survivors()) {
+        if (!sv.met) continue;
+        ++met;
+        if (sv.joined && sv.alive()) with += (with.empty() ? "" : ", ") + sv.def->name;
+        Bond bd = sv.bond();
+        if (sv.alive() && (bd == Bond::Lover || bd == Bond::Family || bd == Bond::BestFriend))
+            close += (close.empty() ? "" : ", ") + sv.def->name + " (" + bondName(bd) + ")";
+    }
+    row("Met", std::to_string(met), rx, y);
+    row("With you", with.empty() ? "Nobody" : with, rx, y);
+    if (!close.empty()) row("Closest", close, rx, y);
 }
 
 // ---------------------------------------------------------------------------
@@ -2252,6 +2449,7 @@ void App::loadSettings() {
     settings_.gfx.renderScale = std::clamp((int)s->num("render_scale", (float)settings_.gfx.renderScale), 0, 100);
     settings_.uiScale = std::clamp(s->num("ui_scale", settings_.uiScale), 0.8f, 1.3f);
     settings_.screenEffects = s->flag("screen_effects", settings_.screenEffects);
+    settings_.minimap = s->flag("minimap", settings_.minimap);
     settings_.showFps = s->flag("show_fps", false);
     settings_.minutesPerSecond = std::clamp(s->num("minutes_per_second", settings_.minutesPerSecond), 0.25f, 4.0f);
     settings_.autoDrink = s->flag("auto_drink", settings_.autoDrink);
@@ -2295,6 +2493,7 @@ void App::saveSettings() {
     set("render_scale", fmt("%d", settings_.gfx.renderScale));
     set("ui_scale", fmt("%.2f", settings_.uiScale));
     set("screen_effects", flag(settings_.screenEffects));
+    set("minimap", flag(settings_.minimap));
     set("show_fps", flag(settings_.showFps));
     set("minutes_per_second", fmt("%.2f", settings_.minutesPerSecond));
     set("auto_drink", flag(settings_.autoDrink));

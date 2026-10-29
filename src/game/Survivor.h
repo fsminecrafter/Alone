@@ -56,6 +56,7 @@ struct SurvivorDef {
     std::string hello;                 // later
     std::vector<std::string> chat;     // things they say when you ask how they're doing
     std::string warn;                  // hostile: shouted when you come close
+    std::string freeze;                // hostile: shouted when they first see you ("Freeze!")
     // Talking to someone who'd rather shoot you
     std::string parleyText;            // when you say you're not looking for trouble
     std::string letInText, keepOutText;   // hostile: letting you in, or not
@@ -110,6 +111,8 @@ struct Survivor {
     int routeIndex = 0;
     float warned = 0;                  // hostile: seconds you've ignored a warning
     float alert = 0;                   // 0..1 how sure they are you're near
+    float freezeCooldown = 0;          // hostile: seconds before they'll stop you again
+    bool calledYou = false;            // hostile: walked up to you and asked what you want
     bool admitted = false;             // hostile: let you in; treats you like anyone else now
     double truceUntil = 0;             // raiders: game minute until which they leave you alone (you paid)
     bool truce = false;                // (truceUntil is in the future)
@@ -138,6 +141,9 @@ struct Survivor {
     Vec2 bed, bedSide;                 // where they sleep, and the free tile beside it
     bool hasBed = false;
     std::vector<Vec2> path;            // tiles to walk through (indoors, round walls)
+    std::vector<Vec2> nav;             // a way round whatever stands between them and where they're going
+    Vec2 navGoal;                      // where `nav` leads
+    float navTimer = 0;                // seconds until the way is planned again
     float idleTimer = 0;               // seconds until they wander somewhere else in the house
     float snoreTimer = 0;
     int doorX = 0, doorY = 0, doorDir = -1;   // a door they opened and will close behind them

@@ -85,12 +85,22 @@ void Renderer::buildBuilding(World& world, const Building& b, BuildingGfx& g) {
     };
 
     // A framed window in an edge: glass, frame, cross bars and a sill
-    auto window = [&](MeshBuilder& w, float ax, float az, bool alongX, float y0, float y1, bool outsideNeg, bool frame) {
+    auto window = [&](MeshBuilder& w, float ax, float az, bool alongX, float y0, float y1, bool outsideNeg, bool frame, bool broken = false) {
         if (alongX) w.piece(ax + 0.5f, az, y0 - 0.08f, true);
         else w.piece(ax, az + 0.5f, y0 - 0.08f, true);
         w.material(MGlass);
-        if (alongX) w.box(V(ax + 0.08f, y0, az - 0.02f), V(ax + 0.92f, y1, az + 0.02f), glass);
-        else w.box(V(ax - 0.02f, y0, az + 0.08f), V(ax + 0.02f, y1, az + 0.92f), glass);
+        if (!broken) {
+            if (alongX) w.box(V(ax + 0.08f, y0, az - 0.02f), V(ax + 0.92f, y1, az + 0.02f), glass);
+            else w.box(V(ax - 0.02f, y0, az + 0.08f), V(ax + 0.02f, y1, az + 0.92f), glass);
+        } else {
+            // smashed: a few jagged shards left in the corners of the frame
+            const float sh[][4] = {{0.12f, 0.0f, 0.26f, 0.22f}, {0.7f, 0.0f, 0.88f, 0.14f}, {0.12f, 0.8f, 0.22f, 1.0f}, {0.78f, 0.7f, 0.88f, 1.0f}};
+            for (const auto& q : sh) {
+                float v0 = y0 + (y1 - y0) * q[1], v1 = y0 + (y1 - y0) * q[3];
+                if (alongX) w.box(V(ax + q[0], v0, az - 0.015f), V(ax + q[2], v1, az + 0.015f), glass);
+                else w.box(V(ax - 0.015f, v0, az + q[0]), V(ax + 0.015f, v1, az + q[2]), glass);
+            }
+        }
         if (!frame) return;
         w.material(MPlain);
         float o = outsideNeg ? -0.075f : 0.075f;
@@ -154,7 +164,7 @@ void Renderer::buildBuilding(World& world, const Building& b, BuildingGfx& g) {
                 } else if (win) {
                     segment(ax, az, alongX, 0, 0.9f, exterior, outsideNeg, e0, e1);
                     segment(ax, az, alongX, 2.0f, kStorey, exterior, outsideNeg, e0, e1);
-                    window(w, ax, az, alongX, 0.9f, 2.0f, outsideNeg, exterior);
+                    window(w, ax, az, alongX, 0.9f, 2.0f, outsideNeg, exterior, world.windowBroken(e.x, e.y, dir));
                     if (exterior) segment(ax, az, alongX, kStorey, topH, exterior, outsideNeg, e0, e1);
                 } else {
                     segment(ax, az, alongX, 0, height, exterior, outsideNeg, e0, e1);

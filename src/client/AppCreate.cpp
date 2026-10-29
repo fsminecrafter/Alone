@@ -51,6 +51,7 @@ void App::randomCharacter() {
     c.look.gender = (Gender)rnd(3);
     const char** names = c.look.gender == Gender::Man ? kManNames : c.look.gender == Gender::Woman ? kWomanNames : kOtherNames;
     c.look.name = names[rnd(10)];
+    c.look.age = 18 + rnd(50);
     c.look.skin = kSkins[rnd(8)];
     c.look.hair = kHairs[rnd(8)];
     c.look.hairStyle = c.look.gender == Gender::Woman ? (rnd(4) == 0 ? 0 : 1 + rnd(3)) : c.look.gender == Gender::Man ? (rnd(4) == 0 ? 4 : 0) : rnd(kHairStyles);
@@ -116,7 +117,7 @@ void App::drawCreate() {
     float H = (float)GetScreenHeight();
     CharacterChoice before = create_;
     std::string beforeName = create_.look.name;
-    Rectangle p{16 * s, 16 * s, 460 * s, std::min(H - 32 * s, 600 * s)};
+    Rectangle p{16 * s, 16 * s, 460 * s, std::min(H - 32 * s, 640 * s)};
     ui::panel(p, Color{16, 17, 19, 236});
     ui::claim(p);
     float x = p.x + 18 * s, y = p.y + 14 * s, w = p.width - 36 * s;
@@ -159,6 +160,18 @@ void App::drawCreate() {
         }
     }
     y += 42 * s;
+
+    // Age
+    label("Age", y);
+    {
+        Rectangle l{x + lw, y, 30 * s, 30 * s}, r{x + lw + 100 * s, y, 30 * s, 30 * s};
+        int step = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? 10 : 1;
+        if (ui::button(l, "-", true, 16)) create_.look.age = std::max(18, create_.look.age - step);
+        if (ui::button(r, "+", true, 16)) create_.look.age = std::min(90, create_.look.age + step);
+        ui::textCentered(std::to_string(create_.look.age), x + lw + 65 * s, y + 5 * s, 17 * s, ui::theme().text, true);
+        ui::text("Shift: steps of 10", x + lw + 142 * s, y + 7 * s, 13 * s, ui::theme().dim);
+    }
+    y += 40 * s;
 
     // Skin and hair colour
     label("Skin", y);

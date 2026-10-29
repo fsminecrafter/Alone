@@ -4,6 +4,7 @@
 #include "world/WorldGen.h"
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace alone {
@@ -94,7 +95,10 @@ public:
     bool edgeBlocked(int x, int y, int dx, int dy);           // wall/closed door between neighbours
     // Slide a circle of `radius` from `from` by `delta`, stopping at walls.
     Vec2 moveCircle(Vec2 from, Vec2 delta, float radius);
+    // Nothing solid between a and b: walls and closed doors block, windows don't
     bool lineOfSight(Vec2 a, Vec2 b);
+    // A wall (not a window, not an open door) between the tile and its neighbour
+    bool sightBlocked(int x, int y, int dx, int dy);
 
     // --- doors -----------------------------------------------------------
     // dir: 0 north edge of (x,y), 1 west edge of (x,y)
@@ -103,6 +107,11 @@ public:
     void toggleDoor(int x, int y, int dir);
     // Find a door edge within reach of a point. Returns false if none.
     bool findDoorNear(Vec2 p, float reach, int& x, int& y, int& dir);
+    // --- windows (dir as for doors) ----------------------------------------
+    bool windowAt(int x, int y, int dir);
+    bool windowBroken(int x, int y, int dir) const;
+    void breakWindow(int x, int y, int dir);
+    bool findWindowNear(Vec2 p, float reach, int& x, int& y, int& dir);
 
     // --- containers & loot -------------------------------------------------
     std::string containerKindAt(int x, int y);
@@ -167,6 +176,7 @@ private:
     std::unordered_map<int64_t, std::unique_ptr<Chunk>> chunks_;
     std::unordered_map<int64_t, TileOverride> overrides_;
     std::unordered_map<int64_t, bool> doors_;                 // key: tile*2+dir -> open
+    std::unordered_set<int64_t> brokenWindows_;              // key as for doors
     std::unordered_map<int64_t, ContainerState> containers_;
     std::unordered_map<int64_t, std::vector<ItemInstance>> ground_;
     std::unordered_map<int64_t, float> tankWater_;

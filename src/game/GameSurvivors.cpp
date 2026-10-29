@@ -141,6 +141,7 @@ bool Game::loadSurvivors(const std::string& path) {
         d.night = lines("night");
         d.morning = lines("morning");
         d.loverChat = lines("lover_chat");
+        d.freeze = s.str("freeze");
         d.romanceable = s.flag("romanceable", d.age >= 18 && d.disposition != Disposition::Raider);
         d.flirtYes = s.str("flirt_yes");
         d.flirtNo = s.str("flirt_no");
@@ -640,6 +641,23 @@ std::vector<std::pair<Topic, std::string>> Game::talkTopics(int id) {
     return out;
 }
 
+std::string Game::romanceHint(int id) {
+    Survivor* s = survivor(id);
+    if (!s || !canTalk(id)) return "";
+    const SurvivorDef& d = *s->def;
+    if (d.disposition == Disposition::Raider || (d.disposition == Disposition::Hostile && !s->admitted)) return "";
+    Bond b = s->bond();
+    if (b == Bond::Lover || b == Bond::Enemy) return "";
+    if (!d.romanceable) return d.age < 18 ? "" : "(Romance: they're not looking for that.)";
+    if (s->family) return "(Romance: you're family now.)";
+    if (s->trust < 20) return "(Romance: they need to trust you more first.)";
+    if (s->lastFlirtDay == world_->clock().day()) {
+        if (s->romance >= kBondNeeded && s->trust < kTrustBestFriend) return "(Romance: you've flirted today. Be best friends to say more.)";
+        return "(Romance: you've flirted today. Try again tomorrow.)";
+    }
+    return "";
+}
+
 std::string Game::talk(int id, Topic t) {
     Survivor* s = survivor(id);
     if (!s || !s->alive()) return "";
@@ -866,6 +884,13 @@ std::string Game::talk(int id, Topic t) {
             s->path.clear();
             return say(b == Bond::Lover ? line("dismiss.lover") : "I'll head home. You know where to find me.");
         case Topic::Bye:
+            if (d.disposition == Disposition::Hostile && !s->admitted) {
+                // back to his post; he leaves you be for a while
+                if (s->state == SurvivorState::Alert) s->state = SurvivorState::Home;
+                s->calledYou = false;
+                s->freezeCooldown = 90;
+                return "Go on, then. Slowly.";
+            }
             if (b >= Bond::Friend) return say(line("bye." + bk));
             return wary ? "Mm." : "Take care out there.";
         default: break;
@@ -1066,7 +1091,7 @@ void Game::survivorAttack(Survivor& s, Vec2 targetPos, bool atPlayer, Animal* an
         return;
     }
     float reach = w && !w->def->firearm ? w->def->reach : 0.9f;
-    if (dist > reach + 0.55f) return;
+    if (dist > reach + 0.55f || !world_->lineOfSight(s.pos, targetPos)) return;
     float damage = w ? (w->def->firearm ? 6.0f : w->def->damage) : 3.0f;
     s.attackTimer = (w && !w->def->firearm ? w->def->cooldown : 0.9f) * 1.9f + rng_.range(0.3f, 0.9f);
     s.swing = 1.0f;
@@ -1130,12 +1155,28 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
             }
 
         s.truce = world_->clock().totalMinutes() < s.truceUntil;
-        // Do they know you're there? Noise, or sight (worse at night)
+        // Do they know you're there? They see you only with nothing solid in
+        // between (worse at night); a noise only tells them where to look.
         float sight = (raider ? 38.0f : 28.0f) * (0.35f + 0.65f * daylight) * (p.sneaking ? 0.6f : 1.0f);
-        bool sees = !dead() && dist < std::max(sight, p.noise * 1.2f) && (dist < p.noise || world_->lineOfSight(s.pos, p.pos));
-        if (p.vehicle >= 0 && dist < 60) sees = true;   // an engine is hard to miss
-        if (s.asleep()) sees = false;
+        bool hears = !dead() && dist < p.noise;
+        if (p.vehicle >= 0 && dist < 60) hears = true;   // an engine is hard to miss
+        bool los = !dead() && dist < 60 && world_->lineOfSight(s.pos, p.pos);
+        bool sees = los && (dist < sight || hears);
+        if (s.asleep()) sees = hears = false;
+        s.freezeCooldown = std::max(0.0f, s.freezeCooldown - dt);
         if (s.asleep() && s.joined) wakeSurvivor(s);
+
+        // Close a door behind them once they're through
+        if (s.doorDir >= 0) {
+            Vec2 dc = s.doorDir == 0 ? Vec2{s.doorX + 0.5f, (float)s.doorY} : Vec2{(float)s.doorX, s.doorY + 0.5f};
+            if (distance(s.pos, dc) > 1.4f) {
+                if (distance(p.pos, dc) > 1.4f && world_->doorOpen(s.doorX, s.doorY, s.doorDir)) {
+                    world_->toggleDoor(s.doorX, s.doorY, s.doorDir);
+                    if (dist < 25) sound(Sfx::Door, s.pos);
+                }
+                s.doorDir = -1;
+            }
+        }
 
         // Pick what to do
         Vec2 goal = s.pos;
@@ -1202,13 +1243,17 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
             // someone holding a place only defends it
             if (d.disposition == Disposition::Hostile && !s.angry && distance(s.pos, s.home) > 35) s.state = SurvivorState::Home;
             if (s.state != SurvivorState::Hunt && !s.truce) {
-                if (sees && dist < (raider ? 36.0f : 25.0f)) {
+                bool heardClose = raider && hears && dist < 40;
+                if ((sees && dist < (raider ? 36.0f : 25.0f)) || heardClose) {
                     s.state = SurvivorState::Hunt;
                     s.stateTimer = 25;
-                    survivorSay(s, pickLine(d.warn.empty() ? std::string("You!") : d.warn, rng_));
+                    s.target = p.pos;
+                    survivorSay(s, sees ? pickLine(d.warn.empty() ? std::string("You!") : d.warn, rng_) : std::string("What was that?"));
                 }
             }
             if (s.state == SurvivorState::Hunt) {
+                // where they think you are: seen, or heard
+                if (sees || hears) s.target = p.pos;
                 if (sees) s.stateTimer = 25;
                 if (s.stateTimer <= 0 || dist > 80 || dead()) {
                     s.state = SurvivorState::Home;
@@ -1218,10 +1263,16 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                     bool gun = w && w->def->firearm &&
                                s.inventory.find([&](const ItemInstance& it) { return it.def->id == w->def->ammo && it.usesLeft > 0; }) >= 0;
                     float want = gun ? std::min(14.0f, w->def->reach * 0.5f) : 0.8f;
-                    if (dist > want || !sees) { goal = p.pos; speed = dist > 6 ? 3.9f : 2.4f; }
-                    if (p.vehicle < 0 || gun) survivorAttack(s, p.pos, true, nullptr, nullptr);
-                    face = true; faceAt = p.pos;
-                    if (rng_.chance(dt * 0.08f)) survivorSay(s, pickLine(d.warn.empty() ? std::string("You!") : d.warn, rng_));
+                    if (!sees) {
+                        // go and look where they last saw or heard you
+                        if (distance(s.pos, s.target) > 1.2f) { goal = s.target; speed = 2.6f; }
+                        face = true; faceAt = s.target;
+                    } else {
+                        if (dist > want) { goal = p.pos; speed = dist > 6 ? 3.9f : 2.4f; }
+                        if (p.vehicle < 0 || gun) survivorAttack(s, p.pos, true, nullptr, nullptr);
+                        face = true; faceAt = p.pos;
+                        if (rng_.chance(dt * 0.08f)) survivorSay(s, pickLine(d.warn.empty() ? std::string("You!") : d.warn, rng_));
+                    }
                 }
             } else if (raider) {
                 // On their rounds, partners stick together
@@ -1230,7 +1281,7 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                     if (!d.partners.empty() && o.alive() && o.def->id == d.partners[0] && d.route.empty()) lead = &o;
                 if (lead) {
                     if (distance(s.pos, lead->pos) > 2.5f) { goal = lead->pos; speed = 1.6f; }
-                    if (lead->state == SurvivorState::Hunt && dist < 60) { s.state = SurvivorState::Hunt; s.stateTimer = 25; }
+                    if (lead->state == SurvivorState::Hunt && dist < 60) { s.state = SurvivorState::Hunt; s.stateTimer = 25; s.target = lead->target; }
                 } else if (!d.route.empty()) {
                     Vec2 rp;
                     if (resolvePlaceCache(s, rp)) {
@@ -1243,19 +1294,37 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
                     for (auto& o : survivors_)
                         if (&o != &s && o.alive() && std::find(o.def->partners.begin(), o.def->partners.end(), d.id) != o.def->partners.end() &&
                             o.state != SurvivorState::Hunt)
-                            o.state = SurvivorState::Hunt, o.stateTimer = 25;
+                            o.state = SurvivorState::Hunt, o.stateTimer = 25, o.target = s.target;
             }
         } else if (d.disposition == Disposition::Hostile && !s.admitted) {
-            // Holds a place: warns you off, then shoots. Talking buys time;
-            // the more he trusts you, the closer you can come.
-            if (sees && dist < 32) {
+            // Holds a place. Sees you, shouts "Freeze!", walks up with the gun
+            // on you, and then wants to know what you want. (Hurt him, and
+            // he's angry: the hunt above.)
+            if (s.state == SurvivorState::Alert) {
+                if (sees) { s.target = p.pos; s.stateTimer = 20; }
+                face = true; faceAt = sees ? p.pos : s.target;
+                if (dist > 2.8f) { goal = sees ? p.pos : s.target; speed = 1.5f; }
+                else if (sees && !s.calledYou) {
+                    s.calledYou = true;
+                    talkRequest_ = s.id;   // the client opens the conversation
+                }
+                if (sees && s.speechTimer <= 0 && dist > 6 && rng_.chance(dt * 0.15f)) survivorSay(s, "I said FREEZE!");
+                // you got away, or off his patch: he lets you go
+                if (s.stateTimer <= 0 || distance(s.pos, s.home) > 35 || dead()) {
+                    s.state = SurvivorState::Home;
+                    s.calledYou = false;
+                    s.freezeCooldown = 60;
+                    if (!dead()) survivorSay(s, "And stay away!", false);
+                }
+            } else if (sees && dist < 30 && s.freezeCooldown <= 0) {
+                s.state = SurvivorState::Alert;
+                s.stateTimer = 20;
+                s.target = p.pos;
+                s.calledYou = false;
                 face = true; faceAt = p.pos;
-                s.warned += dt;
-                if (s.speechTimer <= 0 && s.warned > 0) survivorSay(s, pickLine(d.warn, rng_));
-                float tooClose = s.trust > 0 ? 6.0f : 14.0f;
-                if ((dist < tooClose && s.warned > -5) || s.warned > 12) { s.state = SurvivorState::Hunt; s.stateTimer = 20; }
+                survivorSay(s, d.freeze.empty() ? std::string("Freeze! Hands where I can see them!") : pickLine(d.freeze, rng_));
             } else {
-                if (dist > 45) s.warned = std::max(0.0f, s.warned - dt);
+                if (sees && dist < 14) { face = true; faceAt = p.pos; }   // keeps an eye on you
                 updateHomeLife(s, dt, sees, goal, speed, face);
             }
         } else {
@@ -1281,9 +1350,13 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
         Vec2 to = goal - s.pos;
         float l = to.length();
         if (speed > 0 && l > 0.3f) {
-            Vec2 dir = to * (1.0f / l);
+            // round whatever's in the way, not into it
+            Vec2 step = navigate(s, goal, dt) - s.pos;
+            float sl = step.length();
+            Vec2 dir = sl > 1e-4f ? step * (1.0f / sl) : to * (1.0f / l);
             Vec2 want = dir * std::min(speed, l / std::max(dt, 0.001f));
             s.vel = s.vel + (want - s.vel) * std::min(1.0f, dt * 6.0f);
+            openDoorAhead(s, dir);
         } else {
             s.vel = s.vel * std::max(0.0f, 1.0f - dt * 8.0f);
         }
@@ -1293,6 +1366,7 @@ void Game::updateSurvivors(float dt, float gameMinutes) {
             float moved = distance(before, s.pos);
             if (moved < s.vel.length() * dt * 0.3f) {
                 // stuck on a wall: slide sideways for a moment
+                s.navTimer = 0;   // plan the way again
                 Vec2 side{-s.vel.y, s.vel.x};
                 s.pos = world_->moveCircle(s.pos, side * (dt * (s.id % 2 ? 1.0f : -1.0f)), 0.28f);
                 if (!s.joined && s.state != SurvivorState::Hunt) {

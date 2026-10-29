@@ -32,15 +32,15 @@ float wrapAngle(float a) {
     return a;
 }
 
-bool heavyTool(const ItemDef* d) {
-    return d->hasTag("axe") || d->hasTag("hammer") || d->id == "hammer" || d->id == "crowbar" || d->id == "sledgehammer" ||
-           d->id == "pipe_wrench" || d->id == "baseball_bat" || d->id == "golf_club";
-}
-
 // Vans have bigger tanks (body style as in RenderVehicles.cpp)
 float carTank(int look) { return ((look >> 4) % 4) == 3 ? 70.0f : 50.0f; }
 
 } // namespace
+
+bool heavyTool(const ItemDef* d) {
+    return d->hasTag("axe") || d->hasTag("hammer") || d->id == "hammer" || d->id == "crowbar" || d->id == "sledgehammer" ||
+           d->id == "pipe_wrench" || d->id == "baseball_bat" || d->id == "golf_club";
+}
 
 // Every parked car has 0-40% of a tank, unless someone has siphoned it since
 float Game::carFuelAt(int x, int y) const {
@@ -156,6 +156,7 @@ std::vector<ActionOption> Game::vehicleActionsAt(Vec2 pt) {
         bool slow = std::fabs(v->speed) < 1.0f;
         add(ActionKind::ExitVehicle, car ? "Get out" : "Get off the bike", v->id, slow, "Stop first");
         if (car && v->running) add(ActionKind::StopEngine, "Switch off the engine", v->id);
+        if (car && !p.asleep) add(ActionKind::Sleep, "Sleep in the car", v->id, slow, "Stop first");
         return out;
     }
 

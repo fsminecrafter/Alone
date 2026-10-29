@@ -270,8 +270,76 @@ Environment Game::environment() {
             }
         if (bed) env.clothingClo += 2.0f;
         (void)t;
+        env.sleepComfort = sleepComfortIn(env).score;
     }
     return env;
+}
+
+const char* SleepComfort::word() const {
+    return score >= 0.45f ? "Very comfortable" : score >= 0.15f ? "Comfortable" : score > -0.15f ? "Bearable"
+         : score > -0.45f ? "Uncomfortable" : "Miserable";
+}
+
+SleepComfort Game::sleepComfort() { return sleepComfortIn(environment()); }
+
+SleepComfort Game::sleepComfortIn(const Environment& env) {
+    SleepComfort c;
+    auto add = [&](float v, const std::string& why) {
+        c.score += v;
+        (v >= 0 ? c.good : c.bad).push_back(why);
+    };
+    const Player& p = player_;
+    int tx = (int)std::floor(p.pos.x), ty = (int)std::floor(p.pos.y);
+    const Vehicle* v = playerVehicle();
+    bool inCar = v && v->kind == VehicleKind::Car;
+    bool tent = world_->tentAt(p.pos) != nullptr;
+    bool inside = world_->indoors(p.pos);
+    bool bed = false, sofa = false;
+    if (!inCar)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                Prop pr = world_->tile(tx + dx, ty + dy).prop;
+                bed |= pr == Prop::Bed || pr == Prop::HospitalBed;
+                sofa |= pr == Prop::Sofa;
+            }
+    // What you lie on
+    if (inCar) {
+        add(-0.1f, "a cramped car seat");
+        double since = sleepStartMin_ >= 0 && p.asleep ? (world_->clock().totalMinutes() - sleepStartMin_) / 60.0 : 0.0;
+        if (since > 2.0) add(-std::min(0.45f, (float)(since - 2.0) * 0.08f), "hours curled up in the car");
+    } else if (bed) add(0.45f, "a proper bed");
+    else if (sofa) add(0.25f, "a soft sofa");
+    else if (tent) add(-0.1f, "hard ground under the tent");
+    else if (inside) add(-0.15f, "a hard floor");
+    else add(-0.3f, "the bare ground");
+    bool soft = bed || sofa;
+    bool bag = p.inventory.findTag("sleeping_bag") >= 0;
+    if (p.inventory.findTag("pillow") >= 0) add(soft ? 0.05f : 0.2f, "your pillow");
+    if (bag && !soft) add(0.15f, "your sleeping bag");
+    if (!soft && !inCar && p.inventory.findId("sleeping_mat") >= 0) add(0.15f, "a sleeping mat under you");
+    // Wet clothes, rain, cold and heat
+    float wet = p.body.state().wetness;
+    if (wet > 0.15f) add(-0.5f * wet, wet > 0.6f ? "soaking wet clothes" : "damp clothes");
+    bool sheltered = inside || inCar || tent;
+    if (!sheltered && env.wetness > 0.2f) add(-0.3f, "rain falling on you");
+    float air = env.airTempC;
+    if (air > 27.0f) add(-0.2f, "too hot");
+    else if (sheltered && air >= 16.0f) add(0.15f, "warm and out of the weather");
+    else if (air < 8.0f && !bag) add(-0.2f, "cold air");
+    c.score = std::clamp(c.score, -1.0f, 1.0f);
+    return c;
+}
+
+void Game::sleepReport() {
+    if (sleepMinutes_ >= 30) {
+        float avg = sleepComfortSum_ / sleepMinutes_;
+        if (avg >= 0.3f) log("You slept well.", MessageKind::Good);
+        else if (avg <= -0.3f) log("You slept badly. You don't feel rested.", MessageKind::Bad);
+        bool inCar = playerVehicle() && playerVehicle()->kind == VehicleKind::Car;
+        if (inCar && sleepMinutes_ > 4 * 60) log("Your neck and back are stiff from the car seat.", MessageKind::Body);
+    }
+    sleepStartMin_ = -1;
+    sleepComfortSum_ = sleepMinutes_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +529,11 @@ void Game::updatePlayer(float dt, float gameMinutes, const PlayerInput& in) {
     else if (action_.active) act = action_.option.kind == ActionKind::Rest || action_.option.kind == ActionKind::Wait ? Activity::Resting : Activity::Working;
     Environment env = environment();
     p.body.update(gameMinutes, env, act);
+    if (p.asleep) {
+        if (sleepStartMin_ < 0) sleepStartMin_ = world_->clock().totalMinutes();
+        sleepComfortSum_ += env.sleepComfort * gameMinutes;
+        sleepMinutes_ += gameMinutes;
+    }
     soilDressings(gameMinutes);
     float temp = env.airTempC;
     p.inventory.age(gameMinutes / 60.0f, temp);
@@ -921,7 +994,7 @@ void Game::soilDressings(float gameMinutes) {
         if (k == ActionKind::Butcher) rate[(size_t)BodyPart::LeftArm] += 0.2f, rate[(size_t)BodyPart::RightArm] += 0.2f;
     }
     // Sleeping on the bare ground
-    if (p.asleep && !indoors && t.prop != Prop::Bed)
+    if (p.asleep && !indoors && t.prop != Prop::Bed && p.vehicle < 0)
         for (int i : {1, 2, 3, 6, 7}) rate[i] += 0.04f * ground;
     for (int i = 0; i < (int)BodyPart::Count; ++i) p.body.soil((BodyPart)i, rate[i] * h);
 }
@@ -1060,6 +1133,27 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
         o.x = dx; o.y = dy; o.dir = ddir;
         o.enabled = nearDoor;
         o.reason = nearDoor ? "" : "Too far away";
+        out.push_back(o);
+    }
+
+    // Windows: smash one, then climb through
+    int winX, winY, winDir;
+    if (world_->findWindowNear(pt, 0.9f, winX, winY, winDir)) {
+        Vec2 mid = winDir == 0 ? Vec2{winX + 0.5f, (float)winY} : Vec2{(float)winX, winY + 0.5f};
+        bool nearWin = distance(mid, player_.pos) < 1.6f;
+        ActionOption o;
+        o.x = winX; o.y = winY; o.dir = winDir;
+        o.enabled = nearWin;
+        o.reason = nearWin ? "" : "Too far away";
+        if (!world_->windowBroken(winX, winY, winDir)) {
+            bool tool = false;
+            for (const auto& it : player_.inventory.items()) tool |= heavyTool(it.def);
+            o.kind = ActionKind::BreakWindow;
+            o.label = tool ? "Smash the window" : "Smash the window (with your elbow)";
+        } else {
+            o.kind = ActionKind::ClimbWindow;
+            o.label = "Climb through the window";
+        }
         out.push_back(o);
     }
 
@@ -1359,6 +1453,7 @@ void Game::cancelAction() {
     if (action_.active && action_.option.kind == ActionKind::Sleep) {
         player_.asleep = false;
         player_.body.setAsleep(false);
+        sleepReport();
     }
     action_.active = false;
 }
@@ -1432,16 +1527,33 @@ void Game::perform(const ActionOption& o) {
             startTimed(o, cd ? cd->searchSeconds : 2.0f);
             return;
         }
-        case ActionKind::Sleep:
-            if (o.targetId != 0)   // crawling into a tent
+        case ActionKind::Sleep: {
+            if (o.targetId != 0 && player_.vehicle < 0)   // crawling into a tent
                 for (const auto& t : world_->tents())
                     if (t.id == o.targetId) player_.pos = t.rect.centre();
+            bool car = playerVehicle() && playerVehicle()->kind == VehicleKind::Car;
+            if (car) if (Vehicle* v = playerVehicle()) v->speed = 0;
             player_.asleep = true;
             player_.body.setAsleep(true);
+            sleepStartMin_ = world_->clock().totalMinutes();
+            sleepComfortSum_ = sleepMinutes_ = 0;
             startTimed(o, 1e9f, 90.0f);
-            log("You lie down and close your eyes.");
+            log(car ? "You tip the seat back and close your eyes." : "You lie down and close your eyes.");
+            // how this will be
+            SleepComfort c = sleepComfort();
+            std::string why;
+            for (size_t i = 0; i < c.good.size(); ++i) why += (i ? ", " : "") + c.good[i];
+            if (!c.bad.empty()) {
+                why += why.empty() ? "" : ". But: ";
+                for (size_t i = 0; i < c.bad.size(); ++i) why += (i ? ", " : "") + c.bad[i];
+            }
+            log(std::string(c.word()) + (why.empty() ? "." : " - " + why + "."),
+                c.score >= 0.15f ? MessageKind::Good : c.score <= -0.15f ? MessageKind::Bad : MessageKind::Info);
             return;
+        }
         case ActionKind::Rest: startTimed(o, 3.0f, 20.0f); return;
+        case ActionKind::BreakWindow: startTimed(o, 1.0f); return;
+        case ActionKind::ClimbWindow: startTimed(o, 2.5f); return;
         case ActionKind::Wait: startTimed(o, 3.0f, 20.0f); return;
         case ActionKind::DrinkSource: startTimed(o, 2.5f); return;
         case ActionKind::FillBottle: startTimed(o, 3.0f); return;
@@ -1636,7 +1748,61 @@ void Game::finishAction() {
             player_.asleep = false;
             player_.body.setAsleep(false);
             log("You wake up.");
+            sleepReport();
             break;
+        case ActionKind::BreakWindow: {
+            if (!world_->windowAt(o.x, o.y, o.dir) || world_->windowBroken(o.x, o.y, o.dir)) break;
+            world_->breakWindow(o.x, o.y, o.dir);
+            Vec2 mid = o.dir == 0 ? Vec2{o.x + 0.5f, (float)o.y} : Vec2{(float)o.x, o.y + 0.5f};
+            sound(Sfx::Glass, mid);
+            animals_.scare(mid, 80);
+            player_.noise = std::max(player_.noise, 45.0f);
+            for (auto& s : survivors_)   // raiders come to see what broke
+                if (s.alive() && s.def->disposition == Disposition::Raider && !s.truce && distance(s.pos, mid) < 70) {
+                    s.state = SurvivorState::Hunt;
+                    s.stateTimer = 30;
+                    s.target = player_.pos;
+                }
+            bool tool = false;
+            for (const auto& it : player_.inventory.items()) tool |= heavyTool(it.def);
+            bool gloves = player_.worn[(size_t)ClothingSlot::Hands].def != nullptr;
+            log(tool ? "The glass shatters." : "You drive your elbow through the glass. It shatters.");
+            float cut = tool ? 0.1f : gloves ? 0.2f : 0.45f;
+            if (rng_.chance(cut)) {
+                Wound w;
+                w.part = tool || rng_.chance(0.5f) ? BodyPart::RightHand : BodyPart::RightArm;
+                w.type = WoundType::Laceration;
+                w.severity = rng_.range(0.08f, 0.25f);
+                w.bleeding = 6;
+                w.contamination = 0.25f;
+                player_.body.addWound(w);
+                log("You cut yourself on the glass.", MessageKind::Bad);
+            }
+            break;
+        }
+        case ActionKind::ClimbWindow: {
+            // out the other side of the wall
+            Vec2 p = player_.pos;
+            Vec2 to = o.dir == 0 ? Vec2{o.x + 0.5f, p.y < o.y ? o.y + 0.55f : o.y - 0.55f}
+                                 : Vec2{p.x < o.x ? o.x + 0.55f : o.x - 0.55f, o.y + 0.5f};
+            if (world_->tileBlocked((int)std::floor(to.x), (int)std::floor(to.y))) {
+                log("Something's in the way on the other side.", MessageKind::Bad);
+                break;
+            }
+            player_.pos = to;
+            log("You climb through the broken window.");
+            if (rng_.chance(player_.worn[(size_t)ClothingSlot::Hands].def ? 0.03f : 0.1f)) {
+                Wound w;
+                w.part = rng_.chance(0.5f) ? BodyPart::LeftHand : BodyPart::LeftLeg;
+                w.type = WoundType::Laceration;
+                w.severity = rng_.range(0.05f, 0.15f);
+                w.bleeding = 3;
+                w.contamination = 0.2f;
+                player_.body.addWound(w);
+                log("A shard left in the frame catches you.", MessageKind::Bad);
+            }
+            break;
+        }
         case ActionKind::Rest: case ActionKind::Wait:
             break;
         case ActionKind::DrinkSource: {

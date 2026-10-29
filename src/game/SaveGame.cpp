@@ -13,7 +13,7 @@ class SaveGame {
 public:
     // 3: dressings per body part, 4: tents, carpentry, stoves, 5: people, vehicles, 6: petrol, 7: deals and rumours,
     // 8: who you are (name, looks, dyed clothes), friendships, people's beds, 9: kinship (the way to Family)
-    static constexpr int kVersion = 9;
+    static constexpr int kVersion = 10;
     static int& readVersion() { static int v = kVersion; return v; }   // of the file being read
 
     // --- writing -------------------------------------------------------------
@@ -116,12 +116,15 @@ public:
         for (const auto& [k, l] : g.pumpFuel_) o << k << ' ' << l << '\n';
         // v8: who you are, and where you stand with people
         o << "SELF " << std::quoted(p.look.name) << ' ' << (int)p.look.gender << ' ' << p.look.skin << ' ' << p.look.hair << ' '
-          << p.look.hairStyle << '\n';
+          << p.look.hairStyle << ' ' << p.look.age << '\n';   // age: v10
         o << "BONDS " << g.survivors_.size() << '\n';
         for (const auto& sv : g.survivors_)
             o << sv.def->id << ' ' << sv.romance << ' ' << sv.family << ' ' << sv.lover << ' ' << sv.lastChatDay << ' ' << sv.lastFlirtDay << ' '
               << sv.lastGiftDay << ' ' << sv.lastJokeDay << ' ' << sv.lastSorryDay << ' ' << sv.storiesTold << ' ' << (int)sv.shownBond << ' '
               << sv.companyMinutes << ' ' << sv.kinship << ' ' << sv.lastKinDay << '\n';
+        // v10: broken windows
+        o << "WINDOWS " << w.brokenWindows_.size() << '\n';
+        for (int64_t k : w.brokenWindows_) o << k << '\n';
         o << "END\n";
     }
 
@@ -334,6 +337,7 @@ public:
             std::string tag;
             int gender = 0;
             in >> tag >> std::quoted(p.look.name) >> gender >> p.look.skin >> p.look.hair >> p.look.hairStyle;
+            if (version >= 10) { in >> p.look.age; p.look.age = std::clamp(p.look.age, 18, 90); }
             p.look.gender = (Gender)std::clamp(gender, 0, 2);
             size_t nb = 0;
             in >> tag >> nb;
@@ -353,6 +357,12 @@ public:
                     sv.shownBond = (Bond)std::clamp(shown, 0, (int)Bond::Count - 1); sv.companyMinutes = t.companyMinutes;
                     sv.kinship = t.kinship; sv.lastKinDay = t.lastKinDay;
                 }
+            }
+            if (version >= 10) {
+                size_t nw = 0;
+                in >> tag >> nw;
+                w.brokenWindows_.clear();
+                for (size_t i = 0; i < nw && in; ++i) { int64_t k; in >> k; w.brokenWindows_.insert(k); }
             }
         }
         // Saved before people had a bed: whatever they were doing, they're awake

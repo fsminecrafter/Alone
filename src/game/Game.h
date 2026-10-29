@@ -45,7 +45,12 @@ enum class ActionKind {
     // vehicles
     TryCarDoor, SmashCarWindow, EnterVehicle, ExitVehicle, StartEngine, StopEngine, Hotwire, Refuel, SearchGlovebox, MountBike,
     Siphon, FillFromPump,
+    // windows
+    BreakWindow, ClimbWindow,
 };
+
+// Heavy enough to smash glass with (axe, hammer, crowbar, bat...)
+bool heavyTool(const ItemDef* d);
 
 struct ActionOption {
     std::string label;
@@ -94,6 +99,7 @@ struct PlayerInput {
 // Who you are: picked when you start a new game.
 struct PlayerLook {
     std::string name = "Alex";
+    int age = 30;
     Gender gender = Gender::Man;
     uint32_t skin = 0xe2b896, hair = 0x4a3626;
     int hairStyle = 0;
@@ -131,6 +137,13 @@ struct Player {
     float vomitTimer = 0;
     bool flashlightOn = false;
     float lastAttack = 100;      // seconds since the player last fought
+};
+
+// How well you'd sleep where you are: what helps and what doesn't.
+struct SleepComfort {
+    float score = 0;                    // -1 miserable .. 1 very comfortable
+    std::vector<std::string> good, bad;
+    const char* word() const;
 };
 
 struct DeathInfo {
@@ -180,6 +193,7 @@ public:
     float carryCapacityKg() const;
     float carriedKg() const;
     Environment environment();
+    SleepComfort sleepComfort();     // sleeping here, now
     const ItemInstance* weapon() const;
 
     // --- other people ---------------------------------------------------------
@@ -189,6 +203,10 @@ public:
     const std::vector<SurvivorDef>& survivorDefs() const { return survivorDefs_; }
     // What you can say to them right now, with labels
     std::vector<std::pair<Topic, std::string>> talkTopics(int id);
+    // Why flirting isn't on offer right now (empty when it is, or it can't ever be)
+    std::string romanceHint(int id);
+    // Someone walked up to you and wants to talk (0 if nobody); taking it clears it
+    int takeTalkRequest() { int id = talkRequest_; talkRequest_ = 0; return id; }
     // Say it; returns their answer
     std::string talk(int id, Topic t);
     std::string greeting(int id);      // what they say when you walk up (meets them the first time)
@@ -259,6 +277,8 @@ public:
     uint32_t seed() const { return seed_; }
 
 private:
+    SleepComfort sleepComfortIn(const Environment& env);
+    void sleepReport();              // on waking: how you slept
     void updatePlayer(float dt, float gameMinutes, const PlayerInput& in);
     void updateCombat(float dt, const PlayerInput& in);
     void finishAction();
@@ -291,6 +311,12 @@ private:
     void findBed(Survivor& s);
     bool planPath(Survivor& s, Vec2 to);           // tiles through the house, round walls (doors are fine)
     Vec2 roomSpot(const Survivor& s);              // somewhere to stand in their house
+    // Where to head next on the way to `goal`: the goal itself when the way is
+    // clear, otherwise the next turn of a way round props, water and walls
+    Vec2 navigate(Survivor& s, Vec2 goal, float dt);
+    bool walkClear(Vec2 a, Vec2 b, float radius);  // a body of `radius` could walk straight from a to b (doors count as open)
+    bool planRoute(Vec2 from, Vec2 to, std::vector<Vec2>& out);
+    void openDoorAhead(Survivor& s, Vec2 dir);     // opens a closed door they're about to walk into
     void wakeSurvivor(Survivor& s);
     void announceBond(Survivor& s);                // logs when you've become friends, etc.
     void addTrust(Survivor& s, float amount, float cap = 100);
@@ -330,6 +356,10 @@ private:
     Symptoms symptoms_;
     AnimalSystem animals_;
     std::unique_ptr<World> world_;
+    // This night's sleep: when it began, and how comfortable it has been
+    int talkRequest_ = 0;
+    double sleepStartMin_ = -1;
+    float sleepComfortSum_ = 0, sleepMinutes_ = 0;
     Player player_;
     Rng rng_;
     void checkTrip(float dt, float grade, float limp);   // steep ground can bring you down

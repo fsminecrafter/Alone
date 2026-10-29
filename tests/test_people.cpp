@@ -636,6 +636,7 @@ TEST(character_and_bonds_survive_saving) {
     c.look.gender = Gender::Woman;
     c.look.hairStyle = 2;
     c.look.skin = 0x8d5a3b;
+    c.look.age = 52;
     c.wear[(size_t)ClothingSlot::Head] = "wool_hat";
     c.tint[(size_t)ClothingSlot::Head] = 0x3e5a36;
     g.newGame(42, &c);
@@ -657,10 +658,272 @@ TEST(character_and_bonds_survive_saving) {
     CHECK(h.load(path));
     CHECK(h.player().look.name == "Åsa Ström" && h.player().look.gender == Gender::Woman && h.player().look.hairStyle == 2);
     CHECK(h.player().look.skin == 0x8d5a3b);
+    CHECK(h.player().look.age == 52);
     const ItemInstance& hat2 = h.player().worn[(size_t)ClothingSlot::Head];
     CHECK(hat2.def && hat2.tint == 0x3e5a36);
     Survivor* e2 = find(h, "elin");
     CHECK(e2 && e2->lover && e2->bond() == Bond::Lover && std::fabs(e2->romance - 72) < 0.01f && e2->storiesTold == 2);
     CHECK(e2 && std::fabs(e2->kinship - 12) < 0.01f);
     std::remove(path.c_str());
+}
+
+TEST(people_walk_round_what_is_in_their_way) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* elin = find(g, "elin");
+    CHECK(elin != nullptr);
+    if (!elin) return;
+    World& w = g.world();
+    // An open patch near the start, with nothing in it and no walls
+    auto open = [&](int x0, int y0) {
+        for (int y = y0; y < y0 + 26; ++y)
+            for (int x = x0; x < x0 + 26; ++x)
+                if (w.tileBlocked(x, y) || w.tile(x, y).walls || w.tile(x, y).building >= 0) return false;
+        return true;
+    };
+    Vec2 start = g.player().pos;
+    int ox = 0, oy = 0;
+    bool found = false;
+    for (int r = 0; r < 400 && !found; r += 6)
+        for (int k = 0; k < 16 && !found; ++k) {
+            int x = (int)start.x + (int)(r * std::cos(k * 0.39f)), y = (int)start.y + (int)(r * std::sin(k * 0.39f));
+            if (open(x, y)) { ox = x; oy = y; found = true; }
+        }
+    CHECK(found);
+    if (!found) return;
+    // A fence like a cup round her, open at the back, between her and you
+    int cx = ox + 13, cy = oy + 13;
+    for (int y = cy - 5; y <= cy + 5; ++y) w.setProp(cx, y, Prop::Fence);
+    for (int x = cx - 4; x < cx; ++x) { w.setProp(x, cy - 5, Prop::Fence); w.setProp(x, cy + 5, Prop::Fence); }
+    elin->joined = true;
+    elin->state = SurvivorState::Follow;
+    elin->trust = 80;
+    elin->pos = Vec2{cx - 1.5f, cy + 0.5f};
+    g.player().pos = Vec2{cx + 6.5f, cy + 0.5f};
+    PlayerInput stand;
+    float closest = 1e9f;
+    for (float t = 0; t < 20; t += 0.05f) {
+        g.update(0.05f, stand);
+        closest = std::min(closest, distance(elin->pos, g.player().pos));
+    }
+    std::printf("    got within %.1f m\n", closest);
+    CHECK(closest < 3.5f);
+}
+
+TEST(romance_hint_says_why_flirting_is_missing) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* elin = find(g, "elin");
+    if (!elin) return;
+    g.player().pos = elin->pos + Vec2{1.0f, 0};
+    g.greeting(elin->id);
+    auto hasFlirt = [&] {
+        for (auto& [t, label] : g.talkTopics(elin->id)) if (t == Topic::Flirt) return true;
+        return false;
+    };
+    elin->trust = 5;
+    CHECK(!hasFlirt());
+    CHECK(g.romanceHint(elin->id).find("trust") != std::string::npos);
+    elin->trust = 40;
+    CHECK(hasFlirt());
+    CHECK(g.romanceHint(elin->id).empty());
+    g.talk(elin->id, Topic::Flirt);
+    CHECK(!hasFlirt());
+    CHECK(g.romanceHint(elin->id).find("tomorrow") != std::string::npos || g.romanceHint(elin->id).find("best friends") != std::string::npos);
+    std::printf("    %s\n", g.romanceHint(elin->id).c_str());
+}
+
+TEST(sleep_in_a_car_and_comfort) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(7);
+    Vec2 vimpeln{0, 0};
+    for (const auto& b : g.world().gen().allBuildings())
+        if (b.name == "Vimpeln") vimpeln = b.rect.centre();
+    // Get into a car whose door opens
+    bool in = false;
+    for (int i = 0; i < 80 && !in; ++i) {
+        int cx, cy;
+        if (!findCar(g, vimpeln, cx, cy)) break;
+        g.player().pos = Vec2{cx + 0.5f, cy + 2.2f};
+        for (auto& o : g.actionsAt(Vec2{cx + 0.5f, cy + 0.5f}))
+            if ((o.kind == ActionKind::TryCarDoor || o.kind == ActionKind::EnterVehicle) && o.enabled) { g.perform(o); break; }
+        in = g.player().vehicle >= 0;
+        if (!in) g.world().setProp(cx, cy, Prop::None);
+    }
+    CHECK(in);
+    if (!in) return;
+    ActionOption sleep;
+    for (auto& o : g.actionsAt(g.player().pos))
+        if (o.kind == ActionKind::Sleep) sleep = o;
+    CHECK(sleep.kind == ActionKind::Sleep && sleep.enabled);
+    float dryCar = g.sleepComfort().score;
+    give(g, "pillow");
+    float pillowCar = g.sleepComfort().score;
+    CHECK(pillowCar > dryCar);
+    g.player().body.mutableState().sleepPressure = 1.0f;   // worn out
+    g.perform(sleep);
+    CHECK(g.player().asleep && g.player().vehicle >= 0);
+    float early = g.sleepComfort().score;
+    // hours in the seat get uncomfortable
+    double t0 = g.world().clock().totalMinutes();
+    float late = early;
+    for (int i = 0; i < 200000 && g.player().asleep && g.world().clock().totalMinutes() - t0 < 6 * 60; ++i) {
+        g.update(0.05f, PlayerInput{});
+        if (g.player().asleep) late = g.sleepComfort().score;
+    }
+    std::printf("    car: %.2f, with pillow %.2f, asleep %.2f, after %.1f h %.2f\n", dryCar, pillowCar, early,
+                (g.world().clock().totalMinutes() - t0) / 60.0, late);
+    CHECK(g.world().clock().totalMinutes() - t0 > 3 * 60);
+    CHECK(late < early - 0.1f);
+    g.cancelAction();
+    // a bed beats a car; wet clothes make anything worse
+    g.player().vehicle = -1;
+    int bx = 0, by = 0;
+    bool bed = false;
+    for (int r = 0; r < 200 && !bed; ++r)
+        for (int dy = -r; dy <= r && !bed; ++dy)
+            for (int dx = -r; dx <= r && !bed; dx += (std::abs(dy) == r ? 1 : 2 * r))
+                if (g.world().tile((int)vimpeln.x + dx, (int)vimpeln.y + dy).prop == Prop::Bed) { bx = (int)vimpeln.x + dx; by = (int)vimpeln.y + dy; bed = true; }
+    if (bed) {
+        g.player().pos = Vec2{bx + 0.5f, by + 0.5f};
+        float inBed = g.sleepComfort().score;
+        g.player().body.mutableState().wetness = 1.0f;
+        float wetBed = g.sleepComfort().score;
+        std::printf("    bed with pillow %.2f, soaked %.2f\n", inBed, wetBed);
+        CHECK(inBed > pillowCar);
+        CHECK(wetBed < inBed - 0.2f);
+    }
+}
+
+namespace {
+// An empty patch of open ground near the start: no props, walls or buildings
+bool openPatch(Game& g, int size, int& ox, int& oy) {
+    World& w = g.world();
+    auto open = [&](int x0, int y0) {
+        for (int y = y0; y < y0 + size; ++y)
+            for (int x = x0; x < x0 + size; ++x)
+                if (w.tileBlocked(x, y) || w.tile(x, y).walls || w.tile(x, y).building >= 0) return false;
+        return true;
+    };
+    Vec2 start = g.player().pos;
+    for (int r = 0; r < 500; r += 6)
+        for (int k = 0; k < 16; ++k) {
+            int x = (int)start.x + (int)(r * std::cos(k * 0.39f)), y = (int)start.y + (int)(r * std::sin(k * 0.39f));
+            if (open(x, y)) { ox = x; oy = y; return true; }
+        }
+    return false;
+}
+// A closed 3x3 room of walls with its corner at (x, y)
+void room(World& w, int x, int y) {
+    for (int i = 0; i < 3; ++i) {
+        w.addBuild({BuildKind::Wall, x + i, y, 0});
+        w.addBuild({BuildKind::Wall, x + i, y + 3, 0});
+        w.addBuild({BuildKind::Wall, x, y + i, 1});
+        w.addBuild({BuildKind::Wall, x + 3, y + i, 1});
+    }
+}
+void finishTimed(Game& g) {
+    for (int i = 0; i < 400 && g.currentAction().active; ++i) g.update(0.05f, PlayerInput{});
+}
+} // namespace
+
+TEST(walls_block_sight_and_windows_break) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    int ox, oy;
+    CHECK(openPatch(g, 30, ox, oy));
+    World& w = g.world();
+    int cx = ox + 13, cy = oy + 13;
+    room(w, cx, cy);
+    Vec2 in{cx + 1.5f, cy + 1.5f};
+    // nothing gets out of a closed room, not even exactly through a corner
+    int seen = 0;
+    for (int k = 0; k < 64; ++k) {
+        float a = k * 6.2832f / 64;
+        seen += w.lineOfSight(in, in + Vec2{std::cos(a), std::sin(a)} * 9.0f);
+    }
+    seen += w.lineOfSight(in, in + Vec2{5, 5}) + w.lineOfSight(in, in + Vec2{-5, 5}) + w.lineOfSight(in, in + Vec2{5, -5});
+    CHECK(seen == 0);
+    // a window lets you see out, and can be smashed and climbed through
+    w.removeBuild({BuildKind::Wall, cx + 1, cy, 0});
+    w.addBuild({BuildKind::Window, cx + 1, cy, 0});
+    CHECK(w.lineOfSight(in, Vec2{cx + 1.5f, cy - 6.0f}));
+    g.player().pos = Vec2{cx + 1.5f, cy - 0.6f};
+    ActionOption brk, climb;
+    for (auto& o : g.actionsAt(Vec2{cx + 1.5f, cy - 0.1f})) {
+        if (o.kind == ActionKind::BreakWindow) brk = o;
+        if (o.kind == ActionKind::ClimbWindow) climb = o;
+    }
+    CHECK(brk.kind == ActionKind::BreakWindow && brk.enabled && climb.kind == ActionKind::None);
+    g.perform(brk);
+    finishTimed(g);
+    CHECK(w.windowBroken(cx + 1, cy, 0));
+    for (auto& o : g.actionsAt(Vec2{cx + 1.5f, cy - 0.1f}))
+        if (o.kind == ActionKind::ClimbWindow) climb = o;
+    CHECK(climb.kind == ActionKind::ClimbWindow && climb.enabled);
+    g.perform(climb);
+    finishTimed(g);
+    Vec2 p = g.player().pos;
+    std::printf("    climbed to %.2f, %.2f (room %d..%d)\n", p.x, p.y, cy, cy + 3);
+    CHECK(p.y > cy && p.y < cy + 3 && p.x > cx && p.x < cx + 3);
+    // and it stays broken through a save
+    std::string path = "test_windows_save.txt";
+    CHECK(g.save(path));
+    Game h;
+    CHECK(h.loadData());
+    CHECK(h.load(path));
+    CHECK(h.world().windowBroken(cx + 1, cy, 0));
+    std::remove(path.c_str());
+}
+
+TEST(jonas_freezes_you_walks_up_and_talks) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    Survivor* jonas = find(g, "jonas");
+    if (!jonas) return;
+    int ox, oy;
+    CHECK(openPatch(g, 30, ox, oy));
+    // daytime, out in the open
+    double add = 12.0 - g.world().clock().hourOfDay();
+    if (add < 0) add += 24;
+    g.world().clock().advance(add * 60);
+    jonas->pos = jonas->home = Vec2{ox + 5.5f, oy + 15.5f};
+    jonas->homeBuilding = -1;
+    jonas->state = SurvivorState::Home;
+    g.player().pos = Vec2{ox + 18.5f, oy + 15.5f};
+    PlayerInput stand;
+    bool froze = false;
+    int asked = 0;
+    for (float t = 0; t < 25 && !asked; t += 0.05f) {
+        g.update(0.05f, stand);
+        froze |= jonas->state == SurvivorState::Alert;
+        asked = g.takeTalkRequest();
+    }
+    std::printf("    froze %d, asked to talk %d, %.1f m away, says \"%s\"\n", froze, asked == jonas->id, distance(jonas->pos, g.player().pos),
+                jonas->speech.c_str());
+    CHECK(froze);
+    CHECK(asked == jonas->id);
+    CHECK(distance(jonas->pos, g.player().pos) < 4.0f);
+    CHECK(g.player().body.state().wounds.empty());
+    bool parley = false;
+    for (auto& [t, l] : g.talkTopics(jonas->id)) parley |= t == Topic::Parley;
+    CHECK(parley);
+    // walk away: he goes back and leaves you be for a while
+    g.talk(jonas->id, Topic::Bye);
+    CHECK(jonas->state != SurvivorState::Alert && jonas->freezeCooldown > 0);
+    // a wall between you: he can't see you
+    jonas->freezeCooldown = 0;
+    jonas->state = SurvivorState::Home;
+    jonas->pos = jonas->home;
+    room(g.world(), ox + 4, oy + 14);
+    run(g, 4, stand);
+    CHECK(jonas->state != SurvivorState::Alert);
+    // hurt him once, and he shoots on sight
+    jonas->angry = true;
+    CHECK(jonas->hostileTo());
 }

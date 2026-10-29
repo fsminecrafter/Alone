@@ -302,20 +302,44 @@ Vec2 World::moveCircle(Vec2 from, Vec2 delta, float r) {
     return p;
 }
 
+bool World::sightBlocked(int x, int y, int dx, int dy) {
+    int ex = x, ey = y, dir;
+    if (dx == 1) { ex = x + 1; dir = 1; }
+    else if (dx == -1) { dir = 1; }
+    else if (dy == 1) { ey = y + 1; dir = 0; }
+    else { dir = 0; }
+    const Tile& t = tile(ex, ey);
+    if (!(t.walls & (dir == 0 ? WallN : WallW))) return false;
+    if (t.walls & (dir == 0 ? WindowN : WindowW)) return false;
+    if (t.walls & (dir == 0 ? DoorN : DoorW)) return !doorOpen(ex, ey, dir);
+    return true;
+}
+
+// Walks the exact tiles the line passes through and checks every edge it
+// crosses. Through a tile corner it only gets past if one of the two ways
+// round the corner is open.
 bool World::lineOfSight(Vec2 a, Vec2 b) {
+    int x = (int)std::floor(a.x), y = (int)std::floor(a.y);
+    int gx = (int)std::floor(b.x), gy = (int)std::floor(b.y);
     Vec2 d = b - a;
-    float len = d.length();
-    int steps = (int)(len / 0.5f);
-    int px = (int)std::floor(a.x), py = (int)std::floor(a.y);
-    for (int i = 1; i <= steps; ++i) {
-        Vec2 p = a + d * (i / (float)steps);
-        int x = (int)std::floor(p.x), y = (int)std::floor(p.y);
-        if (x != px && y == py && edgeBlocked(px, py, x - px, 0)) return false;
-        if (y != py && x == px && edgeBlocked(px, py, 0, y - py)) return false;
-        if (x != px && y != py) {
-            if (edgeBlocked(px, py, x - px, 0) && edgeBlocked(px, py, 0, y - py)) return false;
+    int sx = d.x > 0 ? 1 : -1, sy = d.y > 0 ? 1 : -1;
+    const float inf = 1e30f;
+    float tdx = d.x != 0 ? std::fabs(1.0f / d.x) : inf, tdy = d.y != 0 ? std::fabs(1.0f / d.y) : inf;
+    float tmx = d.x != 0 ? (sx > 0 ? (x + 1 - a.x) : (a.x - x)) * tdx : inf;
+    float tmy = d.y != 0 ? (sy > 0 ? (y + 1 - a.y) : (a.y - y)) * tdy : inf;
+    for (int guard = 0; (x != gx || y != gy) && guard < 4096; ++guard) {
+        if (std::fabs(tmx - tmy) < 1e-6f) {
+            bool viaX = !sightBlocked(x, y, sx, 0) && !sightBlocked(x + sx, y, 0, sy);
+            bool viaY = !sightBlocked(x, y, 0, sy) && !sightBlocked(x, y + sy, sx, 0);
+            if (!viaX && !viaY) return false;
+            x += sx; y += sy; tmx += tdx; tmy += tdy;
+        } else if (tmx < tmy) {
+            if (sightBlocked(x, y, sx, 0)) return false;
+            x += sx; tmx += tdx;
+        } else {
+            if (sightBlocked(x, y, 0, sy)) return false;
+            y += sy; tmy += tdy;
         }
-        px = x; py = y;
     }
     return true;
 }
@@ -365,6 +389,32 @@ bool World::findDoorNear(Vec2 p, float reach, int& ox, int& oy, int& odir) {
         for (int x = tx - 2; x <= tx + 2; ++x)
             for (int dir = 0; dir < 2; ++dir) {
                 if (!doorAt(x, y, dir)) continue;
+                Vec2 mid = dir == 0 ? Vec2{x + 0.5f, (float)y} : Vec2{(float)x, y + 0.5f};
+                float d = distance(mid, p);
+                if (d < best) { best = d; ox = x; oy = y; odir = dir; found = true; }
+            }
+    return found;
+}
+
+bool World::windowAt(int x, int y, int dir) {
+    return (tile(x, y).walls & (dir == 0 ? WindowN : WindowW)) != 0;
+}
+
+bool World::windowBroken(int x, int y, int dir) const { return brokenWindows_.count(doorKey(x, y, dir)) > 0; }
+
+void World::breakWindow(int x, int y, int dir) {
+    brokenWindows_.insert(doorKey(x, y, dir));
+    touch(x, y);
+}
+
+bool World::findWindowNear(Vec2 p, float reach, int& ox, int& oy, int& odir) {
+    float best = reach;
+    bool found = false;
+    int tx = (int)std::floor(p.x), ty = (int)std::floor(p.y);
+    for (int y = ty - 2; y <= ty + 2; ++y)
+        for (int x = tx - 2; x <= tx + 2; ++x)
+            for (int dir = 0; dir < 2; ++dir) {
+                if (!windowAt(x, y, dir)) continue;
                 Vec2 mid = dir == 0 ? Vec2{x + 0.5f, (float)y} : Vec2{(float)x, y + 0.5f};
                 float d = distance(mid, p);
                 if (d < best) { best = d; ox = x; oy = y; odir = dir; found = true; }

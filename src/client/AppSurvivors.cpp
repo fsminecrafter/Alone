@@ -107,7 +107,8 @@ void App::drawTalk() {
     float sc = ui::scale();
     float W = (float)GetScreenWidth(), H = (float)GetScreenHeight();
     auto topics = game_.talkTopics(talkTo_);
-    float ph = 168 * sc + topics.size() * 30 * sc;
+    std::string hint = game_.romanceHint(talkTo_);
+    float ph = 168 * sc + topics.size() * 30 * sc + (hint.empty() ? 0 : 24 * sc);
     float pw = std::min(760 * sc, W - 20);
     Rectangle p{W / 2 - pw / 2, H - ph - 20 * sc, pw, ph};
     ui::panel(p, Color{16, 17, 19, 240});
@@ -160,6 +161,8 @@ void App::drawTalk() {
         }
         y += 30 * sc;
     }
+    if (!hint.empty())
+        ui::text(hint, tx + 8 * sc, p.y + 158 * sc + topics.size() * 30 * sc + 2 * sc, 13 * sc, ui::theme().dim);
     ui::claim(p);
 }
 
