@@ -149,6 +149,13 @@ struct SleepComfort {
     const char* word() const;
 };
 
+// A piece of what happened to the world (data/text/lore.ini), learned from
+// documents and from people
+struct LoreEntry {
+    std::string id, title, text;
+    int order = 0;
+};
+
 struct DeathInfo {
     DeathCause cause = DeathCause::None;
     float daysSurvived = 0;
@@ -210,6 +217,12 @@ public:
     std::string romanceHint(int id);
     // In a tent with a companion: who (0 if nobody)
     int tentMate() const { return tentMate_; }
+    // What happened to the world: entries in story order, and the ones you know
+    const std::vector<LoreEntry>& lore() const { return lore_; }
+    bool knowsLore(const std::string& id) const;
+    // Adds it to the journal; fromDocument: the client opens the journal on it
+    bool learnLore(const std::string& id, bool fromDocument);
+    std::string takeLoreOpened() { std::string s = loreOpened_; loreOpened_.clear(); return s; }
     static int carSeats(const Vehicle& v) { return ((v.variant >> 4) % 4) == 3 ? 7 : 5; }   // a van seats seven
     // Weapons: the one on your back, swapping (key 1), reloading (R)
     const ItemInstance* stowedWeapon() const;
@@ -375,7 +388,10 @@ private:
     std::unique_ptr<World> world_;
     // This night's sleep: when it began, and how comfortable it has been
     int talkRequest_ = 0;
-    int tentMate_ = 0;               // the companion who crawled into the tent with you (survivor id)
+    int tentMate_ = 0;
+    std::vector<LoreEntry> lore_;
+    std::vector<std::string> loreKnown_;
+    std::string loreOpened_;               // the companion who crawled into the tent with you (survivor id)
     double sleepStartMin_ = -1;
     float sleepComfortSum_ = 0, sleepMinutes_ = 0;
     Player player_;

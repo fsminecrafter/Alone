@@ -17,7 +17,7 @@ const char* buildingTypeName(BuildingType t) {
                               "Warehouse", "Grocery store", "Pharmacy", "Gas station", "Hardware store",
                               "Hospital", "School", "Church", "Town hall", "Police station", "Fire station",
                               "Railway station", "Hostel", "Manor", "Sports hall", "Shop", "Shopping centre",
-                              "Restaurant", "Car park"};
+                              "Restaurant", "Car park", "Shelter"};
     static_assert(sizeof(n) / sizeof(n[0]) == (size_t)BuildingType::Count, "building names");
     return n[(int)t];
 }
@@ -72,6 +72,7 @@ BuildingType landmarkType(const std::string& kind) {
     if (kind == "police") return BuildingType::Police;
     if (kind == "firestation") return BuildingType::FireStation;
     if (kind == "sports") return BuildingType::Sports;
+    if (kind == "bunker") return BuildingType::Bunker;
     return BuildingType::Office;
 }
 
@@ -526,7 +527,7 @@ void WorldGen::layout(Building& b) {
     const IRect& r = b.rect;
 
     // Exterior walls with windows
-    auto windowAt = [&](int i, int len) { return i > 0 && i < len - 1 && (i % 3 == 1) && rnd(h) < 0.7f; };
+    auto windowAt = [&](int i, int len) { return b.type != BuildingType::Bunker && i > 0 && i < len - 1 && (i % 3 == 1) && rnd(h) < 0.7f; };
     for (int x = r.x; x < r.right(); ++x) {
         b.edges.push_back({x, r.y, (uint8_t)(WallN | (windowAt(x - r.x, r.w) ? WindowN : 0))});
         b.edges.push_back({x, r.bottom(), (uint8_t)(WallN | (windowAt(x - r.x, r.w) ? WindowN : 0))});
@@ -543,7 +544,7 @@ void WorldGen::layout(Building& b) {
             break;
         case BuildingType::Apartment: case BuildingType::Office: case BuildingType::School:
         case BuildingType::Hospital: case BuildingType::Hostel: case BuildingType::Police:
-        case BuildingType::TownHall: case BuildingType::FireStation:
+        case BuildingType::TownHall: case BuildingType::FireStation: case BuildingType::Bunker:
             layoutCorridors(b, h);
             break;
         case BuildingType::Mall:
@@ -656,6 +657,7 @@ void WorldGen::dressBuilding(Building& b, uint32_t& h) {
             case BuildingType::GasStation: b.sign = "Bensin"; break;
             case BuildingType::Police: b.sign = "Polis"; break;
             case BuildingType::FireStation: b.sign = "Räddningstjänst"; break;
+            case BuildingType::Bunker: b.sign = "Skyddsrum"; break;
             case BuildingType::Restaurant: b.sign = b.shop == "cafe" ? "Kafé" : b.shop == "kiosk" ? "Kiosk" : "Restaurang"; break;
             case BuildingType::Shop: {
                 const std::string& k = b.shop;
@@ -1000,6 +1002,14 @@ void WorldGen::assignRooms(Building& b, uint32_t& h) {
         case BuildingType::FireStation: case BuildingType::Police:
             for (auto& r : rooms) if (r.type == RoomType::Office) r.type = rnd(h) < 0.6f ? RoomType::Office : RoomType::Locker;
             break;
+        case BuildingType::Bunker: {
+            // bunk rooms, the store, a kitchen and the radio room
+            int i = 0;
+            static const RoomType kinds[] = {RoomType::Storage, RoomType::Bedroom, RoomType::Office, RoomType::Kitchen, RoomType::Bedroom, RoomType::Bathroom};
+            for (auto& r : rooms)
+                if (r.type == RoomType::Office) r.type = kinds[i++ % 6];
+            break;
+        }
         default: break;
     }
 }
@@ -1192,6 +1202,10 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                     alongWalls(room, {{Prop::Fridge, ""}, {Prop::Counter, ""}, {Prop::Bed, ""}, {Prop::Wardrobe, ""}});
                 break;
             case RoomType::Bedroom:
+                if (b.type == BuildingType::Bunker) {   // bunks and a locker each
+                    alongWalls(room, {{Prop::Bed, ""}, {Prop::Bed, ""}, {Prop::Locker, "bunker_locker"}});
+                    break;
+                }
                 alongWalls(room, {{Prop::Bed, ""}, {Prop::Wardrobe, ""}, {Prop::Dresser, ""}});
                 if (hunterHome && b.type != BuildingType::Hostel) { alongWalls(room, {{Prop::GunCabinet, ""}}); hunterHome = false; }
                 break;
@@ -1209,7 +1223,10 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                             if (rnd(h) < 0.3f) place(x, y, Prop::Car, (uint8_t)(rnd(h) < 0.5f ? 0 : 1));
                     break;
                 }
-                if (b.type == BuildingType::Grocery || b.type == BuildingType::Pharmacy || b.type == BuildingType::Hardware ||
+                if (b.type == BuildingType::Bunker) {
+                    alongWalls(room, {{Prop::Shelf, "bunker_store"}, {Prop::Shelf, "bunker_store"}, {Prop::Shelf, "bunker_store"},
+                                      {Prop::Locker, "bunker_locker"}, {Prop::Desk, "bunker_desk"}});
+                } else if (b.type == BuildingType::Grocery || b.type == BuildingType::Pharmacy || b.type == BuildingType::Hardware ||
                     b.type == BuildingType::GasStation || b.type == BuildingType::Shop) {
                     alongWalls(room, {{Prop::Shelf, shelfLoot}, {Prop::Shelf, shelfLoot}, {Prop::Shelf, shelfLoot},
                                       {Prop::Desk, b.type == BuildingType::Pharmacy ? "pharmacy_back" : "desk"}});
@@ -1236,6 +1253,10 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                 break;
             }
             case RoomType::Office:
+                if (b.type == BuildingType::Bunker) {   // the radio room
+                    alongWalls(room, {{Prop::Desk, "bunker_desk"}, {Prop::Desk, "bunker_desk"}, {Prop::Chair, ""}, {Prop::GunCabinet, ""}});
+                    break;
+                }
                 alongWalls(room, {{Prop::Desk, ""}, {Prop::Bookshelf, ""}, {Prop::Chair, ""}});
                 if (b.type == BuildingType::Police && rnd(h) < 0.3f) alongWalls(room, {{Prop::GunCabinet, ""}});
                 break;
@@ -1349,6 +1370,9 @@ void WorldGen::styleBuilding(Building& b, uint32_t& h) {
             b.wallColour = 0xf0ede4; b.roofColour = 0x2c2c2e; b.floors = 2; b.roof = RoofKind::Hip; break;
         case BuildingType::FireStation:
             b.wallColour = 0xb85c3c; b.roofColour = 0x3a3a3c; b.floors = 2; b.roof = RoofKind::Flat; break;
+        case BuildingType::Bunker:
+            b.wallColour = 0x84867f; b.roofColour = 0x55594f; b.trimColour = 0x3a3c38; b.floors = 1; b.roof = RoofKind::Flat;
+            b.floor = Ground::FloorConcrete; break;
         case BuildingType::Sports:
             b.wallColour = 0xa9b9c4; b.roofColour = 0x4a4c50; b.floors = 2; b.roof = RoofKind::Flat; b.floor = Ground::FloorConcrete; break;
         default: break;

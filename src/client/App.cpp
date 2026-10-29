@@ -284,6 +284,7 @@ void App::frame() {
             {0, 0, 0, "screenshot_health_info.png", Overlay::Health},
             {0, 0, 0, "screenshot_camp.png", Overlay::None},
             {1086.6f, 322.1f, 11, "screenshot_hjortmarka.png", Overlay::None},
+            {1081.0f, 317.0f, 13, "screenshot_bunker.png", Overlay::None},
             {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
             {0, 0, 0, "screenshot_settings_graphics.png", Overlay::Settings},
             {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
@@ -291,6 +292,7 @@ void App::frame() {
             {0, 0, 0, "screenshot_people.png", Overlay::None},
             {0, 0, 0, "screenshot_trade.png", Overlay::None},
             {0, 0, 0, "screenshot_journal.png", Overlay::Journal},
+            {0, 0, 0, "screenshot_journal_lore.png", Overlay::Journal},
             {0, 0, 0, "screenshot_parley.png", Overlay::None},
             {1, 1, 13, "screenshot_vimpeln_carpark.png", Overlay::None},
             {0, 0, 0, "screenshot_fuel_station.png", Overlay::None},
@@ -536,6 +538,7 @@ void App::frame() {
             if ((file == "screenshot_people.png" || file == "screenshot_trade.png") && elin && sub == 0) {
                 game_.player().pos = elin->pos + Vec2{1.3f, 0.4f};
                 elin->target = elin->pos;
+                elin->trust = std::max(elin->trust, 30.0f);   // far enough along for the family and romance options
                 game_.animals().animals().clear();
                 renderer_.snapTo(game_.player().pos);
                 double add = 12.5 - game_.world().clock().hourOfDay();
@@ -597,7 +600,13 @@ void App::frame() {
                 openTalk(elin->id);
                 talkLine_ = game_.talk(elin->id, Topic::Chat);
             }
+            if (file == "screenshot_journal_lore.png" && sub == 0) {
+                for (const char* id : {"un_meeting", "the_breach", "the_tests", "the_farm"}) game_.learnLore(id, false);
+                journalTab_ = 1;
+                journalScroll_ = 0;
+            }
             if (file == "screenshot_journal.png" && sub == 0) {
+                journalTab_ = 0;
                 for (auto& sv : game_.survivors()) {
                     if (sv.def->id == "elin") { sv.met = sv.known = true; sv.requestKnown = true; sv.trust = 30; }
                     if (sv.def->id == "gunnar" || sv.def->id == "sofia" || sv.def->id == "kalle" || sv.def->id == "jonas") sv.known = true;
@@ -844,6 +853,8 @@ void App::updatePlaying(float dt) {
         }
     }
     if (IsKeyPressed(KEY_F1)) overlay_ = overlay_ == Overlay::Help ? Overlay::None : Overlay::Help;
+    // You read a document: the journal opens on it
+    if (std::string id = game_.takeLoreOpened(); !id.empty()) { overlay_ = Overlay::Journal; journalTab_ = 1; loreFocus_ = id; }
     // Someone came up to you to talk (Jonas, gun raised)
     if (int who = game_.takeTalkRequest(); who && (overlay_ == Overlay::None || overlay_ == Overlay::Inventory)) openTalk(who);
     if (debug_ && IsKeyPressed(KEY_F3)) showDebug_ = !showDebug_;

@@ -96,6 +96,7 @@ bool ItemRegistry::loadDirectory(const std::string& dir) {
             d.firearm = sec.flag("firearm");
             d.ammo = sec.str("ammo");
             d.magazine = (int)sec.num("magazine", 0);
+            d.lore = sec.str("lore");
             d.reloadSeconds = sec.num("reload", 2.5f);
 
             d.slot = parseSlot(sec.str("slot", "none"));

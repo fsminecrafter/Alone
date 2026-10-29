@@ -140,8 +140,25 @@ void App::drawTalk() {
     for (const auto& [topic, label] : topics) {
         Rectangle r{tx, y, say.width, 26 * sc};
         bool hov = ui::hovered(r);
-        if (hov) DrawRectangleRec(r, Color{60, 52, 38, 220});
-        ui::text("\xE2\x96\xB8 " + label, r.x + 8 * sc, r.y + 4 * sc, 15 * sc, hov ? ui::theme().accent : ui::theme().text);
+        // The two ways to grow closest look different: romance pink with a
+        // heart, family blue with a house
+        bool romance = topic == Topic::Flirt || topic == Topic::Confess || topic == Topic::Breakup || topic == Topic::TentHold ||
+                       topic == Topic::TentWhisper;
+        bool family = topic == Topic::Kin || topic == Topic::Family;
+        Color tag = romance ? Color{232, 120, 150, 255} : Color{130, 180, 236, 255};
+        if (romance || family) {
+            DrawRectangleRec(r, Fade(tag, hov ? 0.28f : 0.13f));
+            DrawRectangleRec({r.x, r.y, 3 * sc, r.height}, tag);
+        } else if (hov) {
+            DrawRectangleRec(r, Color{60, 52, 38, 220});
+        }
+        std::string mark = romance ? "\xE2\x99\xA5 " : family ? "\xE2\x8C\x82 " : "\xE2\x96\xB8 ";
+        Color tc = romance || family ? (hov ? WHITE : tag) : hov ? ui::theme().accent : ui::theme().text;
+        ui::text(mark + label, r.x + 8 * sc, r.y + 4 * sc, 15 * sc, tc);
+        if (romance || family) {
+            const char* what = romance ? "ROMANCE" : "FAMILY";
+            ui::text(what, r.x + r.width - ui::measure(what, 11 * sc, true).x - 8 * sc, r.y + 7 * sc, 11 * sc, Fade(tag, 0.85f), true);
+        }
         if (hov && input::pressed(MOUSE_BUTTON_LEFT)) {
             if (topic == Topic::Trade) {
                 std::string answer = game_.talk(talkTo_, topic);
@@ -244,6 +261,21 @@ void App::drawJournal() {
     ui::text("Journal", p.x + 20 * sc, p.y + 14 * sc, 24 * sc, Color{230, 214, 180, 255}, true);
     if (ui::button({p.x + p.width - 44 * sc, p.y + 10 * sc, 32 * sc, 28 * sc}, "X")) { overlay_ = Overlay::None; return; }
     ui::text("\xE2\x98\x85 " + game_.objective(), p.x + 20 * sc, p.y + 50 * sc, 17 * sc, ui::theme().accent, true);
+    // Tabs: the people you know, and what you've pieced together about the end
+    {
+        int known = 0;
+        for (const auto& l : game_.lore()) known += game_.knowsLore(l.id);
+        std::string tabs[] = {"People", fmt("What happened (%d/%d)", known, (int)game_.lore().size())};
+        float bx = p.x + p.width - 60 * sc;
+        for (int i = 1; i >= 0; --i) {
+            float w = ui::measure(tabs[i], 15 * sc, true).x + 28 * sc;
+            bx -= w + 6 * sc;
+            Rectangle tb{bx, p.y + 10 * sc, w, 28 * sc};
+            if (ui::button(tb, tabs[i], true, 15)) { journalTab_ = i; journalScroll_ = 0; }
+            if (i == journalTab_) DrawRectangle((int)tb.x, (int)(tb.y + tb.height - 3 * sc), (int)tb.width, (int)(3 * sc), ui::theme().accent);
+        }
+    }
+    if (journalTab_ == 1) { drawJournalLore(p); return; }
 
     float y = p.y + 86 * sc;
     BeginScissorMode((int)p.x, (int)y, (int)p.width, (int)(p.height - (y - p.y) - 50 * sc));
@@ -291,6 +323,40 @@ void App::drawJournal() {
     if (pl.knowsHotwire) skills += "Hotwiring cars. ";
     if (game_.knowsMushrooms()) skills += "Mushrooms. ";
     ui::text("You know: " + (skills.empty() ? std::string("how to survive, barely.") : skills), p.x + 20 * sc, p.y + p.height - 34 * sc, 14 * sc, ui::theme().dim);
+}
+
+// What happened to the world, as far as you've pieced it together
+void App::drawJournalLore(Rectangle p) {
+    float sc = ui::scale();
+    float top = p.y + 86 * sc, bottom = p.y + p.height - 20 * sc;
+    Rectangle area{p.x + 16 * sc, top, p.width - 32 * sc, bottom - top};
+    if (ui::hovered(area)) journalScroll_ = std::max(0.0f, journalScroll_ - GetMouseWheelMove() * 60 * sc);
+    BeginScissorMode((int)area.x, (int)area.y, (int)area.width, (int)area.height);
+    float y = top - journalScroll_;
+    float tx = area.x + 14 * sc, tw = area.width - 28 * sc;
+    int shown = 0;
+    for (const auto& l : game_.lore()) {
+        bool known = game_.knowsLore(l.id);
+        if (known && l.id == loreFocus_) { journalScroll_ = std::max(0.0f, y + journalScroll_ - top - 10 * sc); loreFocus_.clear(); }
+        auto lines = ui::wrap(known ? l.text : "", tw, 15 * sc);
+        float h = known ? 40 * sc + lines.size() * 19 * sc : 34 * sc;
+        Rectangle row{area.x, y, area.width, h};
+        DrawRectangleRounded(row, 0.04f, 4, known ? Color{36, 33, 28, 255} : Color{30, 28, 25, 255});
+        if (known) {
+            ui::text(l.title, tx, y + 10 * sc, 17 * sc, Color{230, 214, 180, 255}, true);
+            ui::paragraph(l.text, tx, y + 34 * sc, tw, 15 * sc, ui::theme().text, 1.25f);
+            ++shown;
+        } else {
+            ui::text("? ? ?", tx, y + 9 * sc, 15 * sc, ui::theme().dim, true);
+        }
+        y += h + 8 * sc;
+    }
+    EndScissorMode();
+    float total = y + journalScroll_ - top;
+    journalScroll_ = std::min(journalScroll_, std::max(0.0f, total - area.height));
+    if (shown == 0)
+        ui::paragraph("You don't know yet how the world ended so fast. Ask the people you meet what happened, and read the papers you find.",
+                      tx, top + 2 * sc, tw, 15 * sc, ui::theme().dim);
 }
 
 void App::drawSurvivorLabels() {

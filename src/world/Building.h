@@ -21,7 +21,7 @@ struct IRect {
 enum class BuildingType {
     House, Cottage, Farmhouse, Barn, Shed, Apartment, Office, Warehouse,
     Grocery, Pharmacy, GasStation, Hardware, Hospital, School, Church, TownHall,
-    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, ParkingGarage, Count
+    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, ParkingGarage, Bunker, Count
 };
 
 enum class RoomType { Hall, Living, Kitchen, Bedroom, Bathroom, Storage, ShopFloor, Office, Ward, Classroom, Nave, Lobby, Locker, Dining, Count };

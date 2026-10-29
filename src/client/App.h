@@ -103,7 +103,8 @@ private:
     float tradeScroll_[2] = {0, 0};
     void drawHealth();
     void drawMinimap();
-    void drawHealthInfo(Rectangle p);   // the Info tab: who you are
+    void drawHealthInfo(Rectangle p);
+    void drawJournalLore(Rectangle p);   // the Info tab: who you are
     void drawMap();
     void drawPause();
     void drawSettings();
@@ -156,7 +157,10 @@ private:
     ItemLoc paneLoc_[2]{ItemLoc::Player, ItemLoc::Ground};
     Rectangle dollRect_{};           // the worn-clothes figure (drop clothes here to put them on)
     ItemRef selected_{};             // item shown in the details strip
-    int healthTab_ = 0;              // 0 body, 1 info
+    int healthTab_ = 0;
+    int journalTab_ = 0;             // 0 people, 1 what happened
+    float journalScroll_ = 0;
+    std::string loreFocus_;          // the entry you just read: scrolled to and lit              // 0 body, 1 info
     int invTab_ = 0;                 // 0 all, 1 food, 2 medical, 3 gear, 4 clothing, 5 other
     int invSort_ = 0;                // 0 type, 1 name, 2 weight
     int buildTab_ = 0;

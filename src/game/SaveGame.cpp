@@ -121,11 +121,14 @@ public:
         for (const auto& sv : g.survivors_)
             o << sv.def->id << ' ' << sv.romance << ' ' << sv.family << ' ' << sv.lover << ' ' << sv.lastChatDay << ' ' << sv.lastFlirtDay << ' '
               << sv.lastGiftDay << ' ' << sv.lastJokeDay << ' ' << sv.lastSorryDay << ' ' << sv.storiesTold << ' ' << (int)sv.shownBond << ' '
-              << sv.companyMinutes << ' ' << sv.kinship << ' ' << sv.lastKinDay << '\n';
+              << sv.companyMinutes << ' ' << sv.kinship << ' ' << sv.lastKinDay << ' ' << sv.happenedTold << '\n';
         // v10: broken windows
         o << "WINDOWS " << w.brokenWindows_.size() << '\n';
         for (int64_t k : w.brokenWindows_) o << k << '\n';
         o << "STOWED " << p.stowedUid << '\n';
+        o << "LORE " << g.loreKnown_.size();
+        for (const auto& l : g.loreKnown_) o << ' ' << l;
+        o << '\n';
         o << "END\n";
     }
 
@@ -349,6 +352,7 @@ public:
                 in >> id >> t.romance >> fam >> lov >> t.lastChatDay >> t.lastFlirtDay >> t.lastGiftDay >> t.lastJokeDay >> t.lastSorryDay >>
                     t.storiesTold >> shown >> t.companyMinutes;
                 if (version >= 9) in >> t.kinship >> t.lastKinDay;
+                if (version >= 10) in >> t.happenedTold;
                 else if (fam) t.kinship = kBondNeeded;
                 for (auto& sv : g.survivors_) {
                     if (sv.def->id != id) continue;
@@ -356,7 +360,7 @@ public:
                     sv.lastChatDay = t.lastChatDay; sv.lastFlirtDay = t.lastFlirtDay; sv.lastGiftDay = t.lastGiftDay;
                     sv.lastJokeDay = t.lastJokeDay; sv.lastSorryDay = t.lastSorryDay; sv.storiesTold = t.storiesTold;
                     sv.shownBond = (Bond)std::clamp(shown, 0, (int)Bond::Count - 1); sv.companyMinutes = t.companyMinutes;
-                    sv.kinship = t.kinship; sv.lastKinDay = t.lastKinDay;
+                    sv.kinship = t.kinship; sv.lastKinDay = t.lastKinDay; sv.happenedTold = t.happenedTold;
                 }
             }
             if (version >= 10) {
@@ -365,6 +369,10 @@ public:
                 w.brokenWindows_.clear();
                 for (size_t i = 0; i < nw && in; ++i) { int64_t k; in >> k; w.brokenWindows_.insert(k); }
                 in >> tag >> p.stowedUid;
+                size_t nl = 0;
+                in >> tag >> nl;
+                g.loreKnown_.clear();
+                for (size_t i = 0; i < nl && in; ++i) { std::string l; in >> l; g.loreKnown_.push_back(l); }
             }
         }
         // Saved before people had a bed: whatever they were doing, they're awake

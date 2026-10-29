@@ -68,6 +68,9 @@ struct SurvivorDef {
     std::string wantText, thanksText;
     std::vector<std::pair<std::string, int>> reward;
     std::string teaches;               // knowledge the reward gives: "carpentry", "hotwire", "mushrooms"
+    // "What happened?": their side of the story, one piece at a time as they
+    // trust you; each piece can add a lore entry to your journal
+    std::vector<std::string> happened, happenedLore;
     // Who they tell you about once they trust you a little
     std::vector<std::string> leads;
     std::string leadText;
@@ -141,6 +144,7 @@ struct Survivor {
     int lastFlirtDay = -1, lastGiftDay = -1, lastJokeDay = -1, lastSorryDay = -1;
     int lastTentHoldDay = -1, lastTentWhisperDay = -1;   // lovers, in a tent with you
     int storiesTold = 0;               // how much of `about` you've heard
+    int happenedTold = 0;              // how much of `happened` you've heard
     Bond shownBond = Bond::Stranger;   // last step announced in the log
     float companyMinutes = 0;          // travelling together: trust grows
     // Daily life at home
@@ -168,6 +172,6 @@ struct Survivor {
 // What you can say in a conversation.
 enum class Topic { Chat, Others, Request, Give, Gift, Trade, Join, Follow, Wait, Dismiss, Bye, Parley, LetIn, PayOff, Threaten,
                    About, Joke, Flirt, Confess, Family, Hug, Sorry, BackToSleep, Breakup, Kin,
-                   TentSleep, TentHold, TentWhisper };
+                   TentSleep, TentHold, TentWhisper, WhatHappened };
 
 } // namespace alone

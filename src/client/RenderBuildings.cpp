@@ -41,6 +41,7 @@ void Renderer::buildBuilding(World& world, const Building& b, BuildingGfx& g) {
     if (b.type == BuildingType::Mall || b.type == BuildingType::ParkingGarage) wooden = false;
     int extMat = wooden ? MSiding : isBrick(b.wallColour) ? MBrick : MPlaster;
     if (b.type == BuildingType::Mall && b.sign == "Vimpeln") extMat = MCladding;
+    if (b.type == BuildingType::Bunker) { extMat = MConcrete; inner = hexColor(0xa9aba4); }   // bare cast concrete, in and out
     float extParam = (b.type == BuildingType::Barn || b.type == BuildingType::Shed) ? 1.0f : 0.0f;
     const IRect& R = b.rect;
 

@@ -1124,3 +1124,67 @@ TEST(companions_ride_along) {
     run(g, 0.5f);
     CHECK(elin->ride < 0);
 }
+
+TEST(what_happened_lore) {
+    Game g;
+    CHECK(g.loadData());
+    g.newGame(42);
+    CHECK(g.lore().size() == 7);
+    // every lore id the data mentions exists
+    auto exists = [&](const std::string& id) {
+        for (const auto& l : g.lore()) if (l.id == id) return true;
+        return false;
+    };
+    for (const auto& s : g.survivors())
+        for (const auto& id : s.def->happenedLore) { CHECK(id == "-" || exists(id)); }
+    int docs = 0;
+    for (const auto& d : g.items().all())
+        if (!d->lore.empty()) { CHECK(exists(d->lore)); ++docs; }
+    CHECK(docs == 7);
+    // the shelter in the forest, with a man in it
+    const Building* bunker = nullptr;
+    for (const auto& b : g.world().gen().allBuildings())
+        if (b.type == BuildingType::Bunker) bunker = &b;
+    CHECK(bunker && bunker->name == "Skyddsrum Hjortmarka");
+    if (!bunker) return;
+    bool windows = false, desk = false;
+    for (const auto& e : bunker->edges) windows |= (e.bits & (WindowN | WindowW)) != 0;
+    for (const auto& f : bunker->furniture) desk |= f.container == "bunker_desk";
+    CHECK(!windows && desk);
+    Survivor* henrik = find(g, "henrik");
+    Survivor* maja = find(g, "maja");
+    CHECK(henrik && bunker->rect.contains((int)henrik->pos.x, (int)henrik->pos.y));
+    CHECK(maja && maja->def->homeName == "Alingsås lasarett");
+    if (!henrik || !maja) return;
+    // reading a document: into the journal, and the journal opens on it
+    give(g, "test_schedule");
+    ItemRef ref{ItemLoc::Player, 0, 0, 0, g.player().inventory.items()[g.player().inventory.findId("test_schedule")].uid};
+    ActionOption read;
+    for (auto& o : g.actionsForItem(ref)) if (o.kind == ActionKind::Read) read = o;
+    CHECK(read.kind == ActionKind::Read);
+    g.perform(read);
+    CHECK(g.knowsLore("the_tests") && g.takeLoreOpened() == "the_tests");
+    // asking people: each tells their part as they trust you
+    g.player().pos = maja->pos + Vec2{1, 0};
+    g.greeting(maja->id);
+    maja->trust = 10;
+    std::string first = g.talk(maja->id, Topic::WhatHappened);
+    CHECK(g.knowsLore("the_spread") && !g.knowsLore("eight_days"));
+    std::string notYet = g.talk(maja->id, Topic::WhatHappened);
+    CHECK(!g.knowsLore("eight_days"));
+    maja->trust = 40;
+    g.talk(maja->id, Topic::WhatHappened);
+    CHECK(g.knowsLore("eight_days"));
+    CHECK(g.takeLoreOpened().empty());   // talking doesn't yank the journal open
+    std::printf("    \"%s\"\n    \"%s\"\n", first.substr(0, 90).c_str(), notYet.c_str());
+    // kept through a save
+    std::string path = "test_lore_save.txt";
+    CHECK(g.save(path));
+    Game h;
+    CHECK(h.loadData());
+    CHECK(h.load(path));
+    CHECK(h.knowsLore("the_tests") && h.knowsLore("the_spread") && h.knowsLore("eight_days") && !h.knowsLore("un_meeting"));
+    Survivor* m2 = find(h, "maja");
+    CHECK(m2 && m2->happenedTold == 2);
+    std::remove(path.c_str());
+}

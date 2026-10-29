@@ -1,4 +1,5 @@
 #include "game/Game.h"
+#include "core/Config.h"
 #include "core/Log.h"
 #include "core/Paths.h"
 #include <algorithm>
@@ -43,6 +44,21 @@ bool Game::loadData() {
     ok &= animals_.load(Paths::data("animals/animals.ini"));
     loadSurvivors(Paths::data("survivors/survivors.ini"));   // optional: the town can be empty
     loadDialogue(Paths::data("text/dialogue.ini"));          // optional too
+    {   // what happened (optional)
+        lore_.clear();
+        Config lc;
+        if (lc.load(Paths::data("text/lore.ini")))
+            for (const auto& sec : lc.sections()) {
+                if (sec.name.empty()) continue;
+                LoreEntry e;
+                e.id = sec.name;
+                e.title = sec.str("title", sec.name);
+                e.text = sec.str("text");
+                e.order = sec.integer("order", (int)lore_.size());
+                lore_.push_back(e);
+            }
+        std::sort(lore_.begin(), lore_.end(), [](const LoreEntry& a, const LoreEntry& b) { return a.order < b.order; });
+    }
     return ok;
 }
 
@@ -75,6 +91,9 @@ void Game::newGame(uint32_t seed, const CharacterChoice* who) {
     rng_.reseed(seed * 7919ULL + 17);
     player_ = Player{};
     player_.body = Body(seed + 99);
+    loreKnown_.clear();
+    loreOpened_.clear();
+    tentMate_ = talkRequest_ = 0;
     animals_.animals().clear();
     vehicles_.clear();
     lockedCars_.clear();
@@ -376,6 +395,20 @@ void Game::reload() {
     o.kind = ActionKind::Reload;
     o.label = "Reloading";
     perform(o);
+}
+
+bool Game::knowsLore(const std::string& id) const {
+    return std::find(loreKnown_.begin(), loreKnown_.end(), id) != loreKnown_.end();
+}
+
+bool Game::learnLore(const std::string& id, bool fromDocument) {
+    auto e = std::find_if(lore_.begin(), lore_.end(), [&](const LoreEntry& l) { return l.id == id; });
+    if (e == lore_.end()) return false;
+    if (fromDocument) loreOpened_ = id;
+    if (knowsLore(id)) return false;
+    loreKnown_.push_back(id);
+    log("In your journal (J): " + e->title + ".", MessageKind::Good);
+    return true;
 }
 
 bool Game::inTentWith(int survivorId) {
@@ -1610,6 +1643,11 @@ void Game::perform(const ActionOption& o) {
             if (it) { it->liquidMl = 0; it->liquidSafe = true; }
             return;
         case ActionKind::Read:
+            if (it && !it->def->lore.empty()) {
+                log("You read the " + lower(it->def->name) + ".");
+                learnLore(it->def->lore, true);
+                return;
+            }
             if (it && it->def->hasTag("teaches_carpentry") && !player_.knowsCarpentry) {
                 player_.knowsCarpentry = true;
                 log("You read about framing, door hanging and roofing. You could build doors, windows and roofs now (B).",

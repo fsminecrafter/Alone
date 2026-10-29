@@ -206,7 +206,9 @@ bool MapData::load(const std::string& dir) {
                     districts_.push_back({t[1], Vec2{num(2) * mpp_, num(3) * mpp_}, num(4) * mpp_});
                 } else if (t[0] == "water" && t.size() >= 4) {
                     waterNames_.push_back({t[1], Vec2{num(2) * mpp_, num(3) * mpp_}});
-                } else if (t[0] == "landmark" && t.size() >= 5) {
+                } else if ((t[0] == "landmark" || t[0] == "place") && t.size() >= 5) {
+                    // place: like a landmark, but kept on top of the OSM data too
+                    // (something OpenStreetMap doesn't have, like a hidden shelter)
                     Landmark l;
                     l.kind = t[1];
                     l.name = t[2];

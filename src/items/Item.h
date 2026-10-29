@@ -51,6 +51,7 @@ struct ItemDef {
     float noise = 5.0f;          // metres animals can hear it
     bool firearm = false;
     std::string ammo;
+    std::string lore;            // a document: the lore entry (data/text/lore.ini) reading it adds to your journal
     int magazine = 0;            // firearm: rounds it holds (0: shoots straight from the quiver, like a bow)
     float reloadSeconds = 2.5f;
 

@@ -4,6 +4,8 @@
 #   railway  x0 y0 x1 y1 ...                      polyline
 #   district "Name" x y radius                    place names shown in the HUD
 #   landmark <kind> "Name" x y [w h]              a special building (w/h in metres)
+#   place    <kind> "Name" x y [w h]              the same, but kept when the OSM data is used
+#                                                 (buildings OpenStreetMap doesn't have)
 #   water    "Name" x y                           a named lake/river label
 #
 #   road     <1 minor|2 major> x0 y0 x1 y1 ...    extra streets (the centre's grid
@@ -13,7 +15,7 @@
 #   label    "Text" x y [angle]                   text shown on the map (roads etc.)
 #
 # Landmark kinds: church, townhall, station, hospital, hostel, manor,
-# grocery, gasstation, school, pharmacy, hardware, police, firestation, sports
+# grocery, gasstation, school, pharmacy, hardware, police, firestation, sports, bunker
 
 # Västra stambanan (Gothenburg - Stockholm main line)
 railway 277 767 273 680 263 640 255 597 263 557 290 513 340 457 373 422 423 413 560 413 630 416 692 410 730 400 780 380 830 333 907 283 973 227 993 163 1003 90 1010 0
@@ -73,6 +75,8 @@ landmark school "Ängaboskolan" 840 560 46 24
 landmark police "Polisstation" 686 371 26 16
 landmark firestation "Brandstation" 600 440 26 18
 landmark sports "Mjörnvallen" 465 300 20 12
+# A government shelter under the trees of Hjortmarka (see data/text/lore.ini)
+place bunker "Skyddsrum Hjortmarka" 1082 318 16 12
 
 # Road names shown on the map
 label "E20" 560 492 -48

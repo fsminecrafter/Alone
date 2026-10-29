@@ -130,9 +130,14 @@ TEST(fire_cooking_and_hunting_flow) {
     CHECK(gun && gun->usesLeft == gun->def->magazine);
     CHECK(g.ammoCarried(gun->def) == 10 - gun->def->magazine);
     int targetId = a.id;
-    for (int shot = 0; shot < 5; ++shot) {
+    for (int shot = 0; shot < 10; ++shot) {
         Animal* t = g.animals().find(targetId);
         if (!t || !t->alive()) break;
+        if (g.weapon()->usesLeft == 0) { g.reload(); runFor(4); }
+        // it bolts at the first bang: let it settle where it is, a few metres off
+        t->state = AnimalState::Idle;
+        t->stateTimer = 100;
+        t->pos = p.pos + Vec2{3.5f, 0};
         PlayerInput in;
         in.aim = t->pos;
         in.aimHold = true;   // take aim first (Ctrl)

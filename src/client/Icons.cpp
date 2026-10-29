@@ -129,6 +129,10 @@ void drawItemIcon(const ItemDef* def, Rectangle r) {
     } else if (i == "book") {
         rect(-0.5f, -0.65f, 1.0f, 1.3f, c);
         rect(-0.4f, -0.55f, 0.8f, 0.2f, WHITE);
+    } else if (i == "paper") {   // a typed sheet with a stamp
+        rect(-0.45f, -0.65f, 0.9f, 1.3f, c);
+        for (int k = 0; k < 5; ++k) rect(-0.33f, -0.5f + k * 0.2f, k == 4 ? 0.4f : 0.66f, 0.06f, Color{70, 70, 74, 255});
+        rect(0.1f, 0.3f, 0.25f, 0.2f, Color{170, 40, 36, 255});
     } else if (i == "log" || i == "stick" || i == "rope" || i == "wire") {
         DrawLineEx({cx - s * 0.7f, cy + s * 0.4f}, {cx + s * 0.7f, cy - s * 0.4f}, s * (i == "log" ? 0.45f : 0.15f), c);
     } else if (i == "stove") {   // a storm kitchen: windshield, pot, lid handle

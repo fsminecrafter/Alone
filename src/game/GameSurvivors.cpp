@@ -135,6 +135,8 @@ bool Game::loadSurvivors(const std::string& path) {
             return out;
         };
         d.about = lines("about");
+        d.happened = lines("happened");
+        d.happenedLore = lines("happened_lore");   // | between them, like the lines they go with
         d.friendChat = lines("friend_chat");
         d.closeChat = lines("close_chat");
         d.idle = lines("idle");
@@ -205,6 +207,22 @@ bool Game::resolvePlace(const std::string& spec, Vec2& out, std::string* name) {
                 return inside(b);
             }
         Log::warn("No building called %s", want.c_str());
+        return false;
+    }
+    if (spec.rfind("at:", 0) == 0) {
+        // at:x,y:Name - inside whatever building stands there (metres), called Name
+        auto parts = split(spec.substr(3), ':');
+        auto xy = split(parts.empty() ? std::string() : parts[0], ',');
+        if (xy.size() == 2) {
+            Vec2 p{(float)std::atof(xy[0].c_str()), (float)std::atof(xy[1].c_str())};
+            for (int id : world_->gen().buildingsIn(IRect{(int)p.x - 2, (int)p.y - 2, 4, 4})) {
+                const Building* b = world_->building(id);
+                if (!b || !b->rect.contains((int)p.x, (int)p.y) || b->rooms.empty()) continue;
+                if (name) *name = parts.size() > 1 ? parts[1] : map_.districtAt(p);
+                return inside(*b);
+            }
+            Log::warn("No building at %s", spec.c_str());
+        }
         return false;
     }
     if (spec.rfind("district:", 0) == 0) {
@@ -611,6 +629,7 @@ std::vector<std::pair<Topic, std::string>> Game::talkTopics(int id) {
     out.push_back({Topic::Chat, b >= Bond::Friend ? "So, how are you, really?" : "How are you holding up?"});
     if (s->storiesTold < (int)d.about.size())
         out.push_back({Topic::About, s->storiesTold == 0 ? "Tell me about yourself." : "Tell me more about you."});
+    out.push_back({Topic::WhatHappened, s->happenedTold == 0 ? "What happened? How did it all end so fast?" : "Tell me more about what happened."});
     if (s->lastJokeDay != today) out.push_back({Topic::Joke, "Want to hear a joke?"});
     out.push_back({Topic::Others, "Have you seen anyone else?"});
     if (d.wantCount > 0 && !s->requestDone) {
@@ -895,6 +914,18 @@ std::string Game::talk(int id, Topic t) {
             s->state = SurvivorState::Home;
             s->path.clear();
             return say(b == Bond::Lover ? line("dismiss.lover") : "I'll head home. You know where to find me.");
+        case Topic::WhatHappened: {
+            int i = s->happenedTold;
+            if (i < (int)d.happened.size()) {
+                float need = (wary ? 15.0f : 5.0f) + 12.0f * i;
+                if (s->trust < need) return i == 0 ? "...Not now. I don't know you." : "There's more. Ask me again when I know you better.";
+                s->happenedTold++;
+                if (i < (int)d.happenedLore.size() && !d.happenedLore[(size_t)i].empty() && d.happenedLore[(size_t)i] != "-")
+                    learnLore(d.happenedLore[(size_t)i], false);
+                return personal(d.happened[(size_t)i]);
+            }
+            return personal(line(std::string("happened.") + bondKey(b)));
+        }
         case Topic::TentSleep: {
             if (!inTentWith(id)) return "";
             std::string l = personal(line(std::string("tent_sleep.") + bondKey(b)));
