@@ -44,7 +44,7 @@ std::string firstName(const SurvivorDef& d) {
 }
 
 bool isHome(BuildingType t) {
-    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse;
+    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse || t == BuildingType::SummerCottage;
 }
 
 } // namespace
@@ -116,6 +116,10 @@ bool Game::loadSurvivors(const std::string& path) {
         d.thanksText = s.str("thanks", "Thank you.");
         d.reward = itemCounts(s.list("reward"));
         d.teaches = s.str("teaches");
+        d.reveal = s.str("reveal");
+        d.revealName = s.str("reveal_name", "a place");
+        d.revealText = s.str("reveal_text");
+        d.revealTrust = s.integer("reveal_trust", 30);
         d.leads = s.list("leads");
         d.leadText = s.str("lead_text");
         d.canJoin = s.flag("can_join");
@@ -807,6 +811,15 @@ std::string Game::talk(int id, Topic t) {
         case Topic::Others:
             if (s->trust < (wary ? 15 : d.disposition == Disposition::Hostile ? 0 : -50))
                 return d.disposition == Disposition::Hostile ? "Why would I tell you anything?" : "I don't know you well enough to tell you that.";
+            // the place they've kept to themselves
+            if (!d.reveal.empty() && s->trust >= d.revealTrust && !knowsPlace(d.revealName)) {
+                Vec2 at;
+                if (resolvePlace(d.reveal, at, nullptr)) {
+                    knownPlaces_.push_back({d.revealName, at});
+                    log("Marked on your map (M): " + d.revealName + ".", MessageKind::Good);
+                    return personal(d.revealText);
+                }
+            }
             return say(rumour(*s));
         case Topic::Parley:
             s->warned = -40;
@@ -1074,6 +1087,16 @@ void Game::playerHurtBy(float severity, const std::string& who, bool gunshot) {
     Wound w;
     w.part = parts[rng_.rangeInt(0, 8)];
     w.type = WoundType::Laceration;
+    // a helmet or body armour takes part of it
+    float armour = armourAt(w.part);
+    if (armour > 0) {
+        severity *= 1.0f - armour;
+        if (severity < 0.06f) {
+            log(std::string(gunshot ? "A shot slams into your " : "A blow glances off your ") + (w.part == BodyPart::Head ? "helmet." : "armour."),
+                MessageKind::Info);
+            return;
+        }
+    }
     w.severity = clamp01(severity);
     w.bleeding = (gunshot ? 14.0f : 8.0f) + 45.0f * severity * severity;
     w.contamination = gunshot ? 0.35f : 0.3f;

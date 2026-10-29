@@ -78,6 +78,11 @@ bool ItemRegistry::loadDirectory(const std::string& dir) {
             }
             d.raw = sec.flag("raw");
             d.cookedInto = sec.str("cooked_into");
+            d.driesTo = sec.str("dries_to");
+            d.smokesTo = sec.str("smokes_to");
+            d.saltsTo = sec.str("salts_to");
+            d.dryHours = sec.num("dry_hours", 48);
+            d.smokeHours = sec.num("smoke_hours", 10);
             d.pathogen = pathogenFromString(sec.str("pathogen", "none").c_str());
             d.pathogenChance = sec.num("pathogen_chance", 0);
             d.pathogenDose = sec.num("pathogen_dose", 0.5f);
@@ -97,6 +102,7 @@ bool ItemRegistry::loadDirectory(const std::string& dir) {
             d.ammo = sec.str("ammo");
             d.magazine = (int)sec.num("magazine", 0);
             d.lore = sec.str("lore");
+            d.armour = std::clamp(sec.num("armour", 0), 0.0f, 0.9f);
             d.reloadSeconds = sec.num("reload", 2.5f);
 
             d.slot = parseSlot(sec.str("slot", "none"));

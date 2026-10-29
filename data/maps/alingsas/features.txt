@@ -15,7 +15,7 @@
 #   label    "Text" x y [angle]                   text shown on the map (roads etc.)
 #
 # Landmark kinds: church, townhall, station, hospital, hostel, manor,
-# grocery, gasstation, school, pharmacy, hardware, police, firestation, sports, bunker
+# grocery, gasstation, school, pharmacy, hardware, police, firestation, sports, bunker, container
 
 # Västra stambanan (Gothenburg - Stockholm main line)
 railway 277 767 273 680 263 640 255 597 263 557 290 513 340 457 373 422 423 413 560 413 630 416 692 410 730 400 780 380 830 333 907 283 973 227 993 163 1003 90 1010 0
@@ -77,6 +77,8 @@ landmark firestation "Brandstation" 600 440 26 18
 landmark sports "Mjörnvallen" 465 300 20 12
 # A government shelter under the trees of Hjortmarka (see data/text/lore.ini)
 place bunker "Skyddsrum Hjortmarka" 1082 318 16 12
+# A Försvarsmakten supply container deep in the big forest south-east of town
+place container "Militärcontainer" 1120 602 12 3
 
 # Road names shown on the map
 label "E20" 560 492 -48

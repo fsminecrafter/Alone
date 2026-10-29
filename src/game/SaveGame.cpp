@@ -20,7 +20,7 @@ public:
     static void item(std::ostream& o, const ItemInstance& it) {
         o << (it.def ? it.def->id : std::string("-")) << ' ' << it.portion << ' ' << it.ageHours << ' ' << it.condition << ' '
           << it.liquidMl << ' ' << it.liquidSafe << ' ' << it.opened << ' ' << it.usesLeft << ' ' << it.carriesPathogen << ' '
-          << it.uid << ' ' << (int)it.liquid << ' ' << it.tint << '\n';
+          << it.uid << ' ' << (int)it.liquid << ' ' << it.tint << ' ' << it.cure << '\n';   // cure: v10
     }
     static void items(std::ostream& o, const std::vector<ItemInstance>& v) {
         o << v.size() << '\n';
@@ -85,7 +85,9 @@ public:
         for (const auto& f : w.fires_)
             o << f.pos.x << ' ' << f.pos.y << ' ' << f.fuelMinutes << ' ' << f.lit << ' ' << f.id << ' ' << f.stove << ' ' << f.fuelMl << '\n';
         o << w.snares_.size() << '\n';
-        for (const auto& s : w.snares_) o << s.pos.x << ' ' << s.pos.y << ' ' << s.minutesSet << ' ' << s.caught << ' ' << s.id << '\n';
+        for (const auto& s : w.snares_)
+            o << s.pos.x << ' ' << s.pos.y << ' ' << s.minutesSet << ' ' << s.caught << ' ' << s.id << ' ' << (int)s.kind << ' ' << s.fish << ' '
+              << s.crayfish << '\n';   // kind and catch: v10
         o << w.tents_.size() << '\n';
         for (const auto& t : w.tents_)
             o << t.id << ' ' << t.rect.x << ' ' << t.rect.y << ' ' << t.rect.w << ' ' << t.rect.h << ' ' << t.dir << ' ' << t.item << '\n';
@@ -129,6 +131,17 @@ public:
         o << "LORE " << g.loreKnown_.size();
         for (const auto& l : g.loreKnown_) o << ' ' << l;
         o << '\n';
+        o << "CARPENTRY " << p.carpentryXp << '\n';
+        {   // the upper floors and basements made so far: by where their building stands
+            auto made = w.gen().madeLevels();
+            o << "FLOORS " << made.size() << '\n';
+            for (const auto& [base, level] : made) {
+                const Building* b = w.gen().building(base);
+                o << (b ? b->rect.x : 0) << ' ' << (b ? b->rect.y : 0) << ' ' << level << '\n';
+            }
+        }
+        o << "PLACES " << g.knownPlaces_.size() << '\n';
+        for (const auto& k : g.knownPlaces_) o << std::quoted(k.name) << ' ' << k.pos.x << ' ' << k.pos.y << '\n';
         o << "END\n";
     }
 
@@ -139,6 +152,7 @@ public:
         in >> id >> it.portion >> it.ageHours >> it.condition >> it.liquidMl >> safe >> opened >> it.usesLeft >> path >> it.uid;
         if (readVersion() >= 6) { int liq = 0; in >> liq; it.liquid = (uint8_t)liq; }
         if (readVersion() >= 8) in >> it.tint;
+        if (readVersion() >= 10) in >> it.cure;
         it.liquidSafe = safe; it.opened = opened; it.carriesPathogen = path;
         maxUid = std::max(maxUid, it.uid);
         if (id == "-") { it.def = nullptr; return true; }
@@ -269,6 +283,7 @@ public:
         for (size_t i = 0; i < n && in; ++i) {
             Snare s; int caught;
             in >> s.pos.x >> s.pos.y >> s.minutesSet >> caught >> s.id;
+            if (readVersion() >= 10) { int k; in >> k >> s.fish >> s.crayfish; s.kind = (TrapKind)std::clamp(k, 0, 2); }
             s.caught = false;   // the catch itself isn't saved; the snare is reset
             (void)caught;
             w.snares_.push_back(s);
@@ -373,6 +388,22 @@ public:
                 in >> tag >> nl;
                 g.loreKnown_.clear();
                 for (size_t i = 0; i < nl && in; ++i) { std::string l; in >> l; g.loreKnown_.push_back(l); }
+                in >> tag >> p.carpentryXp;
+                size_t nf = 0;
+                in >> tag >> nf;
+                for (size_t i = 0; i < nf && in; ++i) {
+                    int bx, by, level;
+                    in >> bx >> by >> level;
+                    for (int id : w.gen().buildingsIn(IRect{bx, by, 1, 1}))
+                        if (const Building* b = w.gen().building(id); b && b->rect.x == bx && b->rect.y == by && b->levelOf < 0) {
+                            w.gen().levelBuilding(id, level);
+                            break;
+                        }
+                }
+                size_t np = 0;
+                in >> tag >> np;
+                g.knownPlaces_.clear();
+                for (size_t i = 0; i < np && in; ++i) { KnownPlace k; in >> std::quoted(k.name) >> k.pos.x >> k.pos.y; g.knownPlaces_.push_back(k); }
             }
         }
         // Saved before people had a bed: whatever they were doing, they're awake

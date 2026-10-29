@@ -21,7 +21,7 @@ struct IRect {
 enum class BuildingType {
     House, Cottage, Farmhouse, Barn, Shed, Apartment, Office, Warehouse,
     Grocery, Pharmacy, GasStation, Hardware, Hospital, School, Church, TownHall,
-    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, ParkingGarage, Bunker, Count
+    Police, FireStation, Station, Hostel, Manor, Sports, Shop, Mall, Restaurant, ParkingGarage, Bunker, MilitaryContainer, SummerCottage, Count
 };
 
 enum class RoomType { Hall, Living, Kitchen, Bedroom, Bathroom, Storage, ShopFloor, Office, Ward, Classroom, Nave, Lobby, Locker, Dining, Count };
@@ -44,6 +44,23 @@ struct Furniture {
     uint8_t facing = 0;          // 0 N, 1 E, 2 S, 3 W (which way it faces into the room)
     std::string container;       // loot table id, empty if none
 };
+
+// A staircase: up (dir +1) to the floor above or down (dir -1) to the basement.
+// The floors themselves are separate buildings far off the map (see Levels).
+struct Stair {
+    int x = 0, y = 0;            // world tile
+    int dir = 1;
+    bool main = false;           // a big building's main staircase (the others are side stairs)
+};
+
+// Upper floors and basements live off the edge of the map, one band each, so
+// every system (walls, loot, light) works on them unchanged. A floor is at
+// its building's ground floor + this offset in x.
+constexpr int kUpperFloorOffset = 20000, kBasementOffset = 40000;
+inline int floorLevelAt(float x) { return x >= 35000 ? -1 : x >= 15000 ? 1 : 0; }
+inline int floorOffset(int level) { return level > 0 ? kUpperFloorOffset : level < 0 ? kBasementOffset : 0; }
+// Where a point on an upper floor / in a basement is on the map
+inline Vec2 surfacePos(Vec2 p) { return Vec2{p.x - floorOffset(floorLevelAt(p.x)), p.y}; }
 
 struct WallEdge {
     int x = 0, y = 0;            // tile whose N/W edge this is
@@ -81,6 +98,9 @@ struct Building {
     std::string sign;            // text over the entrance ("Vimpeln", "Apotek", ...)
     uint32_t seed = 0;
     float floorY = 0;            // height of the ground floor above sea level (level on any slope)
+    std::vector<Stair> stairs;   // up and down from this floor
+    int levelOf = -1;            // an upper floor / basement: the building it belongs to
+    int level = 0;               // +1 upstairs, -1 the basement
 
     const Room* roomAt(int x, int y) const;
     const Furniture* furnitureAt(int x, int y) const;

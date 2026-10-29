@@ -25,6 +25,7 @@ Color groundColour(Ground g) {
         case Ground::FloorConcrete: return hexColor(0x8a8884);
         case Ground::FloorCarpet: return hexColor(0x7e5a58);
         case Ground::Deck: return hexColor(0x8a6c4c);
+        case Ground::Void: return BLACK;
         default: return MAGENTA;
     }
 }

@@ -18,6 +18,7 @@ enum class Ground : uint8_t {
     WaterShallow, WaterDeep,
     FloorWood, FloorTile, FloorConcrete, FloorCarpet,
     Deck,                        // wooden piers and jetties over the water
+    Void,                        // around the upper floors and basements: nothing
     Count
 };
 
@@ -34,6 +35,8 @@ enum class Prop : uint8_t {
     Bookshelf, Toilet, Bathtub, BathroomCabinet, Shelf, Cooler, Checkout, Desk, Locker,
     Pew, MedicalCabinet, GunCabinet, Workbench, Altar, HospitalBed,
     Bike, FuelPump,
+    // carpentry and the floors of houses
+    WoodShelf, DryingRack, StairsUp, StairsDown, BrokenStairs, BoxTrap,
     Count
 };
 

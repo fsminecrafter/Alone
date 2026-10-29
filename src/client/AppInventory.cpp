@@ -89,6 +89,7 @@ std::string describe(Game& game, const ItemInstance& it) {
 float tileBar(const ItemInstance& it) {
     const ItemDef& d = *it.def;
     if (d.capacityMl > 0) return it.liquidMl / d.capacityMl;
+    if (it.cure > 0 && it.cure < 1) return it.cure;   // drying or smoking on the rack
     if (d.isEdible() && it.portion < 0.999f) return it.portion;
     if (d.uses > 1 && d.category != ItemCategory::Ammo) return it.usesLeft / (float)d.uses;
     if (it.condition < 0.98f) return it.condition;
@@ -539,6 +540,29 @@ void drawBuildIcon(BuildKind k, Rectangle r) {
             DrawRectangleRec({x + w * 0.1f, y + h * 0.3f, w * 0.06f, h * 0.5f}, dark);
             DrawRectangleRec({x + w * 0.84f, y + h * 0.45f, w * 0.06f, h * 0.35f}, dark);
             break;
+        case BuildKind::Shelf:
+            DrawRectangleRec({x + w * 0.18f, y + h * 0.18f, w * 0.06f, h * 0.68f}, dark);
+            DrawRectangleRec({x + w * 0.76f, y + h * 0.18f, w * 0.06f, h * 0.68f}, dark);
+            for (int i = 0; i < 3; ++i) DrawRectangleRec({x + w * 0.16f, y + h * (0.28f + i * 0.22f), w * 0.68f, h * 0.06f}, wood);
+            DrawRectangleRec({x + w * 0.3f, y + h * 0.18f, w * 0.12f, h * 0.1f}, Color{190, 60, 50, 255});
+            DrawRectangleRec({x + w * 0.5f, y + h * 0.4f, w * 0.16f, h * 0.1f}, Color{80, 120, 180, 255});
+            break;
+        case BuildKind::DryingRack:
+            DrawLineEx({x + w * 0.2f, y + h * 0.85f}, {x + w * 0.3f, y + h * 0.2f}, 3, dark);
+            DrawLineEx({x + w * 0.4f, y + h * 0.85f}, {x + w * 0.3f, y + h * 0.2f}, 3, dark);
+            DrawLineEx({x + w * 0.6f, y + h * 0.85f}, {x + w * 0.7f, y + h * 0.2f}, 3, dark);
+            DrawLineEx({x + w * 0.8f, y + h * 0.85f}, {x + w * 0.7f, y + h * 0.2f}, 3, dark);
+            for (int i = 0; i < 2; ++i) {
+                float yy = y + h * (0.32f + i * 0.22f);
+                DrawLineEx({x + w * 0.22f, yy}, {x + w * 0.78f, yy}, 2.5f, wood);
+                for (int k = 0; k < 4; ++k) DrawRectangleRec({x + w * (0.3f + k * 0.12f), yy, w * 0.05f, h * 0.14f}, Color{140, 60, 44, 255});
+            }
+            break;
+        case BuildKind::BoxTrap:
+            planks({x + w * 0.12f, y + h * 0.42f, w * 0.7f, h * 0.36f}, true);
+            DrawRectangleRec({x + w * 0.8f, y + h * 0.34f, w * 0.08f, h * 0.48f}, dark);
+            DrawLineEx({x + w * 0.5f, y + h * 0.42f}, {x + w * 0.5f, y + h * 0.22f}, 2, dark);
+            break;
         case BuildKind::Fence:
             for (int i = 0; i < 4; ++i) DrawRectangleRec({x + w * (0.14f + i * 0.2f), y + h * 0.28f, w * 0.08f, h * 0.56f}, wood);
             DrawRectangleRec({x + w * 0.1f, y + h * 0.4f, w * 0.8f, h * 0.06f}, dark);
@@ -552,8 +576,8 @@ struct BuildGroup { const char* name; std::vector<BuildKind> kinds; };
 const std::vector<BuildGroup>& buildGroups() {
     static const std::vector<BuildGroup> g = {
         {"Walls & roof", {BuildKind::Wall, BuildKind::Door, BuildKind::Window, BuildKind::Floor, BuildKind::Roof}},
-        {"Furniture", {BuildKind::Bed, BuildKind::Crate}},
-        {"Outdoors", {BuildKind::Fence, BuildKind::RainCollector}},
+        {"Furniture", {BuildKind::Bed, BuildKind::Crate, BuildKind::Shelf}},
+        {"Outdoors", {BuildKind::Fence, BuildKind::RainCollector, BuildKind::DryingRack, BuildKind::BoxTrap}},
     };
     return g;
 }
@@ -594,6 +618,12 @@ void App::drawBuildMenu() {
     chip(hammer ? "Hammer \xE2\x9C\x93" : "No hammer", hammer);
     chip(saw ? "Saw \xE2\x9C\x93" : "No saw", saw);
     chip(pl.knowsCarpentry ? "Carpentry \xE2\x9C\x93" : "No carpentry book", pl.knowsCarpentry);
+    {   // your skill, and how far to the next level
+        int lv = game_.carpentryLevel();
+        std::string skill = std::string("Skill: ") + Game::carpentryLevelName(lv);
+        if (lv < 5) skill += fmt(" (%d/%d)", (int)pl.carpentryXp, (int)Game::carpentryXpFor(lv + 1));
+        chip(skill, true);
+    }
 
     // Left: groups of cards
     float listW = p.width * 0.6f;
@@ -655,11 +685,14 @@ void App::drawBuildMenu() {
         dy += 22 * s;
     };
     row("Planks", fmt("%d / %d", planks, r->planks), planks >= r->planks);
-    row("Nails", fmt("%d / %d", nails, r->nails), nails >= r->nails);
+    int needNails = r->nails * (10 - game_.carpentryLevel()) / 10;
+    row("Nails", fmt("%d / %d", nails, needNails), nails >= needNails);
     row("Hammer", "", hammer);
     if (r->saw) row("Saw", "", saw);
     if (r->tarp) row("Tarpaulin", "", tarp);
     if (r->book) row("Know how (carpentry book)", "", pl.knowsCarpentry);
+    if (r->extraTag) row(std::string(1, (char)std::toupper((unsigned char)r->extraName[0])) + (r->extraName + 1), "", pl.inventory.findTag(r->extraTag) >= 0);
+    if (r->level > 0) row(std::string("Carpentry skill: ") + Game::carpentryLevelName(r->level), "", game_.carpentryLevel() >= r->level);
     dy += 6 * s;
     Rectangle b{d.x + 14 * s, dy, d.width - 28 * s, 34 * s};
     if (ui::button(b, ok ? "Place it" : "Can't build this yet", ok, 16)) { buildKind_ = (int)r->kind; overlay_ = Overlay::None; }

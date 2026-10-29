@@ -17,7 +17,7 @@ const char* buildingTypeName(BuildingType t) {
                               "Warehouse", "Grocery store", "Pharmacy", "Gas station", "Hardware store",
                               "Hospital", "School", "Church", "Town hall", "Police station", "Fire station",
                               "Railway station", "Hostel", "Manor", "Sports hall", "Shop", "Shopping centre",
-                              "Restaurant", "Car park", "Shelter"};
+                              "Restaurant", "Car park", "Shelter", "Military container", "Summer cottage"};
     static_assert(sizeof(n) / sizeof(n[0]) == (size_t)BuildingType::Count, "building names");
     return n[(int)t];
 }
@@ -73,11 +73,13 @@ BuildingType landmarkType(const std::string& kind) {
     if (kind == "firestation") return BuildingType::FireStation;
     if (kind == "sports") return BuildingType::Sports;
     if (kind == "bunker") return BuildingType::Bunker;
+    if (kind == "container") return BuildingType::MilitaryContainer;
     return BuildingType::Office;
 }
 
 bool isHomeType(BuildingType t) {
-    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse || t == BuildingType::Manor;
+    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse || t == BuildingType::Manor ||
+           t == BuildingType::SummerCottage;
 }
 
 bool isUrban(Zone z) {
@@ -192,6 +194,17 @@ void WorldGen::makeOsmBuildings() {
         Building b;
         b.type = osmType(ob.kind, b.shop);
         b.name = ob.name;
+        if (b.type == BuildingType::House) {
+            Vec2 c = r.centre();
+            Zone oz = map_.zoneAt(c.x, c.y);
+            if (oz == Zone::Field && r.area() >= 60) b.type = BuildingType::Farmhouse;
+            else if ((oz == Zone::Meadow || oz == Zone::Woodland || oz == Zone::Forest) && r.area() < 55) {
+                bool water = false;
+                for (int k = 0; k < 8 && !water; ++k)
+                    if (map_.waterCoverage(c.x + std::cos(k * 0.785f) * 30.0f, c.y + std::sin(k * 0.785f) * 30.0f) > 0.5f) water = true;
+                if (water) b.type = BuildingType::SummerCottage;
+            }
+        }
         if (b.type == BuildingType::House && r.area() < 45) b.type = BuildingType::Cottage;
         if (b.type == BuildingType::Shed && r.area() > 160) b.type = BuildingType::Warehouse;
         if (b.type == BuildingType::Apartment && r.area() < 90) b.type = BuildingType::House;
@@ -337,6 +350,7 @@ bool WorldGen::tryPlace(BuildingType type, const IRect& area, uint32_t h, Buildi
     switch (type) {
         case BuildingType::House:     w = rint(h, 8, 12); d = rint(h, 7, 10); break;
         case BuildingType::Cottage:   w = rint(h, 6, 8);  d = rint(h, 5, 7); break;
+        case BuildingType::SummerCottage: w = rint(h, 6, 8); d = rint(h, 5, 6); break;
         case BuildingType::Farmhouse: w = rint(h, 10, 13); d = rint(h, 8, 10); break;
         case BuildingType::Barn:      w = rint(h, 14, 20); d = rint(h, 9, 12); break;
         case BuildingType::Shed:      w = rint(h, 3, 5);  d = rint(h, 3, 4); break;
@@ -446,39 +460,55 @@ void WorldGen::ensureLot(int lx, int ly) {
             break;
         }
         case Zone::Hospital: type = BuildingType::Office; chance = 0.5f; break;
-        case Zone::Field:    type = BuildingType::Farmhouse; chance = roadDist < 50 ? 0.07f : 0.0f; break;
+        case Zone::Field:    type = BuildingType::Farmhouse; chance = roadDist < 60 ? 0.12f : 0.0f; break;
         case Zone::Meadow:   type = BuildingType::Cottage; chance = roadDist < 50 ? 0.06f : 0.0f; break;
         case Zone::Woodland: type = BuildingType::Cottage; chance = roadDist < 40 ? 0.05f : 0.0f; break;
         case Zone::Forest:   type = BuildingType::Cottage; chance = roadDist < 30 ? 0.01f : 0.0f; break;
         default: return;
+    }
+    // Summer cottages: by the lakes, and here and there in the woods along a gravel road
+    if (z == Zone::Meadow || z == Zone::Woodland || z == Zone::Forest) {
+        bool water = false;
+        for (int k = 0; k < 8 && !water; ++k)
+            for (float rr : {35.0f, 70.0f}) {
+                float a = k * 0.785f;
+                if (map_.waterCoverage(c.x + std::cos(a) * rr, c.y + std::sin(a) * rr) > 0.5f) water = true;
+            }
+        if (water) { type = BuildingType::SummerCottage; chance = roadDist < 120 ? 0.22f : 0.05f; }
+        else if (rnd(h) < 0.2f) { type = BuildingType::SummerCottage; chance = std::max(chance, roadDist < 90 ? 0.03f : 0.0f); }
     }
     if (rnd(h) >= chance) return;
 
     Building b;
     if (!tryPlace(type, area, h, b)) return;
     layout(b);
-    if (type == BuildingType::House || type == BuildingType::Farmhouse || type == BuildingType::Cottage) {
+    if (type == BuildingType::House || type == BuildingType::Farmhouse || type == BuildingType::Cottage || type == BuildingType::SummerCottage) {
         float r = rnd(h);
         b.lotBorder = r < 0.35f ? 1 : r < 0.6f ? 2 : 0;
     }
     int mainId = addBuilding(b);
     (void)mainId;
 
-    // Outbuildings: sheds by houses, barns on farms
-    if (type == BuildingType::House || type == BuildingType::Cottage || type == BuildingType::Farmhouse) {
+    // Outbuildings: sheds by houses and cottages (the woodshed), a barn and a
+    // woodshed on farms
+    if (type == BuildingType::House || type == BuildingType::Cottage || type == BuildingType::Farmhouse || type == BuildingType::SummerCottage) {
         bool farm = type == BuildingType::Farmhouse;
-        if (rnd(h) < (farm ? 0.9f : 0.45f)) {
-            Building s;
-            BuildingType st = farm ? BuildingType::Barn : BuildingType::Shed;
-            const Building& main = buildings_.back();
-            for (int attempt = 0; attempt < 6; ++attempt) {
+        std::vector<BuildingType> want;
+        if (rnd(h) < (farm ? 0.95f : type == BuildingType::SummerCottage ? 0.7f : 0.45f)) want.push_back(farm ? BuildingType::Barn : BuildingType::Shed);
+        if (farm && rnd(h) < 0.7f) want.push_back(BuildingType::Shed);
+        std::vector<IRect> taken{buildings_.back().rect};
+        for (size_t wi = 0; wi < want.size(); ++wi) {
+            for (int attempt = 0; attempt < 8; ++attempt) {
                 Building cand;
                 IRect sub = area;
-                if (!tryPlace(st, sub, hash32(h + attempt * 7919), cand)) continue;
-                if (cand.rect.expanded(2).intersects(main.rect)) continue;
+                if (!tryPlace(want[wi], sub, hash32(h + attempt * 7919 + (uint32_t)wi * 104729u), cand)) continue;
+                bool clash = false;
+                for (const auto& t : taken) clash |= cand.rect.expanded(2).intersects(t);
+                if (clash) continue;
                 cand.isOutbuilding = true;
                 cand.lot = IRect{};
                 layout(cand);
+                taken.push_back(cand.rect);
                 addBuilding(cand);
                 break;
             }
@@ -492,10 +522,67 @@ std::vector<int> WorldGen::buildingsIn(const IRect& r) {
     for (int ly = ly0 - 1; ly <= ly1 + 1; ++ly)
         for (int lx = lx0 - 1; lx <= lx1 + 1; ++lx) ensureLot(lx, ly);
     std::set<int> ids;
+    if (r.right() >= 15000) {
+        for (int id : levelIds_)
+            if (buildings_[(size_t)id].rect.expanded(3).intersects(r)) ids.insert(id);
+        return std::vector<int>(ids.begin(), ids.end());
+    }
     for (int gy = std::max(0, floorDiv(r.y, 64)); gy <= std::min(gridH_ - 1, floorDiv(r.bottom(), 64)); ++gy)
         for (int gx = std::max(0, floorDiv(r.x, 64)); gx <= std::min(gridW_ - 1, floorDiv(r.right(), 64)); ++gx)
             for (int id : buildingGrid_[(size_t)gy * gridW_ + gx]) ids.insert(id);
     return std::vector<int>(ids.begin(), ids.end());
+}
+
+int WorldGen::levelBuilding(int baseId, int level) {
+    if (baseId < 0 || baseId >= (int)buildings_.size() || level == 0) return -1;
+    int64_t key = (int64_t)baseId * 4 + (level + 1);
+    auto it = levels_.find(key);
+    if (it != levels_.end()) return it->second;
+    const Building& base = buildings_[(size_t)baseId];
+    bool any = false;
+    for (const auto& s : base.stairs) any |= (s.dir > 0) == (level > 0);
+    if (!any) return -1;
+    int off = floorOffset(level);
+    Building f;
+    f.type = base.type;
+    f.shop = base.shop;
+    f.rect = IRect{base.rect.x + off, base.rect.y, base.rect.w, base.rect.h};
+    f.lot = f.rect;
+    f.seed = hash3(baseId, level, 0xF1004, seed_);
+    f.levelOf = baseId;
+    f.level = level;
+    f.osm = base.osm;
+    f.levels = 1;
+    // the same staircases, the other way
+    for (const auto& s : base.stairs)
+        if ((s.dir > 0) == (level > 0)) f.stairs.push_back({s.x + off, s.y, -s.dir, s.main});
+    layout(f);
+    // no way out up here (or down there) but the stairs; no windows underground
+    for (auto& e : f.edges) {
+        bool outer = e.x == f.rect.x || e.x == f.rect.right() || e.y == f.rect.y || e.y == f.rect.bottom();
+        if (outer) e.bits &= (uint8_t)~(DoorN | DoorW);
+        if (level < 0) e.bits &= (uint8_t)~(WindowN | WindowW);
+    }
+    f.hasPath = false;
+    f.wallColour = base.wallColour; f.roofColour = base.roofColour; f.trimColour = base.trimColour;
+    f.roof = RoofKind::Flat;
+    f.floors = 1;
+    f.shopFront = false;
+    f.sign.clear();
+    f.floor = level < 0 ? Ground::FloorConcrete : base.floor;
+    f.floorY = base.floorY + (level > 0 ? 3.0f : -3.0f);
+    f.doorPos = f.stairs.empty() ? f.rect.centre() : Vec2{f.stairs[0].x + 0.5f, f.stairs[0].y + 0.5f};
+    f.id = (int)buildings_.size();
+    buildings_.push_back(std::move(f));
+    levelIds_.push_back((int)buildings_.size() - 1);
+    levels_[key] = (int)buildings_.size() - 1;
+    return (int)buildings_.size() - 1;
+}
+
+std::vector<std::pair<int, int>> WorldGen::madeLevels() const {
+    std::vector<std::pair<int, int>> out;
+    for (int id : levelIds_) out.push_back({buildings_[(size_t)id].levelOf, buildings_[(size_t)id].level});
+    return out;
 }
 
 const Building* WorldGen::building(int id) const {
@@ -527,7 +614,7 @@ void WorldGen::layout(Building& b) {
     const IRect& r = b.rect;
 
     // Exterior walls with windows
-    auto windowAt = [&](int i, int len) { return b.type != BuildingType::Bunker && i > 0 && i < len - 1 && (i % 3 == 1) && rnd(h) < 0.7f; };
+    auto windowAt = [&](int i, int len) { return b.type != BuildingType::Bunker && b.type != BuildingType::MilitaryContainer && i > 0 && i < len - 1 && (i % 3 == 1) && rnd(h) < 0.7f; };
     for (int x = r.x; x < r.right(); ++x) {
         b.edges.push_back({x, r.y, (uint8_t)(WallN | (windowAt(x - r.x, r.w) ? WindowN : 0))});
         b.edges.push_back({x, r.bottom(), (uint8_t)(WallN | (windowAt(x - r.x, r.w) ? WindowN : 0))});
@@ -539,7 +626,7 @@ void WorldGen::layout(Building& b) {
 
     switch (b.type) {
         case BuildingType::House: case BuildingType::Cottage: case BuildingType::Farmhouse:
-        case BuildingType::Manor:
+        case BuildingType::Manor: case BuildingType::SummerCottage:
             layoutHome(b, h);   // places its own front door
             break;
         case BuildingType::Apartment: case BuildingType::Office: case BuildingType::School:
@@ -599,12 +686,13 @@ void WorldGen::layout(Building& b) {
 
     assignRooms(b, h);
     if (!isHomeType(b.type)) addExteriorDoor(b, h);
-    furnish(b, h);
+    // how many storeys it has first: the stairs depend on it
     styleBuilding(b, h);
     b.floorY = floorHeight(b.rect);
     if (b.levels > 0) b.floors = std::clamp(b.levels, 1, 8);
     else if (b.osm && b.type == BuildingType::Apartment && r.area() > 300) b.floors = std::max(b.floors, 3);
     dressBuilding(b, h);
+    furnish(b, h);
     // A pitched roof over a wide building would be taller than the house: hip or flatten it
     float span = (float)std::min(r.w, r.h);
     bool keepsPitch = b.type == BuildingType::Church || b.type == BuildingType::Station || b.type == BuildingType::Barn;
@@ -658,6 +746,7 @@ void WorldGen::dressBuilding(Building& b, uint32_t& h) {
             case BuildingType::Police: b.sign = "Polis"; break;
             case BuildingType::FireStation: b.sign = "Räddningstjänst"; break;
             case BuildingType::Bunker: b.sign = "Skyddsrum"; break;
+            case BuildingType::MilitaryContainer: b.sign = "FÖRSVARSMAKTEN"; break;
             case BuildingType::Restaurant: b.sign = b.shop == "cafe" ? "Kafé" : b.shop == "kiosk" ? "Kiosk" : "Restaurang"; break;
             case BuildingType::Shop: {
                 const std::string& k = b.shop;
@@ -1178,13 +1267,96 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
         }
         default: break;
     }
+    // --- Stairs ------------------------------------------------------------------
+    // Upstairs and in the basement the rooms are used differently
+    if (b.levelOf >= 0) {
+        bool firstBath = true;
+        for (auto& room : b.rooms) {
+            if (b.level > 0 && isHomeType(b.type) && room.type == RoomType::Kitchen) room.type = RoomType::Bedroom;
+            if (b.level < 0) {
+                if (room.type == RoomType::Bathroom && firstBath) { firstBath = false; continue; }   // the laundry
+                if (room.type != RoomType::Hall) room.type = RoomType::Storage;
+            }
+        }
+        // the staircases that lead here, exactly above (below) the ones downstairs
+        for (const auto& st : b.stairs) {
+            blocked.erase(tileKey(st.x, st.y));
+            place(st.x, st.y, st.dir > 0 ? Prop::StairsUp : Prop::StairsDown, 2);
+        }
+    } else if (!b.isOutbuilding && b.stairs.empty()) {
+        bool home = b.type == BuildingType::House || b.type == BuildingType::Farmhouse || b.type == BuildingType::Manor;
+        bool corridor = b.type == BuildingType::Apartment || b.type == BuildingType::Office || b.type == BuildingType::School ||
+                        b.type == BuildingType::Hospital || b.type == BuildingType::Hostel || b.type == BuildingType::TownHall ||
+                        b.type == BuildingType::Police || b.type == BuildingType::FireStation;
+        bool upper = b.floors >= 2 && (home || corridor);
+        float basementChance = b.type == BuildingType::House ? 0.45f : b.type == BuildingType::Farmhouse ? 0.55f
+                             : b.type == BuildingType::Manor || b.type == BuildingType::Apartment || b.type == BuildingType::Hospital ||
+                               b.type == BuildingType::TownHall || b.type == BuildingType::Police ? 1.0f
+                             : corridor ? 0.5f : b.type == BuildingType::Church ? 0.6f : 0.0f;
+        bool basement = rnd(h) < basementChance;
+        // where stairs can go: along the walls of the hall (or the biggest living space)
+        const Room* hall = nullptr;
+        for (const auto& room : b.rooms)
+            if (room.type == RoomType::Hall || room.type == RoomType::Lobby) { if (!hall || room.rect.area() > hall->rect.area()) hall = &room; }
+        if (!hall)
+            for (const auto& room : b.rooms)
+                if (room.type == RoomType::Living || room.type == RoomType::Nave || room.type == RoomType::Kitchen) { hall = &room; break; }
+        if (!hall && !b.rooms.empty()) hall = &b.rooms[0];
+        auto spots = [&](const Room& room) {
+            std::vector<std::pair<std::pair<int, int>, uint8_t>> v;
+            const IRect& r = room.rect;
+            for (int x = r.x; x < r.right(); ++x) { v.push_back({{x, r.y}, 2}); v.push_back({{x, r.bottom() - 1}, 0}); }
+            for (int y = r.y + 1; y < r.bottom() - 1; ++y) { v.push_back({{r.x, y}, 1}); v.push_back({{r.right() - 1, y}, 3}); }
+            return v;
+        };
+        // the free spot nearest to `want`
+        auto stairNear = [&](Vec2 want, Prop p, int dir, bool main, float awayFrom = -1, Vec2 other = {}) {
+            if (!hall) return false;
+            auto v = spots(*hall);
+            std::sort(v.begin(), v.end(), [&](const auto& a, const auto& c) {
+                return distance(Vec2{a.first.first + 0.5f, a.first.second + 0.5f}, want) < distance(Vec2{c.first.first + 0.5f, c.first.second + 0.5f}, want);
+            });
+            for (const auto& s : v) {
+                Vec2 at{s.first.first + 0.5f, s.first.second + 0.5f};
+                if (awayFrom > 0 && distance(at, other) < awayFrom) continue;
+                if (place(s.first.first, s.first.second, p, s.second)) {
+                    b.stairs.push_back({s.first.first, s.first.second, dir, main});
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (hall) {
+            const IRect& hr = hall->rect;
+            bool alongX = hr.w >= hr.h;
+            Vec2 centre = hr.centre();
+            Vec2 endA = alongX ? Vec2{hr.x + 2.5f, centre.y} : Vec2{centre.x, hr.y + 2.5f};
+            Vec2 endB = alongX ? Vec2{hr.right() - 2.5f, centre.y} : Vec2{centre.x, hr.bottom() - 2.5f};
+            bool big = corridor && b.rect.area() >= 250 && (alongX ? hr.w : hr.h) >= 18;
+            if (upper) {
+                if (big) {
+                    // the main staircase in the middle, smaller stairs at the ends (now and then one has given way)
+                    stairNear(centre, Prop::StairsUp, 1, true);
+                    for (Vec2 e : {endA, endB}) stairNear(e, rnd(h) < 0.2f ? Prop::BrokenStairs : Prop::StairsUp, 1, false, 6.0f, centre);
+                } else {
+                    stairNear(rnd(h) < 0.5f ? endA : centre, home && rnd(h) < 0.15f ? Prop::BrokenStairs : Prop::StairsUp, 1, !home);
+                }
+            }
+            if (basement) {
+                Vec2 first = b.stairs.empty() ? centre : Vec2{b.stairs[0].x + 0.5f, b.stairs[0].y + 0.5f};
+                stairNear(big ? endB : endA, Prop::StairsDown, -1, false, 2.5f, first);
+            }
+        }
+    }
+
     bool hunterHome = rnd(h) < 0.18f;   // lots of Swedes hunt
 
     for (const auto& room : b.rooms) {
         switch (room.type) {
             case RoomType::Kitchen:
                 alongWalls(room, {{Prop::Fridge, ""}, {Prop::Stove, ""}, {Prop::Counter, ""}, {Prop::Counter, ""},
-                                  {Prop::Sink, ""}, {Prop::Counter, "pantry"}});
+                                  {Prop::Sink, ""}, {Prop::Counter, b.type == BuildingType::SummerCottage ? "cottage_cupboard" : "pantry"}});
+                if (b.type == BuildingType::Farmhouse) alongWalls(room, {{Prop::Shelf, "farm_pantry"}});   // the farm's larder
                 if (rnd(h) < 0.4f) alongWalls(room, {{Prop::Freezer, ""}});
                 if (room.rect.w >= 4 && room.rect.h >= 4) {
                     Vec2 c = room.rect.centre();
@@ -1200,6 +1372,8 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                 }
                 if (b.type == BuildingType::Cottage || b.rooms.size() == 1)
                     alongWalls(room, {{Prop::Fridge, ""}, {Prop::Counter, ""}, {Prop::Bed, ""}, {Prop::Wardrobe, ""}});
+                if (b.type == BuildingType::SummerCottage)   // the cupboard everyone leaves things in over the winter
+                    alongWalls(room, {{Prop::Shelf, "cottage_cupboard"}, {Prop::Stove, ""}});
                 break;
             case RoomType::Bedroom:
                 if (b.type == BuildingType::Bunker) {   // bunks and a locker each
@@ -1214,6 +1388,11 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                 if (rnd(h) < 0.6f) alongWalls(room, {{Prop::Bin, "bathroom_bin"}});
                 break;
             case RoomType::Storage:
+                if (b.level < 0) {   // basement storerooms
+                    alongWalls(room, {{Prop::Shelf, "basement_shelf"}, {Prop::Shelf, "basement_shelf"}, {Prop::Workbench, "garage_shelf"},
+                                      {Prop::Freezer, ""}});
+                    break;
+                }
                 if (b.type == BuildingType::ParkingGarage) {
                     const IRect& r = room.rect;
                     for (int y = r.y + 2; y < r.bottom() - 1; y += 6)
@@ -1223,7 +1402,10 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                             if (rnd(h) < 0.3f) place(x, y, Prop::Car, (uint8_t)(rnd(h) < 0.5f ? 0 : 1));
                     break;
                 }
-                if (b.type == BuildingType::Bunker) {
+                if (b.type == BuildingType::MilitaryContainer) {
+                    alongWalls(room, {{Prop::Crate, "military_crate"}, {Prop::Crate, "military_crate"}, {Prop::Crate, "military_crate"},
+                                      {Prop::Crate, "military_crate"}, {Prop::GunCabinet, "military_rack"}});
+                } else if (b.type == BuildingType::Bunker) {
                     alongWalls(room, {{Prop::Shelf, "bunker_store"}, {Prop::Shelf, "bunker_store"}, {Prop::Shelf, "bunker_store"},
                                       {Prop::Locker, "bunker_locker"}, {Prop::Desk, "bunker_desk"}});
                 } else if (b.type == BuildingType::Grocery || b.type == BuildingType::Pharmacy || b.type == BuildingType::Hardware ||
@@ -1233,7 +1415,8 @@ void WorldGen::furnish(Building& b, uint32_t& h) {
                 } else if (b.type == BuildingType::Warehouse && room.rect.area() > 120) {
                     rows(room, Prop::Shelf, "warehouse_shelf", 5);
                 } else if (b.type == BuildingType::Barn) {
-                    alongWalls(room, {{Prop::HayBale, ""}, {Prop::HayBale, ""}, {Prop::Workbench, ""}, {Prop::Woodpile, ""}});
+                    alongWalls(room, {{Prop::HayBale, ""}, {Prop::HayBale, ""}, {Prop::Workbench, "farm_store"}, {Prop::Woodpile, ""},
+                                      {Prop::Shelf, "farm_store"}});
                 } else {
                     alongWalls(room, {{Prop::Workbench, b.type == BuildingType::Shed ? "toolbox" : "garage_shelf"},
                                       {Prop::Shelf, b.type == BuildingType::Shed ? "toolbox" : "pantry"}});
@@ -1326,6 +1509,12 @@ void WorldGen::styleBuilding(Building& b, uint32_t& h) {
             b.wallColour = pick(h, houseWalls); b.roofColour = pick(h, roofs); b.floors = rnd(h) < 0.4f ? 2 : 1; break;
         case BuildingType::Cottage:
             b.wallColour = rnd(h) < 0.7f ? 0x8b2a1e : 0xe3c565; b.roofColour = pick(h, roofs); break;
+        case BuildingType::SummerCottage:   // a falu red stuga with white corners
+            b.wallColour = rnd(h) < 0.85f ? 0x8b2a1e : 0x2f4a3a; b.trimColour = 0xf4f2ea; b.roofColour = rnd(h) < 0.6f ? 0x2c2c2e : 0x7a2e22;
+            b.floors = 1; b.floor = Ground::FloorWood; b.roof = RoofKind::Gable; break;
+        case BuildingType::MilitaryContainer:
+            b.wallColour = 0x4f5a3c; b.roofColour = 0x46503a; b.trimColour = 0x3a4230; b.floors = 1; b.roof = RoofKind::Flat;
+            b.floor = Ground::FloorConcrete; break;
         case BuildingType::Farmhouse:
             b.wallColour = rnd(h) < 0.6f ? 0xf0ede4 : 0x8b2a1e; b.roofColour = pick(h, roofs); b.floors = 2; break;
         case BuildingType::Barn:
@@ -1724,6 +1913,10 @@ void WorldGen::generateChunk(Chunk& c) {
             int x = x0 + lx, y = y0 + ly;
             Tile& t = c.at(lx, ly);
             t = Tile{};
+            if (x >= 15000) {   // the bands where the upper floors and basements are: nothing but them
+                t.ground = Ground::Void;
+                continue;
+            }
             if (x < 0 || y < 0 || x >= map_.widthM() || y >= map_.heightM()) {
                 t.ground = Ground::ForestFloor;
                 t.prop = (hash2(x, y, seed_) & 7) == 0 ? Prop::Spruce : Prop::None;

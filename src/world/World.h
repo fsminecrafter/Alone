@@ -34,7 +34,7 @@ struct Tent {
 
 // Carpentry: things the player has built. Edge pieces sit on the north (dir 0)
 // or west (dir 1) edge of a tile, like the walls of the houses.
-enum class BuildKind : uint8_t { Wall, Door, Window, Floor, Roof, Crate, RainCollector, Bed, Fence, Count };
+enum class BuildKind : uint8_t { Wall, Door, Window, Floor, Roof, Crate, RainCollector, Bed, Fence, Shelf, DryingRack, BoxTrap, Count };
 struct Built {
     BuildKind kind = BuildKind::Wall;
     int x = 0, y = 0, dir = 0;
@@ -42,11 +42,17 @@ struct Built {
 const char* buildKindName(BuildKind k);
 inline bool isEdgeBuild(BuildKind k) { return k == BuildKind::Wall || k == BuildKind::Door || k == BuildKind::Window; }
 
+// Traps: a wire snare (hare, squirrel, grouse), a fish trap in shallow
+// water (fills up with fish and crayfish), a built box trap (fox, badger,
+// beaver by the water)
+enum class TrapKind : uint8_t { Snare, FishTrap, BoxTrap };
 struct Snare {
     Vec2 pos;
     float minutesSet = 0;
     bool caught = false;
     int id = 0;
+    TrapKind kind = TrapKind::Snare;
+    int fish = 0, crayfish = 0;   // fish trap: what's in it
 };
 
 // Things changed by the player, kept even when a chunk is unloaded.
@@ -65,6 +71,9 @@ public:
 
     const MapData& map() const { return map_; }
     WorldGen& gen() { return gen_; }
+    // An upper floor (+1) or basement (-1) of a building: made the first time,
+    // and the chunks it stands in rebuilt to show it. -1 if there is none.
+    int ensureFloor(int baseId, int level);
     const ItemRegistry& items() const { return items_; }
     Clock& clock() { return clock_; }
     const Clock& clock() const { return clock_; }

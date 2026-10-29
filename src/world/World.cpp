@@ -57,6 +57,9 @@ Chunk& World::chunk(int cx, int cy) {
             case BuildKind::RainCollector: t.prop = Prop::RainBarrel; break;
             case BuildKind::Bed: t.prop = Prop::Bed; break;
             case BuildKind::Fence: t.prop = Prop::Fence; break;
+            case BuildKind::Shelf: t.prop = Prop::WoodShelf; break;
+            case BuildKind::DryingRack: t.prop = Prop::DryingRack; break;
+            case BuildKind::BoxTrap: t.prop = Prop::BoxTrap; break;
             default: break;
         }
     }
@@ -113,8 +116,22 @@ bool World::indoors(Vec2 p) {
 // ---------------------------------------------------------------------------
 
 const char* buildKindName(BuildKind k) {
-    static const char* n[] = {"wall", "door", "window", "floor", "roof", "crate", "rain collector", "bed", "fence"};
+    static const char* n[] = {"wall", "door", "window", "floor", "roof", "crate", "rain collector", "bed", "fence", "shelf", "drying rack", "box trap"};
     return n[(int)k];
+}
+
+int World::ensureFloor(int baseId, int level) {
+    size_t before = gen_.allBuildings().size();
+    int id = gen_.levelBuilding(baseId, level);
+    if (id >= 0 && gen_.allBuildings().size() != before) {
+        // chunks made before it existed don't have it: make them again
+        const IRect r = gen_.building(id)->rect.expanded(2);
+        for (int cy = floorDiv(r.y, kChunkSize); cy <= floorDiv(r.bottom(), kChunkSize); ++cy)
+            for (int cx = floorDiv(r.x, kChunkSize); cx <= floorDiv(r.right(), kChunkSize); ++cx)
+                chunks_.erase(tileKey(cx, cy));
+        touch(r.x, r.y);
+    }
+    return id;
 }
 
 Tent* World::tentAt(Vec2 p) {
@@ -171,7 +188,8 @@ bool World::canBuild(const Built& b, std::string* why) {
         return true;
     }
     const Tile& t = tile(b.x, b.y);
-    if (t.building >= 0 && b.kind != BuildKind::Crate && b.kind != BuildKind::Bed) return no("Not inside a house");
+    if (t.building >= 0 && b.kind != BuildKind::Crate && b.kind != BuildKind::Bed && b.kind != BuildKind::Shelf && b.kind != BuildKind::DryingRack)
+        return no("Not inside a house");
     if (t.ground == Ground::WaterDeep || t.ground == Ground::WaterShallow) return no("Not in the water");
     if (builtAt(b.x, b.y, b.kind)) return no("You've already built one here");
     if (b.kind == BuildKind::Floor) {
@@ -196,10 +214,14 @@ void World::applyBuild(const Built& b, bool on) {
         case BuildKind::RainCollector: t.prop = on ? Prop::RainBarrel : Prop::None; break;
         case BuildKind::Bed: t.prop = on ? Prop::Bed : Prop::None; break;
         case BuildKind::Fence: t.prop = on ? Prop::Fence : Prop::None; break;
+        case BuildKind::Shelf: t.prop = on ? Prop::WoodShelf : Prop::None; break;
+        case BuildKind::DryingRack: t.prop = on ? Prop::DryingRack : Prop::None; break;
+        case BuildKind::BoxTrap: t.prop = on ? Prop::BoxTrap : Prop::None; break;
         default: break;
     }
     if (bits) t.walls = on ? (t.walls | bits) : (t.walls & ~bits);
-    if (b.kind == BuildKind::Crate || b.kind == BuildKind::RainCollector || b.kind == BuildKind::Bed || b.kind == BuildKind::Fence) {
+    if (b.kind == BuildKind::Crate || b.kind == BuildKind::RainCollector || b.kind == BuildKind::Bed || b.kind == BuildKind::Fence ||
+        b.kind == BuildKind::Shelf || b.kind == BuildKind::DryingRack || b.kind == BuildKind::BoxTrap) {
         TileOverride& o = overrides_[tileKey(b.x, b.y)];
         o.hasProp = true;
         o.prop = t.prop;
@@ -210,7 +232,7 @@ void World::applyBuild(const Built& b, bool on) {
 void World::addBuild(const Built& b) {
     builds_.push_back(b);
     applyBuild(b, true);
-    if (b.kind == BuildKind::Crate) {
+    if (b.kind == BuildKind::Crate || b.kind == BuildKind::Shelf || b.kind == BuildKind::DryingRack) {
         ContainerState& c = container(b.x, b.y);
         c.searched = true;     // a new crate is empty: nothing to search
         c.items.clear();

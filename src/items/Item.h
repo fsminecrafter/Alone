@@ -31,6 +31,9 @@ struct ItemDef {
     float solidMl = 0;           // stomach volume of the whole item
     bool raw = false;            // risky until cooked
     std::string cookedInto;      // item id after cooking
+    // Preserving: what it becomes dried on a rack, smoked over a fire, or salted
+    std::string driesTo, smokesTo, saltsTo;
+    float dryHours = 48, smokeHours = 10;
     Pathogen pathogen = Pathogen::None;
     float pathogenChance = 0;    // chance this particular item carries it
     float pathogenDose = 0.5f;
@@ -51,6 +54,7 @@ struct ItemDef {
     float noise = 5.0f;          // metres animals can hear it
     bool firearm = false;
     std::string ammo;
+    float armour = 0;            // clothing: share of a hit it takes on the part it covers
     std::string lore;            // a document: the lore entry (data/text/lore.ini) reading it adds to your journal
     int magazine = 0;            // firearm: rounds it holds (0: shoots straight from the quiver, like a bow)
     float reloadSeconds = 2.5f;
@@ -92,6 +96,7 @@ struct ItemInstance {
     uint32_t tint = 0;           // clothes: dyed this colour (0 = the item's own)
     int usesLeft = 0;
     bool carriesPathogen = false;  // rolled when created
+    float cure = 0;              // on a drying rack: 0 .. 1 dried (or smoked)
     uint32_t uid = 0;
 
     float weightKg() const;

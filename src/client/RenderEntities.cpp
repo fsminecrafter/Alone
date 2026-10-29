@@ -541,7 +541,14 @@ void Renderer::drawEntities(Game& game, float time, bool shadowPass) {
     }
     for (const auto& s : w.snares()) {
         if (distance(s.pos, pp) > 60) continue;
+        if (s.kind == TrapKind::BoxTrap) continue;   // a built prop
         liftY_ = w.standHeight(s.pos);
+        if (s.kind == TrapKind::FishTrap) {   // a net funnel half under water, and its marker stick
+            drawTube(V(s.pos.x - 0.35f, -0.05f, s.pos.y), V(s.pos.x + 0.35f, -0.05f, s.pos.y), 0.18f, hexColor(0x2e4a34));
+            drawTube(V(s.pos.x + 0.4f, -0.3f, s.pos.y + 0.2f), V(s.pos.x + 0.4f, 0.6f, s.pos.y + 0.2f), 0.02f, hexColor(0x6a5034));
+            drawPrim(cube_, V(s.pos.x + 0.4f, 0.62f, s.pos.y + 0.2f), V(0.08f, 0.05f, 0.03f), 0, hexColor(0xd04030));
+            continue;
+        }
         drawTube(V(s.pos.x - 0.15f, 0.02f, s.pos.y), V(s.pos.x - 0.15f, 0.35f, s.pos.y), 0.02f, hexColor(0x6a5034));
         drawPrim(sphere_, V(s.pos.x, 0.15f, s.pos.y), V(0.13f, 0.13f, 0.02f), 0, hexColor(0xc0a040));
     }
@@ -558,6 +565,7 @@ void Renderer::drawWeather(Game& game, float time) {
     World& world = game.world();
     const Weather& w = world.clock().weather();
     if (w.rain <= 0.01f) return;
+    if (floorLevelAt(game.player().pos.x) != 0) return;   // upstairs or in a basement: indoors
     bool snow = w.kind == WeatherKind::Snow;
     rlDrawRenderBatchActive();
     rlDisableDepthMask();      // see-through: streaks don't hide each other

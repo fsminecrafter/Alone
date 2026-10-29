@@ -644,6 +644,15 @@ void Renderer::addProp(MeshBuilder& mb, World& world, const Tile& t, int x, int 
             mb.material(MMetal);
             mb.tube(V(cx, 0, cz), V(cx, 0.9f, cz), 0.35f, 0.38f, 10, hexColor(0x2a4a32));
             break;
+        case Prop::BoxTrap: {   // a plank box with a drop door at one end
+            Color wood = hexColor(0xa08058);
+            mb.material(MSiding, 0.0f);
+            mb.box(V(x + 0.15f, 0, y + 0.3f), V(x + 0.85f, 0.42f, y + 0.7f), wood);
+            mb.material(MPlain);
+            mb.box(V(x + 0.83f, 0, y + 0.28f), V(x + 0.88f, 0.5f, y + 0.72f), shade(wood, 0.7f));
+            mb.box(V(x + 0.45f, 0.42f, y + 0.48f), V(x + 0.5f, 0.6f, y + 0.52f), shade(wood, 0.6f));
+            break;
+        }
         case Prop::Barrier:
             mb.material(MMetal);
             mb.box(V((float)x, 0.45f, cz - 0.05f), V(x + 1.0f, 0.75f, cz + 0.05f), hexColor(0xc0c0c0));
@@ -835,6 +844,59 @@ void Renderer::addProp(MeshBuilder& mb, World& world, const Tile& t, int x, int 
             fb(-0.3f, 0.3f, 0, 1.7f, 0.03f, 0.45f, hexColor(0x2e3a30), MMetal);
             fb(0.18f, 0.22f, 0.8f, 1.0f, 0.45f, 0.48f, hexColor(0x909090), MMetal);
             break;
+        case Prop::WoodShelf: {   // a plank shelf someone built
+            Color wood = hexColor(0xa88458);
+            fb(-0.48f, -0.43f, 0, 1.8f, 0.04f, 0.5f, shade(wood, 0.85f), MFloorWood);
+            fb(0.43f, 0.48f, 0, 1.8f, 0.04f, 0.5f, shade(wood, 0.85f), MFloorWood);
+            for (int sh = 0; sh < 4; ++sh) fb(-0.46f, 0.46f, 0.1f + sh * 0.55f, 0.15f + sh * 0.55f, 0.04f, 0.5f, wood, MFloorWood);
+            break;
+        }
+        case Prop::DryingRack: {   // two A-frames and poles to hang strips of meat and fish on
+            Color wood = hexColor(0x8a6a48), strip = hexColor(0x7a3a2a);
+            for (float u : {-0.42f, 0.42f}) {
+                fb(u - 0.03f, u + 0.03f, 0, 1.6f, 0.1f, 0.16f, wood, MBark);
+                fb(u - 0.03f, u + 0.03f, 0, 1.6f, 0.62f, 0.68f, wood, MBark);
+            }
+            for (int i = 0; i < 3; ++i) {
+                float v = 0.7f + i * 0.4f;
+                fb(-0.46f, 0.46f, v, v + 0.04f, 0.37f, 0.41f, wood, MBark);
+                for (int k = 0; k < 4; ++k) {   // a few strips hanging
+                    float u = -0.3f + k * 0.2f + 0.05f * (i & 1);
+                    fb(u, u + 0.05f, v - 0.28f, v, 0.38f, 0.4f, shade(strip, 0.8f + 0.1f * k));
+                }
+            }
+            break;
+        }
+        case Prop::StairsUp: {   // a steep wooden staircase with a rail
+            Color wood = hexColor(0x9a7a54);
+            for (int st = 0; st < 8; ++st) {
+                float d0 = 0.05f + st * 0.11f, v1 = 0.3f + st * 0.27f;
+                fb(-0.42f, 0.38f, v1 - 0.05f, v1, d0, d0 + 0.18f, shade(wood, 0.95f + 0.05f * (st & 1)), MFloorWood);
+            }
+            fb(-0.44f, -0.4f, 0, 2.4f, 0.0f, 0.95f, shade(wood, 0.7f));   // stringer
+            fb(0.38f, 0.42f, 0.9f, 0.95f, 0.05f, 0.95f, shade(wood, 0.8f));   // rail
+            fb(0.38f, 0.42f, 0, 0.95f, 0.05f, 0.09f, shade(wood, 0.8f));
+            break;
+        }
+        case Prop::StairsDown: {   // a hatch in the floor and the top steps going down
+            fb(-0.46f, 0.46f, 0.01f, 0.04f, 0.04f, 0.96f, hexColor(0x141210));
+            for (float u : {-0.48f, 0.44f}) fb(u, u + 0.04f, 0.01f, 0.06f, 0.02f, 0.98f, hexColor(0x6a5034), MFloorWood);
+            for (float w : {0.02f, 0.94f}) fb(-0.48f, 0.48f, 0.01f, 0.06f, w, w + 0.04f, hexColor(0x6a5034), MFloorWood);
+            fb(0.42f, 0.46f, 0, 0.95f, 0.06f, 0.1f, hexColor(0x5a5a5e), MMetal);     // railing post
+            fb(0.42f, 0.46f, 0.9f, 0.95f, 0.06f, 0.9f, hexColor(0x5a5a5e), MMetal);
+            break;
+        }
+        case Prop::BrokenStairs: {   // what's left of the stairs, and the boards that came down
+            Color wood = hexColor(0x8a6a48);
+            for (int st = 0; st < 3; ++st) {
+                float d0 = 0.05f + st * 0.11f, v1 = 0.3f + st * 0.27f;
+                fb(-0.42f, 0.38f, v1 - 0.05f, v1, d0, d0 + 0.18f, wood, MFloorWood);
+            }
+            fb(-0.44f, -0.4f, 0, 0.9f, 0.0f, 0.4f, shade(wood, 0.7f));
+            fb(-0.3f, 0.4f, 0.0f, 0.05f, 0.5f, 0.62f, shade(wood, 0.8f), MFloorWood);
+            fb(-0.1f, 0.45f, 0.05f, 0.1f, 0.7f, 0.8f, shade(wood, 0.9f), MFloorWood);
+            break;
+        }
         case Prop::Workbench:
             fb(-0.49f, 0.49f, 0.85f, 0.92f, 0.04f, 0.72f, hexColor(0x8a6a44), MFloorWood);
             fb(-0.46f, -0.4f, 0, 0.85f, 0.06f, 0.7f, hexColor(0x6a5034));
@@ -911,6 +973,7 @@ void Renderer::buildChunk(World& world, Chunk& c, ChunkGfx& g) {
     for (int ly = 0; ly < kChunkSize; ++ly)
         for (int lx = 0; lx < kChunkSize; ++lx) {
             const Tile& t = c.at(lx, ly);
+            if (t.ground == Ground::Void) continue;   // around the upper floors and basements: nothing to draw
             int x = x0 + lx, y = y0 + ly;
             int cell = (lx >= kChunkSize / 2 ? 1 : 0) + (ly >= kChunkSize / 2 ? 2 : 0);
             MeshBuilder& props = cellProps[cell];

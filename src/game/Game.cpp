@@ -93,6 +93,7 @@ void Game::newGame(uint32_t seed, const CharacterChoice* who) {
     player_.body = Body(seed + 99);
     loreKnown_.clear();
     loreOpened_.clear();
+    knownPlaces_.clear();
     tentMate_ = talkRequest_ = 0;
     animals_.animals().clear();
     vehicles_.clear();
@@ -147,7 +148,9 @@ std::vector<ActiveSymptom> Game::currentSymptoms() const {
 }
 
 std::string Game::location() const {
-    std::string district = map_.districtAt(player_.pos);
+    std::string district = map_.districtAt(surfacePos(player_.pos));
+    int level = floorLevelAt(player_.pos.x);
+    std::string floorWord = level > 0 ? "Upstairs: " : level < 0 ? "Basement: " : "";
     int tx = (int)std::floor(player_.pos.x), ty = (int)std::floor(player_.pos.y);
     const Tile& t = world_->tile(tx, ty);
     if (t.building >= 0) {
@@ -161,7 +164,7 @@ std::string Game::location() const {
                 else if (!r->label.empty() && r->type != RoomType::Hall)
                     what = r->label + " \xE2\x80\x93 " + what;   // "Kläder – Gallerian Storken"
             }
-            return what + ", " + district;
+            return floorWord + what + ", " + district;
         }
     }
     std::string street = map_.streetAt(player_.pos);
@@ -353,6 +356,13 @@ SleepComfort Game::sleepComfortIn(const Environment& env) {
     return c;
 }
 
+float Game::armourAt(BodyPart part) const {
+    auto of = [&](ClothingSlot sl) { const ItemInstance& it = player_.worn[(size_t)sl]; return it.def ? it.def->armour : 0.0f; };
+    if (part == BodyPart::Head) return of(ClothingSlot::Head);
+    if (part == BodyPart::Torso) return std::max({of(ClothingSlot::Jacket), of(ClothingSlot::Sweater), of(ClothingSlot::Torso)});
+    return 0.0f;
+}
+
 const ItemInstance* Game::stowedWeapon() const {
     int i = player_.inventory.indexOfUid(player_.stowedUid);
     return i >= 0 ? &player_.inventory.items()[(size_t)i] : nullptr;
@@ -395,6 +405,76 @@ void Game::reload() {
     o.kind = ActionKind::Reload;
     o.label = "Reloading";
     perform(o);
+}
+
+std::vector<ItemInstance> Game::preserve(const ItemInstance& raw, const std::string& productId) {
+    std::vector<ItemInstance> out;
+    const ItemDef* pd = items_.find(productId);
+    if (!pd || !raw.def) return out;
+    // how much of the weight is left: drying takes the water, salting a little
+    float ratio = productId.rfind("dried_", 0) == 0 ? (productId == "dried_fish" ? 0.3f : productId == "dried_mushrooms" ? 0.12f
+                                                       : productId == "dried_berries" ? 0.2f : 0.4f)
+                : productId.rfind("smoked_", 0) == 0 ? 0.65f : 0.85f;
+    float grams = raw.def->weightKg * 1000.0f * raw.portion * ratio;
+    float unit = std::max(1.0f, pd->weightKg * 1000.0f);
+    float pieces = grams / unit;
+    int whole = (int)pieces;
+    for (int i = 0; i < whole && i < 30; ++i) out.push_back(items_.create(pd, rng_));
+    float rest = pieces - whole;
+    if (rest > 0.1f || out.empty()) {
+        ItemInstance p = items_.create(pd, rng_);
+        p.portion = std::clamp(rest, 0.1f, 1.0f);
+        out.push_back(p);
+    }
+    for (auto& p : out) p.carriesPathogen = false;   // salt, smoke and drying see to that
+    return out;
+}
+
+// Drying racks: what hangs on them dries over a couple of days - in the rain
+// only under a roof - or smokes in hours beside a lit campfire
+void Game::updateDryingRacks(float gameMinutes) {
+    float hours = gameMinutes / 60.0f;
+    if (hours <= 0) return;
+    float rain = world_->clock().weather().rain;
+    for (const auto& b : world_->builds()) {
+        if (b.kind != BuildKind::DryingRack) continue;
+        auto& items = world_->container(b.x, b.y).items;
+        if (items.empty()) continue;
+        Vec2 c{b.x + 0.5f, b.y + 0.5f};
+        bool fire = false;
+        for (const auto& f : world_->campfires()) fire |= f.lit && !f.stove && distance(f.pos, c) < 3.0f;
+        bool sheltered = world_->roofAt(b.x, b.y) || world_->tile(b.x, b.y).building >= 0;
+        std::vector<ItemInstance> done;
+        for (size_t i = 0; i < items.size();) {
+            ItemInstance& it = items[i];
+            bool smoke = fire && !it.def->smokesTo.empty();
+            const std::string& to = smoke ? it.def->smokesTo : it.def->driesTo;
+            if (to.empty()) { ++i; continue; }
+            if (!smoke && rain > 0.3f && !sheltered) { ++i; continue; }   // nothing dries in the rain
+            it.ageHours += hours * (smoke ? 0.15f : 0.35f);   // it still goes off while it hangs, but slowly in the dry air
+            it.cure += hours / (smoke ? it.def->smokeHours : it.def->dryHours);
+            if (it.cure < 1.0f) { ++i; continue; }
+            if (it.rotten()) {
+                if (distance(c, player_.pos) < 30) log("The " + lower(it.def->name) + " on the rack went off before it was done.", MessageKind::Bad);
+                it.cure = 0;
+                ++i;
+                continue;
+            }
+            auto out = preserve(it, to);
+            if (distance(c, player_.pos) < 30 && !out.empty())
+                log("On the drying rack: " + lower(out[0].def->name) + (smoke ? ", dark from the smoke." : ", dry and ready."), MessageKind::Good);
+            for (auto& p : out) done.push_back(p);
+            items.erase(items.begin() + (long)i);
+        }
+        for (auto& p : done) items.push_back(p);
+    }
+}
+
+int Game::ensureFloor(int baseId, int level) { return world_->ensureFloor(baseId, level); }
+
+bool Game::knowsPlace(const std::string& name) const {
+    for (const auto& k : knownPlaces_) if (k.name == name) return true;
+    return false;
 }
 
 bool Game::knowsLore(const std::string& id) const {
@@ -463,20 +543,53 @@ void Game::update(float dt, const PlayerInput& input) {
         playerHurt(atk.severity, atk.by);
     updateSurvivors(animalDt, gameMinutes);
 
-    // Snares: chance of catching a hare each game hour in good habitat
+    updateDryingRacks(gameMinutes);
+
+    // Traps: each game hour a chance of a catch, by habitat
     for (auto& s : world_->snares()) {
         if (s.caught) continue;
         s.minutesSet += gameMinutes;
         Zone z = map_.zoneAt(s.pos.x, s.pos.y);
-        float habitat = (z == Zone::Woodland || z == Zone::Meadow || z == Zone::Field) ? 1.0f
-                      : (z == Zone::Forest || z == Zone::ForestDense || z == Zone::Marsh) ? 0.6f : z == Zone::Thicket ? 0.4f : 0.15f;
-        if (rng_.chance(0.035f * habitat * gameMinutes / 60.0f)) {
-            s.caught = true;
-            if (const AnimalDef* hare = animals_.find("hare")) {
-                Animal& a = animals_.spawn(hare, s.pos, rng_);
-                a.state = AnimalState::Dead;
-                a.hp = 0;
+        float hours = gameMinutes / 60.0f;
+        if (s.kind == TrapKind::FishTrap) {
+            // fills slowly; crayfish mostly in late summer
+            if (s.fish + s.crayfish < 4 && rng_.chance(0.06f * hours)) {
+                int doy = world_->clock().dayOfYear();
+                bool crayfishSeason = doy >= 210 && doy <= 270;
+                if (rng_.chance(crayfishSeason ? 0.45f : 0.15f)) ++s.crayfish;
+                else ++s.fish;
             }
+            continue;
+        }
+        std::string species;
+        if (s.kind == TrapKind::BoxTrap) {
+            bool water = false;
+            for (int k = 0; k < 8 && !water; ++k) {
+                Vec2 q = s.pos + Vec2{std::cos(k * 0.785f), std::sin(k * 0.785f)} * 20.0f;
+                Ground g = world_->tile((int)std::floor(q.x), (int)std::floor(q.y)).ground;
+                water = g == Ground::WaterShallow || g == Ground::WaterDeep;
+            }
+            bool wild = z == Zone::Forest || z == Zone::ForestDense || z == Zone::Woodland || z == Zone::Thicket;
+            float habitat = wild ? 1.0f : (z == Zone::Field || z == Zone::Meadow || z == Zone::Marsh) ? 0.7f : 0.2f;
+            if (!rng_.chance(0.02f * habitat * hours)) continue;
+            float r = rng_.range(0, 1);
+            species = water && r < 0.4f ? "beaver" : wild && r < 0.7f ? "badger" : "fox";
+        } else {
+            float habitat = (z == Zone::Woodland || z == Zone::Meadow || z == Zone::Field) ? 1.0f
+                          : (z == Zone::Forest || z == Zone::ForestDense || z == Zone::Marsh) ? 0.6f : z == Zone::Thicket ? 0.4f : 0.15f;
+            if (!rng_.chance(0.035f * habitat * hours)) continue;
+            // what walks into it depends on where it is
+            float r = rng_.range(0, 1);
+            bool woods = z == Zone::Forest || z == Zone::ForestDense || z == Zone::Thicket;
+            if (woods) species = r < 0.4f ? "hare" : r < 0.75f ? "red_squirrel" : "black_grouse";
+            else if (z == Zone::Woodland) species = r < 0.6f ? "hare" : r < 0.85f ? "red_squirrel" : "black_grouse";
+            else species = r < 0.75f ? "hare" : "black_grouse";
+        }
+        if (const AnimalDef* def = animals_.find(species)) {
+            s.caught = true;
+            Animal& a = animals_.spawn(def, s.pos, rng_);
+            a.state = AnimalState::Dead;
+            a.hp = 0;
         }
     }
 
@@ -690,6 +803,7 @@ void Game::playerHurt(float severity, const AnimalDef* by) {
     Wound w;
     w.part = parts[rng_.rangeInt(0, 8)];
     w.type = by && by->id == "moose" ? WoundType::Laceration : (rng_.chance(0.5f) ? WoundType::Bite : WoundType::Laceration);
+    severity *= 1.0f - armourAt(w.part);
     w.severity = clamp01(severity);
     w.bleeding = 6.0f + 40.0f * severity * severity;
     w.contamination = 0.45f;
@@ -934,8 +1048,37 @@ const std::vector<Game::BuildRecipe>& Game::buildRecipes() {
         {BuildKind::RainCollector, "Rain collector", 1, 2, false, true, false, 6.0f, "A barrel under a tarp funnel. Fills when it rains."},
         {BuildKind::Bed, "Plank bed", 3, 6, false, false, false, 10.0f, "A bed frame off the cold ground."},
         {BuildKind::Fence, "Fence", 1, 2, false, false, false, 4.0f, "A short stretch of fence."},
+        {BuildKind::Shelf, "Wall shelf", 2, 6, true, false, false, 8.0f, "Plank shelves to keep things on. Works indoors too.", 1},
+        {BuildKind::DryingRack, "Drying rack", 2, 4, false, false, false, 8.0f,
+         "Poles to hang meat, fish and mushrooms on. They dry over a few days - or smoke much faster beside a lit fire.", 1, "rope", "rope"},
+        {BuildKind::BoxTrap, "Box trap", 3, 8, true, false, false, 14.0f,
+         "A plank box with a drop door. Catches foxes, badgers and - by the water - beavers. Check it now and then.", 2},
     };
     return r;
+}
+
+int Game::carpentryLevelFor(float xp) {
+    int l = 0;
+    while (l < 5 && xp >= carpentryXpFor(l + 1)) ++l;
+    return l;
+}
+
+float Game::carpentryXpFor(int level) {
+    static const float t[] = {0, 15, 50, 120, 240, 420};
+    return t[std::clamp(level, 0, 5)];
+}
+
+const char* Game::carpentryLevelName(int level) {
+    static const char* n[] = {"Clumsy", "Handy", "Competent", "Skilled", "Expert", "Master"};
+    return n[std::clamp(level, 0, 5)];
+}
+
+void Game::carpentryPractice(float xp) {
+    int before = carpentryLevel();
+    player_.carpentryXp += xp;
+    int now = carpentryLevel();
+    if (now > before)
+        log(std::string("Your carpentry gets better: ") + carpentryLevelName(now) + ". You work faster and waste fewer nails.", MessageKind::Good);
 }
 
 const Game::BuildRecipe* Game::recipe(BuildKind k) {
@@ -950,6 +1093,9 @@ bool Game::canAffordBuild(BuildKind k, std::string* why) const {
     auto no = [&](const std::string& w) { if (why) *why = w; return false; };
     const Inventory& inv = player_.inventory;
     if (r->book && !player_.knowsCarpentry) return no("You don't know how. A carpentry book would teach you");
+    if (carpentryLevel() < r->level)
+        return no(std::string("Your carpentry isn't good enough yet (needs ") + carpentryLevelName(r->level) + ")");
+    if (r->extraTag && player_.inventory.findTag(r->extraTag) < 0) return no(std::string("You need ") + r->extraName);
     if (inv.findTag("hammer") < 0 && inv.findId("hammer") < 0 && inv.findId("sledgehammer") < 0) return no("You need a hammer");
     if (r->saw && inv.findTag("saw") < 0) return no("You need a saw");
     if (r->tarp && inv.findTag("tarp") < 0) return no("You need a tarpaulin");
@@ -959,7 +1105,8 @@ bool Game::canAffordBuild(BuildKind k, std::string* why) const {
         if (it.def->hasTag("nails")) nails += it.usesLeft;
     }
     if (planks < r->planks) return no("You need " + std::to_string(r->planks) + " planks (you have " + std::to_string(planks) + ")");
-    if (nails < r->nails) return no("You need " + std::to_string(r->nails) + " nails (you have " + std::to_string(nails) + ")");
+    int needNails = r->nails * (10 - carpentryLevel()) / 10;   // a good carpenter bends fewer
+    if (nails < needNails) return no("You need " + std::to_string(needNails) + " nails (you have " + std::to_string(nails) + ")");
     return true;
 }
 
@@ -1250,6 +1397,37 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
         out.push_back(o);
     }
 
+    // Stairs: up, down, or (collapsed) a carpentry job
+    if (t.prop == Prop::StairsUp || t.prop == Prop::StairsDown || t.prop == Prop::BrokenStairs) {
+        int level = floorLevelAt((float)tx);
+        ActionOption o;
+        o.x = tx; o.y = ty;
+        o.enabled = near;
+        o.reason = near ? "" : "Too far away";
+        if (t.prop == Prop::BrokenStairs) {
+            o.kind = ActionKind::RepairStairs;
+            o.label = "Repair the stairs (4 planks, 10 nails)";
+            if (near) {
+                int planks = 0, nails = 0;
+                for (const auto& it : player_.inventory.items()) {
+                    if (it.def->hasTag("plank")) ++planks;
+                    if (it.def->hasTag("nails")) nails += it.usesLeft;
+                }
+                bool hammer = player_.inventory.findTag("hammer") >= 0 || player_.inventory.findId("hammer") >= 0;
+                std::string why = carpentryLevel() < 2 ? std::string("Your carpentry isn't good enough yet (needs ") + carpentryLevelName(2) + ")"
+                                : !hammer ? "You need a hammer" : player_.inventory.findTag("saw") < 0 ? "You need a saw"
+                                : planks < 4 ? "You need 4 planks" : nails < 10 ? "You need 10 nails" : "";
+                o.enabled = why.empty();
+                o.reason = why;
+            }
+        } else {
+            bool up = t.prop == Prop::StairsUp;
+            o.kind = ActionKind::UseStairs;
+            o.label = up ? (level < 0 ? "Go up to the ground floor" : "Go upstairs") : (level > 0 ? "Go downstairs" : "Go down to the basement");
+        }
+        out.push_back(o);
+    }
+
     // Windows: smash one, then climb through
     int winX, winY, winDir;
     if (world_->findWindowNear(pt, 0.9f, winX, winY, winDir)) {
@@ -1312,6 +1490,16 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
             f.label = "Fill " + lower(it.def->name) + " from " + sourceName(src);
             f.item = {ItemLoc::Player, 0, 0, 0, it.uid};
             if (it.liquid == 1 && it.liquidMl > 0) { f.enabled = false; f.reason = "It has petrol in it. Pour that out first"; }
+            out.push_back(f);
+        }
+        // a fish trap goes in the shallows
+        bool shallow = world_->tile(wx, wy).ground == Ground::WaterShallow;
+        bool hasTrap = false;
+        for (const auto& s : world_->snares()) hasTrap |= s.kind == TrapKind::FishTrap && distance(s.pos, Vec2{wx + 0.5f, wy + 0.5f}) < 1.5f;
+        if (shallow && !hasTrap && player_.inventory.findTag("fish_trap") >= 0) {
+            ActionOption f = o;
+            f.kind = ActionKind::SetFishTrap;
+            f.label = "Set the fish trap here";
             out.push_back(f);
         }
     }
@@ -1427,15 +1615,24 @@ std::vector<ActionOption> Game::actionsAt(Vec2 pt) {
             if (const Built* b = world_->builtAt(tx, ty, k)) dismantle(*b);
     }
 
-    // Snares
+    // Traps (a box trap is taken apart like anything else you built)
     for (auto& s : world_->snares()) {
-        if (distance(s.pos, pt) > 1.0f) continue;
+        if (distance(s.pos, pt) > 1.0f || s.kind == TrapKind::BoxTrap) continue;
         ActionOption o;
-        o.kind = ActionKind::TakeSnare;
-        o.label = "Take up the snare";
         o.targetId = s.id;
-        o.enabled = distance(s.pos, player_.pos) < 2.2f;
+        o.enabled = distance(s.pos, player_.pos) < 2.6f;
         o.reason = o.enabled ? "" : "Too far away";
+        if (s.kind == TrapKind::FishTrap) {
+            int n = s.fish + s.crayfish;
+            o.kind = ActionKind::EmptyTrap;
+            o.label = n ? "Empty the fish trap (" + std::to_string(n) + (n == 1 ? " catch)" : " catches)") : "Empty the fish trap (nothing yet)";
+            if (n == 0) { o.enabled = false; o.reason = "Nothing in it yet"; }
+            out.push_back(o);
+            o.enabled = distance(s.pos, player_.pos) < 2.6f;
+            o.reason = o.enabled ? "" : "Too far away";
+        }
+        o.kind = ActionKind::TakeSnare;
+        o.label = s.kind == TrapKind::FishTrap ? "Take up the fish trap" : "Take up the snare";
         out.push_back(o);
     }
 
@@ -1550,6 +1747,10 @@ std::vector<ActionOption> Game::actionsForItem(const ItemRef& ref) {
         add(ActionKind::TakePill, "Take one");
     if (mine && d.hasTag("light")) add(ActionKind::Equip, player_.flashlightOn ? "Switch off" : "Switch on", 2);
     if (mine && d.category == ItemCategory::Literature) add(ActionKind::Read, "Read");
+    if (mine && !d.saltsTo.empty() && !it->rotten()) {
+        bool salt = player_.inventory.findTag("salt") >= 0;
+        add(ActionKind::SaltFood, "Salt it (keeps for months)", 1, salt, "You need salt");
+    }
     if (mine) add(ActionKind::Drop, "Drop");
     return out;
 }
@@ -1650,6 +1851,7 @@ void Game::perform(const ActionOption& o) {
             }
             if (it && it->def->hasTag("teaches_carpentry") && !player_.knowsCarpentry) {
                 player_.knowsCarpentry = true;
+                player_.carpentryXp = std::max(player_.carpentryXp, carpentryXpFor(1));   // the basics, at least
                 log("You read about framing, door hanging and roofing. You could build doors, windows and roofs now (B).",
                     MessageKind::Good);
                 return;
@@ -1729,6 +1931,11 @@ void Game::perform(const ActionOption& o) {
         case ActionKind::CookItem: startTimed(o, 10.0f); return;
         case ActionKind::BoilWater: startTimed(o, 12.0f); return;
         case ActionKind::SetSnare: startTimed(o, 6.0f); return;
+        case ActionKind::SetFishTrap: startTimed(o, 8.0f); return;
+        case ActionKind::SaltFood: startTimed(o, 5.0f); return;
+        case ActionKind::UseStairs: startTimed(o, 1.2f); return;
+        case ActionKind::RepairStairs: startTimed(o, 25.0f * (1.0f - 0.09f * carpentryLevel())); return;
+        case ActionKind::EmptyTrap: startTimed(o, 4.0f); return;
         case ActionKind::TakeSnare: startTimed(o, 3.0f); return;
         case ActionKind::Butcher: {
             Animal* a = animals_.find(o.targetId);
@@ -1765,7 +1972,7 @@ void Game::perform(const ActionOption& o) {
             const BuildRecipe* r = recipe((BuildKind)o.targetId);
             ActionOption check = buildOption((BuildKind)o.targetId, o.x, o.y, o.dir);
             if (!r || !check.enabled) { log(check.reason.empty() ? "You can't build that here." : check.reason + "."); return; }
-            startTimed(o, r->seconds);
+            startTimed(o, r->seconds * (1.0f - 0.09f * carpentryLevel()));   // practice makes it quicker
             return;
         }
         case ActionKind::Dismantle: startTimed(o, 6.0f); return;
@@ -2149,10 +2356,107 @@ void Game::finishAction() {
         }
         case ActionKind::TakeSnare: {
             auto& snares = world_->snares();
+            bool fishTrap = false;
             for (size_t i = 0; i < snares.size(); ++i)
-                if (snares[i].id == o.targetId) { snares.erase(snares.begin() + i); break; }
-            giveItem(items_.create("snare_wire", rng_));
-            log("You take up the snare.");
+                if (snares[i].id == o.targetId) {
+                    fishTrap = snares[i].kind == TrapKind::FishTrap;
+                    for (int k = 0; k < snares[i].fish; ++k) giveItem(items_.create("fish_raw", rng_));
+                    for (int k = 0; k < snares[i].crayfish; ++k) giveItem(items_.create("crayfish_raw", rng_));
+                    snares.erase(snares.begin() + i);
+                    break;
+                }
+            giveItem(items_.create(fishTrap ? "fish_trap" : "snare_wire", rng_));
+            log(fishTrap ? "You haul the fish trap out of the water." : "You take up the snare.");
+            break;
+        }
+        case ActionKind::UseStairs: {
+            const Tile& st = world_->tile(o.x, o.y);
+            const Building* here = world_->building(st.building);
+            if (!here || (st.prop != Prop::StairsUp && st.prop != Prop::StairsDown)) break;
+            int from = here->levelOf >= 0 ? here->level : 0;
+            int to = from + (st.prop == Prop::StairsUp ? 1 : -1);
+            int baseId = here->levelOf >= 0 ? here->levelOf : here->id;
+            if (to != 0 && ensureFloor(baseId, to) < 0) { log("The stairs don't lead anywhere you can go."); break; }
+            int dx = floorOffset(to) - floorOffset(from);
+            int sx = o.x + dx, sy = o.y;
+            // step off the stairs at the other end, into the room
+            Vec2 land{sx + 0.5f, sy + 0.5f};
+            static const int nx[4] = {0, 1, 0, -1}, ny[4] = {1, 0, -1, 0};
+            for (int k = 0; k < 4; ++k) {
+                int ax = sx + nx[k], ay = sy + ny[k];
+                if (world_->tileBlocked(ax, ay) || world_->edgeBlocked(sx, sy, nx[k], ny[k])) continue;
+                land = Vec2{ax + 0.5f, ay + 0.5f};
+                break;
+            }
+            Vec2 old = player_.pos;
+            player_.pos = land;
+            // companions close by come too
+            for (auto& s : survivors_)
+                if (s.joined && s.alive() && s.ride < 0 && s.state != SurvivorState::Wait && distance(s.pos, old) < 10) {
+                    s.pos = land + Vec2{rng_.range(-0.4f, 0.4f), rng_.range(-0.4f, 0.4f)};
+                    if (world_->tileBlocked((int)std::floor(s.pos.x), (int)std::floor(s.pos.y))) s.pos = land;
+                    s.vel = {};
+                    s.path.clear();
+                    s.nav.clear();
+                }
+            sound(Sfx::Door, player_.pos);
+            log(to > from ? (to > 0 ? "You climb the stairs." : "You climb back up to the ground floor.")
+                          : (to < 0 ? "You go down into the basement. It smells of damp and old potatoes." : "You go back downstairs."));
+            break;
+        }
+        case ActionKind::RepairStairs: {
+            if (world_->tile(o.x, o.y).prop != Prop::BrokenStairs) break;
+            int planks = 4, nails = 10;
+            for (int i = (int)player_.inventory.size() - 1; i >= 0 && planks > 0; --i)
+                if (player_.inventory.items()[i].def->hasTag("plank")) { player_.inventory.take(i); --planks; }
+            for (int i = (int)player_.inventory.size() - 1; i >= 0 && nails > 0; --i) {
+                ItemInstance& n = player_.inventory.items()[i];
+                if (!n.def->hasTag("nails")) continue;
+                int use = std::min(nails, n.usesLeft);
+                n.usesLeft -= use;
+                nails -= use;
+                if (n.usesLeft <= 0) player_.inventory.take(i);
+            }
+            world_->setProp(o.x, o.y, Prop::StairsUp);
+            sound(Sfx::Chop, player_.pos);
+            log("You rebuild the stairs, tread by tread. They'll hold.", MessageKind::Good);
+            carpentryPractice(15.0f);
+            break;
+        }
+        case ActionKind::SaltFood: {
+            int si = player_.inventory.findTag("salt");
+            if (!it || si < 0 || it->def->saltsTo.empty()) break;
+            ItemInstance raw = *it;
+            ItemInstance& salt = player_.inventory.items()[(size_t)si];
+            if (--salt.usesLeft <= 0) player_.inventory.take(si);
+            takeItem(o.item);
+            auto out = preserve(raw, raw.def->saltsTo);
+            for (auto& p : out) giveItem(p);
+            if (!out.empty()) log("You rub salt into the " + lower(raw.def->name) + " and pack it down: " + lower(out[0].def->name) + ".", MessageKind::Good);
+            break;
+        }
+        case ActionKind::SetFishTrap: {
+            int t = player_.inventory.findTag("fish_trap");
+            if (t < 0) break;
+            player_.inventory.take(t);
+            Snare s;
+            s.kind = TrapKind::FishTrap;
+            s.pos = Vec2{o.x + 0.5f, o.y + 0.5f};
+            s.id = world_->newId();
+            world_->snares().push_back(s);
+            log("You weigh the fish trap down in the shallows. Empty it now and then.");
+            break;
+        }
+        case ActionKind::EmptyTrap: {
+            for (auto& s : world_->snares()) {
+                if (s.id != o.targetId) continue;
+                for (int k = 0; k < s.fish; ++k) giveItem(items_.create("fish_raw", rng_));
+                for (int k = 0; k < s.crayfish; ++k) giveItem(items_.create("crayfish_raw", rng_));
+                std::string got = s.fish && s.crayfish ? "fish and crayfish" : s.fish ? (s.fish == 1 ? "a fish" : "fish") : "crayfish";
+                log("You empty the fish trap: " + got + ".", MessageKind::Good);
+                s.fish = s.crayfish = 0;
+                s.minutesSet = 0;
+            }
             break;
         }
         case ActionKind::Butcher: {
@@ -2350,6 +2654,7 @@ void Game::finishAction() {
             for (int i = 0; i < 3; ++i) giveItem(items_.create("plank", rng_));
             sound(Sfx::Chop, player_.pos);
             log("You saw the log into three planks.", MessageKind::Good);
+            carpentryPractice(1.5f);
             break;
         }
         case ActionKind::SplitLog: {
@@ -2387,7 +2692,7 @@ void Game::finishAction() {
             ActionOption check = buildOption(k, o.x, o.y, o.dir);
             if (!r || !check.enabled) { log(check.reason + "."); break; }
             // use the materials
-            int planks = r->planks, nails = r->nails;
+            int planks = r->planks, nails = r->nails * (10 - carpentryLevel()) / 10;
             for (int i = (int)player_.inventory.size() - 1; i >= 0 && planks > 0; --i)
                 if (player_.inventory.items()[i].def->hasTag("plank")) { player_.inventory.take(i); --planks; }
             for (int i = (int)player_.inventory.size() - 1; i >= 0 && nails > 0; --i) {
@@ -2399,7 +2704,19 @@ void Game::finishAction() {
                 if (n.usesLeft <= 0) player_.inventory.take(i);
             }
             if (r->tarp) player_.inventory.take(player_.inventory.findTag("tarp"));
+            if (r->extraTag) {
+                int e = player_.inventory.findTag(r->extraTag);
+                if (e >= 0) player_.inventory.take(e);
+            }
             world_->addBuild(Built{k, o.x, o.y, o.dir});
+            if (k == BuildKind::BoxTrap) {   // it works as a trap from now on
+                Snare s;
+                s.kind = TrapKind::BoxTrap;
+                s.pos = Vec2{o.x + 0.5f, o.y + 0.5f};
+                s.id = world_->newId();
+                world_->snares().push_back(s);
+            }
+            carpentryPractice(2.0f + r->planks * 1.5f + r->level * 2.0f);
             sound(Sfx::Chop, player_.pos);
             log(std::string("You finish the ") + buildKindName(k) + ".", MessageKind::Good);
             break;
@@ -2412,6 +2729,15 @@ void Game::finishAction() {
                 world_->container(b.x, b.y).items.clear();
             }
             if (!world_->removeBuild(b)) break;
+            if (b.kind == BuildKind::BoxTrap) {
+                auto& sn = world_->snares();
+                Vec2 c{b.x + 0.5f, b.y + 0.5f};
+                sn.erase(std::remove_if(sn.begin(), sn.end(), [&](const Snare& s) { return s.kind == TrapKind::BoxTrap && distance(s.pos, c) < 0.5f; }), sn.end());
+            }
+            if (b.kind == BuildKind::DryingRack || b.kind == BuildKind::Shelf) {   // tip out what was on it
+                for (auto& item : world_->container(b.x, b.y).items) world_->dropItem(Vec2{b.x + 0.5f, b.y + 0.5f}, item);
+                world_->container(b.x, b.y).items.clear();
+            }
             int back = r ? (r->planks + 1) / 2 : 1;
             for (int i = 0; i < back; ++i) world_->dropItem(player_.pos, items_.create("plank", rng_));
             sound(Sfx::Chop, player_.pos);

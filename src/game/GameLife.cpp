@@ -18,7 +18,7 @@ std::string firstNameOf(const SurvivorDef& d) {
 }
 
 bool isHomeType(BuildingType t) {
-    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse;
+    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse || t == BuildingType::SummerCottage;
 }
 
 // The wall edge between a tile and its 4-neighbour: where it is, and what's there

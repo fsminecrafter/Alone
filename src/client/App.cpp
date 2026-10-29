@@ -285,6 +285,9 @@ void App::frame() {
             {0, 0, 0, "screenshot_camp.png", Overlay::None},
             {1086.6f, 322.1f, 11, "screenshot_hjortmarka.png", Overlay::None},
             {1081.0f, 317.0f, 13, "screenshot_bunker.png", Overlay::None},
+            {1120.0f, 604.0f, 13, "screenshot_container.png", Overlay::None},
+            {0, 0, 0, "screenshot_upstairs.png", Overlay::None},
+            {0, 0, 0, "screenshot_basement.png", Overlay::None},
             {0, 0, 0, "screenshot_settings_audio.png", Overlay::Settings},
             {0, 0, 0, "screenshot_settings_graphics.png", Overlay::Settings},
             {0, 0, 0, "screenshot_symptoms.png", Overlay::None},
@@ -599,6 +602,32 @@ void App::frame() {
                 renderer_.snapTo(game_.player().pos);
                 openTalk(elin->id);
                 talkLine_ = game_.talk(elin->id, Topic::Chat);
+            }
+            if ((file == "screenshot_upstairs.png" || file == "screenshot_basement.png") && sub == 0) {
+                // up (or down) the stairs of the nearest house that has them
+                int dir = file == "screenshot_upstairs.png" ? 1 : -1;
+                if (const Building* home = game_.world().gen().findStartHouse(game_.map().spawn())) game_.player().pos = home->doorPos;
+                Vec2 c = game_.player().pos;
+                const Building* best = nullptr;
+                for (int id : game_.world().gen().buildingsIn(IRect{(int)c.x - 300, (int)c.y - 300, 600, 600})) {
+                    const Building* b = game_.world().building(id);
+                    if (!b || b->levelOf >= 0) continue;
+                    for (const auto& s : b->stairs)
+                        if (s.dir == dir && game_.world().tile(s.x, s.y).prop != Prop::BrokenStairs &&
+                            (!best || distance(b->rect.centre(), c) < distance(best->rect.centre(), c))) best = b;
+                }
+                if (best)
+                    for (const auto& s : best->stairs) {
+                        if (s.dir != dir) continue;
+                        ActionOption o;
+                        o.kind = ActionKind::UseStairs;
+                        o.x = s.x; o.y = s.y;
+                        game_.player().pos = Vec2{s.x + 0.5f, s.y + 1.5f};
+                        game_.perform(o);
+                        for (int i = 0; i < 100 && game_.currentAction().active; ++i) game_.update(0.05f, PlayerInput{});
+                        renderer_.snapTo(game_.player().pos);
+                        break;
+                    }
             }
             if (file == "screenshot_journal_lore.png" && sub == 0) {
                 for (const char* id : {"un_meeting", "the_breach", "the_tests", "the_farm"}) game_.learnLore(id, false);
@@ -1718,7 +1747,7 @@ void App::drawMinimap() {
     const MapData& m = game_.map();
     const float radius = 110.0f;                  // metres from the centre to the edge
     float k = (in.width * 0.5f) / radius;         // screen pixels per metre
-    Vec2 pp = game_.player().pos;
+    Vec2 pp = surfacePos(game_.player().pos);   // upstairs / in a basement: where the building is
     float yaw = renderer_.yaw();
     Vec2 right{std::cos(yaw), -std::sin(yaw)}, fwd{-std::sin(yaw), -std::cos(yaw)};
     Vector2 c{in.x + in.width / 2, in.y + in.height / 2};
@@ -1761,14 +1790,21 @@ void App::drawMinimap() {
         DrawRectangleRounded({vp.x - 4 * s, vp.y - 3 * s, 8 * s, 6 * s}, 0.4f, 4, Color{60, 60, 70, 255});
     }
     for (const auto& sv : game_.survivors()) {
-        if (!sv.alive() || !near(sv.pos)) continue;
+        if (!sv.alive() || !near(surfacePos(sv.pos))) continue;
         bool see = sv.joined || (sv.met && distance(sv.pos, pp) < 40.0f);
         if (!see) continue;
         bool bad = sv.hostileTo() || sv.def->disposition == Disposition::Raider;
         Color col = bad ? Color{190, 50, 40, 255} : sv.joined ? Color{60, 140, 200, 255} : Color{50, 140, 70, 255};
-        Vector2 sp = toScreen(sv.pos);
+        Vector2 sp = toScreen(surfacePos(sv.pos));
         DrawCircleV(sp, 4 * s, Color{250, 248, 240, 255});
         DrawCircleV(sp, 3 * s, col);
+    }
+    // places people told you about
+    for (const auto& kp : game_.knownPlaces()) {
+        if (!near(kp.pos)) continue;
+        Vector2 sp = toScreen(kp.pos);
+        DrawPoly(sp, 4, 6 * s, 45, Color{250, 248, 240, 255});
+        DrawPoly(sp, 4, 4.5f * s, 45, Color{90, 110, 60, 255});
     }
     // you: an arrow the way you face
     {
@@ -2388,7 +2424,7 @@ void App::drawMap() {
     for (const auto& sv : game_.survivors()) {
         if (!sv.known && !sv.joined) continue;
         bool roams = sv.def->disposition == Disposition::Raider;
-        Vec2 at = sv.joined ? sv.pos : roams ? sv.rumourPos : sv.met ? sv.pos : sv.rumoured ? sv.rumourPos : sv.home;
+        Vec2 at = sv.joined ? surfacePos(sv.pos) : roams ? sv.rumourPos : sv.met ? surfacePos(sv.pos) : sv.rumoured ? sv.rumourPos : sv.home;
         if (!sv.alive()) at = sv.pos;
         Vector2 sp = toScreen(at.x / mpp, at.y / mpp);
         bool bad = sv.hostileTo() || sv.def->disposition == Disposition::Hostile || sv.def->disposition == Disposition::Raider;
@@ -2417,8 +2453,17 @@ void App::drawMap() {
         bool ring = !((sv.met && !roams) || sv.joined || !sv.alive());
         ui::text(label, sp.x + (ring ? 20 : 9) * s, ly, 14 * s, c, true);
     }
+    // Places people told you about
+    for (const auto& kp : game_.knownPlaces()) {
+        Vector2 sp = toScreen(kp.pos.x / mpp, kp.pos.y / mpp);
+        float r = 9 * s;
+        DrawPoly(sp, 4, r + 2 * s, 45, Color{250, 248, 240, 255});
+        DrawPoly(sp, 4, r, 45, Color{90, 110, 60, 255});
+        ui::text(kp.name, sp.x + r + 6 * s, sp.y - 8 * s, 14 * s, Color{60, 80, 40, 255}, true);
+        if (CheckCollisionPointCircle(GetMousePosition(), sp, r + 4 * s)) ui::tooltip(kp.name, "Someone told you where this is.");
+    }
     // You are here
-    Vec2 pp = game_.player().pos;
+    Vec2 pp = surfacePos(game_.player().pos);   // upstairs / in a basement: where the building is
     Vector2 ps = toScreen(pp.x / mpp, pp.y / mpp);
     float f = game_.player().facing;
     DrawCircleV(ps, 7 * s, Color{200, 40, 40, 255});

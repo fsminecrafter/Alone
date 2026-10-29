@@ -47,6 +47,12 @@ enum class ActionKind {
     Siphon, FillFromPump,
     // weapons
     Reload, Stow,
+    // trapping
+    SetFishTrap, EmptyTrap,
+    // preserving
+    SaltFood,
+    // floors
+    UseStairs, RepairStairs,
     // windows
     BreakWindow, ClimbWindow,
 };
@@ -124,6 +130,7 @@ struct Player {
     bool moving = false, running = false, sneaking = false, asleep = false;
     bool aiming = false;          // holding Ctrl: facing and aiming at the cursor
     bool knowsCarpentry = false;  // read a carpentry book: doors, windows, roofs
+    float carpentryXp = 0;        // practice: see Game::carpentryLevel
     bool knowsHotwire = false;    // someone showed you how to start a car without the key
     bool knowsMushroomsTaught = false;
     int vehicle = -1;             // id of the bike or car you're on/in, -1 on foot
@@ -154,6 +161,12 @@ struct SleepComfort {
 struct LoreEntry {
     std::string id, title, text;
     int order = 0;
+};
+
+// A place someone told you about, marked on the map
+struct KnownPlace {
+    std::string name;
+    Vec2 pos;
 };
 
 struct DeathInfo {
@@ -217,6 +230,8 @@ public:
     std::string romanceHint(int id);
     // In a tent with a companion: who (0 if nobody)
     int tentMate() const { return tentMate_; }
+    const std::vector<KnownPlace>& knownPlaces() const { return knownPlaces_; }
+    bool knowsPlace(const std::string& name) const;
     // What happened to the world: entries in story order, and the ones you know
     const std::vector<LoreEntry>& lore() const { return lore_; }
     bool knowsLore(const std::string& id) const;
@@ -226,6 +241,7 @@ public:
     static int carSeats(const Vehicle& v) { return ((v.variant >> 4) % 4) == 3 ? 7 : 5; }   // a van seats seven
     // Weapons: the one on your back, swapping (key 1), reloading (R)
     const ItemInstance* stowedWeapon() const;
+    float armourAt(BodyPart part) const;           // what your helmet / body armour takes off a hit there
     void toggleStow();
     int ammoCarried(const ItemDef* gun) const;    // rounds for this gun in your bags
     bool canReload() const;                        // holding a gun that isn't full, with rounds for it
@@ -277,7 +293,23 @@ public:
         bool saw, tarp, book;
         float seconds;
         const char* description;
+        int level = 0;                 // carpentry level needed (see carpentryLevel)
+        const char* extraTag = nullptr;   // one more thing it uses up (an item tag), e.g. rope
+        const char* extraName = nullptr;
     };
+    // Carpentry skill: 0 Clumsy .. 5 Master. Building, sawing and repairs teach it.
+    static int carpentryLevelFor(float xp);
+    static float carpentryXpFor(int level);
+    static const char* carpentryLevelName(int level);
+    int carpentryLevel() const { return carpentryLevelFor(player_.carpentryXp); }
+    void carpentryPractice(float xp);
+    // What a raw food becomes when dried/smoked/salted: several pieces, as
+    // much as is left of it once the water's gone
+    std::vector<ItemInstance> preserve(const ItemInstance& raw, const std::string& productId);
+    void updateDryingRacks(float gameMinutes);
+    // Upper floors and basements: the floor made (if needed), the way there
+    int ensureFloor(int baseId, int level);
+    int floorLevel() const { return floorLevelAt(player_.pos.x); }
     static const std::vector<BuildRecipe>& buildRecipes();
     static const BuildRecipe* recipe(BuildKind k);
     bool canAffordBuild(BuildKind k, std::string* why) const;
@@ -391,6 +423,7 @@ private:
     int tentMate_ = 0;
     std::vector<LoreEntry> lore_;
     std::vector<std::string> loreKnown_;
+    std::vector<KnownPlace> knownPlaces_;
     std::string loreOpened_;               // the companion who crawled into the tent with you (survivor id)
     double sleepStartMin_ = -1;
     float sleepComfortSum_ = 0, sleepMinutes_ = 0;

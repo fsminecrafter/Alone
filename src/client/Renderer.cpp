@@ -298,6 +298,7 @@ void Renderer::faceTowards(Vec2 dir) {
 }
 
 void Renderer::follow(Vec2 target, float dt) {
+    if (distance(target, target_) > 60.0f) { snapTo(target); return; }   // stairs to another floor, a long jump: cut
     float k = std::min(1.0f, dt * 8.0f);
     target_ = target_ + (target - target_) * k;
     yaw_ += (yawTarget_ - yaw_) * std::min(1.0f, dt * 10.0f);
@@ -329,7 +330,9 @@ Vec2 Renderer::pickGround(Vector2 mouse) {
         if (i > 0 && distance(p, q) < 0.02f) { p = q; break; }
         p = q;
         if (!world_) break;
-        h = world_->standHeight(p);
+        // around an upper floor or a basement there's nothing: treat it as level with the floor you're on
+        if (floorLevelAt(p.x) != 0 && world_->tile((int)std::floor(p.x), (int)std::floor(p.y)).ground == Ground::Void) h = targetY_;
+        else h = world_->standHeight(p);
     }
     return p;
 }
@@ -1014,7 +1017,7 @@ void Renderer::draw(Game& game, float time, float dt, const HoverInfo& hover) {
     }
     if (scaled && sceneRT_.id) BeginTextureMode(sceneRT_);
     else scaled = false;
-    ClearBackground(skyColor_);
+    ClearBackground(floorLevelAt(playerPos_.x) != 0 ? Color{12, 12, 14, 255} : skyColor_);   // upstairs / in a basement: nothing outside
     BeginMode3D(cam_);
     drawScene(game, time);
     sync();

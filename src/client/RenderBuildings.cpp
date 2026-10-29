@@ -17,7 +17,7 @@ bool isBrick(uint32_t c) {
 }
 
 bool isHome(BuildingType t) {
-    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse || t == BuildingType::Manor;
+    return t == BuildingType::House || t == BuildingType::Cottage || t == BuildingType::Farmhouse || t == BuildingType::SummerCottage || t == BuildingType::Manor;
 }
 
 } // namespace
@@ -42,6 +42,7 @@ void Renderer::buildBuilding(World& world, const Building& b, BuildingGfx& g) {
     int extMat = wooden ? MSiding : isBrick(b.wallColour) ? MBrick : MPlaster;
     if (b.type == BuildingType::Mall && b.sign == "Vimpeln") extMat = MCladding;
     if (b.type == BuildingType::Bunker) { extMat = MConcrete; inner = hexColor(0xa9aba4); }   // bare cast concrete, in and out
+    if (b.type == BuildingType::MilitaryContainer) { extMat = MMetal; inner = hexColor(0x6a7258); }   // corrugated steel
     float extParam = (b.type == BuildingType::Barn || b.type == BuildingType::Shed) ? 1.0f : 0.0f;
     const IRect& R = b.rect;
 

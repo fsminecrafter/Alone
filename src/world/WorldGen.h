@@ -21,6 +21,11 @@ public:
     const std::vector<Building>& allBuildings() const { return buildings_; }
     // Find a house to start in near a point (map spawn).
     const Building* findStartHouse(Vec2 near);
+    // The floor above (+1) or the basement (-1) of a building, made the first
+    // time someone takes the stairs (-1 if it has none)
+    int levelBuilding(int baseId, int level);
+    // (baseId, level) of every floor made so far, to make them again after loading
+    std::vector<std::pair<int, int>> madeLevels() const;
 
     uint32_t seed() const { return seed_; }
     const MapData& map() const { return map_; }
@@ -55,6 +60,8 @@ private:
     const MapData& map_;
     uint32_t seed_;
     std::vector<Building> buildings_;
+    std::unordered_map<int64_t, int> levels_;     // baseId*4 + level+1 -> building id
+    std::vector<int> levelIds_;
     std::unordered_map<int64_t, int> lotDone_;   // lot -> 1 when generated
     std::vector<IRect> reserved_;                // landmark footprints
     std::vector<IRect> denseRects_;              // old-town buildings placed along streets

@@ -4,7 +4,7 @@
 namespace alone {
 
 bool groundWalkable(Ground g) {
-    return g != Ground::WaterDeep;
+    return g != Ground::WaterDeep && g != Ground::Void;
 }
 
 bool isTree(Prop p) {
@@ -12,7 +12,7 @@ bool isTree(Prop p) {
 }
 
 bool isFurniture(Prop p) {
-    return p >= Prop::Fridge && p < Prop::Bike;   // (bikes and pumps stand outside)
+    return (p >= Prop::Fridge && p < Prop::Bike) || (p >= Prop::WoodShelf && p != Prop::BoxTrap);   // (bikes and pumps stand outside)
 }
 
 bool propBlocks(Prop p) {
@@ -28,6 +28,8 @@ bool propBlocks(Prop p) {
 
 float propHeight(Prop p) {
     switch (p) {
+        case Prop::WoodShelf: return 1.8f; case Prop::DryingRack: return 1.6f; case Prop::StairsUp: return 2.4f;
+        case Prop::StairsDown: return 0.3f; case Prop::BrokenStairs: return 1.0f; case Prop::BoxTrap: return 0.5f;
         case Prop::Spruce: return 14; case Prop::Pine: return 16; case Prop::Birch: return 12;
         case Prop::Oak: return 11; case Prop::Maple: return 10; case Prop::Rowan: return 7;
         case Prop::Shrub: return 1.2f; case Prop::Hedge: return 1.4f; case Prop::LingonBush: return 0.2f;
@@ -60,6 +62,7 @@ const char* propName(Prop p) {
         "Bookshelf", "Toilet", "Bathtub", "Bathroom cabinet", "Shelf", "Cooler", "Checkout", "Desk", "Locker",
         "Pew", "Medical cabinet", "Gun cabinet", "Workbench", "Altar", "Hospital bed",
         "Bicycle", "Fuel pump",
+        "Wall shelf", "Drying rack", "Stairs", "Stairs down", "Collapsed stairs", "Box trap",
     };
     static_assert(sizeof(names) / sizeof(names[0]) == (std::size_t)Prop::Count, "prop names out of sync");
     return names[(int)p];
@@ -82,6 +85,8 @@ const char* propContainer(Prop p) {
         case Prop::Woodpile: return "woodpile";
         case Prop::Bin: return "rubbish_bin";
         case Prop::Crate: return "crate";
+        case Prop::WoodShelf: return "crate";
+        case Prop::DryingRack: return "drying_rack";
         default: return nullptr;
     }
 }

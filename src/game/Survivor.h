@@ -71,6 +71,10 @@ struct SurvivorDef {
     // "What happened?": their side of the story, one piece at a time as they
     // trust you; each piece can add a lore entry to your journal
     std::vector<std::string> happened, happenedLore;
+    // A place they tell you about once they trust you (marked on your map)
+    std::string reveal;                // place spec, as for home
+    std::string revealName, revealText;
+    int revealTrust = 30;
     // Who they tell you about once they trust you a little
     std::vector<std::string> leads;
     std::string leadText;
